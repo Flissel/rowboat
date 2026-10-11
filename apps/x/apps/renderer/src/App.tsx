@@ -27,7 +27,8 @@ import { queuedMessageText } from './components/chat-session';
 // Value import: the Home to-do surface mounts a standalone composer directly
 // (not tab-bound); chat tabs render theirs through ChatSessionComposer.
 import { ChatInputWithMentions, type CallPreset, type PermissionMode, type StagedAttachment, type ModelSelection } from './components/chat-input-with-mentions';
-import { GraphView, type GraphEdge, type GraphNode } from '@/components/graph-view';
+import { type GraphEdge, type GraphNode } from '@/components/graph-view';
+import { KnowledgeGraph } from '@/components/knowledge-graph';
 import { BasesView, type BaseConfig, DEFAULT_BASE_CONFIG } from '@/components/bases-view';
 import { PersistentViewerCache } from '@/components/persistent-viewer-cache';
 import { getViewerType, isCacheableViewerPath } from '@/lib/file-types';
@@ -7717,7 +7718,7 @@ function App() {
                     mode={knowledgeViewMode}
                     onModeChange={setKnowledgeViewMode}
                     graphContent={(
-                      <GraphView
+                      <KnowledgeGraph
                         nodes={graphData.nodes}
                         edges={graphData.edges}
                         isLoading={false}
@@ -7808,7 +7809,7 @@ function App() {
               )}
               {activeMiddle === 'graph' && (
                 <div className="flex-1 min-h-0">
-                  <GraphView
+                  <KnowledgeGraph
                     nodes={graphData.nodes}
                     edges={graphData.edges}
                     isLoading={false}
