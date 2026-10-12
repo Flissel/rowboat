@@ -45,3 +45,94 @@ export function parseHierarchy(content: string): Hierarchy {
   }
   return result
 }
+
+export type ForceParams = { ringSpacing: number; ringStrength: number; angleStrength: number }
+export const DEFAULT_FORCES: ForceParams = { ringSpacing: 140, ringStrength: 0.02, angleStrength: 0.015 }
+export type LevelNode = { id: string; level?: number; parentId?: string }
+type Point = { x: number; y: number }
+
+/** Extra force per node with a level: toward its ring (radius level × spacing around 0,0) and, along the
+ * ring, toward its parent's angle. Nodes without a level get no entry. */
+export function hierarchyForces(
+  nodes: LevelNode[],
+  positions: Map<string, Point>,
+  params: ForceParams = DEFAULT_FORCES,
+): Map<string, Point> {
+  const forces = new Map<string, Point>()
+  for (const node of nodes) {
+    if (node.level === undefined) continue
+    const pos = positions.get(node.id)
+    if (!pos) continue
+    const force = { x: 0, y: 0 }
+    const radius = Math.hypot(pos.x, pos.y)
+    const target = node.level * params.ringSpacing
+    if (radius > 1e-6) {
+      const pull = (target - radius) * params.ringStrength
+      force.x += (pos.x / radius) * pull
+      force.y += (pos.y / radius) * pull
+    } else if (target > 0) {
+      force.x += target * params.ringStrength
+    }
+    const parent = node.parentId ? positions.get(node.parentId) : undefined
+    if (parent && radius > 1e-6 && Math.hypot(parent.x, parent.y) > 1e-6) {
+      const own = Math.atan2(pos.y, pos.x)
+      const wanted = Math.atan2(parent.y, parent.x)
+      const delta = Math.atan2(Math.sin(wanted - own), Math.cos(wanted - own))
+      const push = delta * radius * params.angleStrength
+      force.x += -Math.sin(own) * push
+      force.y += Math.cos(own) * push
+    }
+    forces.set(node.id, force)
+  }
+  return forces
+}
+
+/** Start positions: every node with a level on its ring, each subtree inside its parent's angular sector
+ * (sector size ∝ subtree size). Roots share the full circle. Cycles are cut. */
+export function initialHierarchyPositions(
+  nodes: LevelNode[],
+  ringSpacing: number = DEFAULT_FORCES.ringSpacing,
+): Map<string, Point> {
+  const leveled = nodes.filter((n) => n.level !== undefined).sort((a, b) => a.id.localeCompare(b.id))
+  const byId = new Map(leveled.map((n) => [n.id, n]))
+  const children = new Map<string, string[]>()
+  const roots: string[] = []
+  for (const node of leveled) {
+    if (node.parentId && byId.has(node.parentId)) {
+      const list = children.get(node.parentId) ?? []
+      list.push(node.id)
+      children.set(node.parentId, list)
+    } else {
+      roots.push(node.id)
+    }
+  }
+  const sizes = new Map<string, number>()
+  const sizeOf = (id: string, seen: Set<string>): number => {
+    const known = sizes.get(id)
+    if (known !== undefined) return known
+    if (seen.has(id)) return 1
+    seen.add(id)
+    const size = 1 + (children.get(id) ?? []).reduce((sum, child) => sum + sizeOf(child, seen), 0)
+    sizes.set(id, size)
+    return size
+  }
+  const out = new Map<string, Point>()
+  const place = (ids: string[], start: number, span: number) => {
+    const fresh = ids.filter((id) => !out.has(id))
+    const total = fresh.reduce((sum, id) => sum + sizeOf(id, new Set()), 0)
+    let angle = start
+    for (const id of fresh) {
+      const share = (span * sizeOf(id, new Set())) / total
+      const mid = angle + share / 2
+      const radius = (byId.get(id)?.level ?? 0) * ringSpacing
+      out.set(id, { x: radius * Math.cos(mid), y: radius * Math.sin(mid) })
+      place(children.get(id) ?? [], angle, share)
+      angle += share
+    }
+  }
+  place(roots, 0, Math.PI * 2)
+  for (const node of leveled) {
+    if (!out.has(node.id)) place([node.id], 0, Math.PI * 2)
+  }
+  return out
+}
