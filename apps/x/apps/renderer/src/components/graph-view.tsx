@@ -3,6 +3,7 @@ import type * as React from 'react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Search, X } from 'lucide-react'
 import { Input } from '@/components/ui/input'
+import { DEFAULT_FORCES, hierarchyForces, initialHierarchyPositions } from '@/lib/graph-hierarchy'
 
 export type GraphNode = {
   id: string
@@ -121,6 +122,13 @@ export function GraphView({ nodes, edges, error, onSelectNode }: GraphViewProps)
     return centers
   }, [nodes])
 
+  const hierarchyMode = useMemo(() => nodes.some((node) => node.level !== undefined), [nodes])
+  const ringRadii = useMemo(() => {
+    if (!hierarchyMode) return []
+    const levels = new Set(nodes.map((node) => node.level).filter((level): level is number => level !== undefined && level > 0))
+    return Array.from(levels).sort((a, b) => a - b).map((level) => level * DEFAULT_FORCES.ringSpacing)
+  }, [nodes, hierarchyMode])
+
   const getMotionSeed = useCallback((id: string) => {
     const existing = motionSeedsRef.current.get(id)
     if (existing) return existing
@@ -186,6 +194,7 @@ export function GraphView({ nodes, edges, error, onSelectNode }: GraphViewProps)
     const nextPositions = new Map<string, NodePosition>()
     const count = nodes.length
     const radius = Math.max(110, Math.min(220, count * 9))
+    const ringStart = hierarchyMode ? initialHierarchyPositions(nodes) : new Map<string, { x: number; y: number }>()
 
     nodes.forEach((node, index) => {
       const existing = positionsRef.current.get(node.id)
@@ -193,10 +202,11 @@ export function GraphView({ nodes, edges, error, onSelectNode }: GraphViewProps)
         nextPositions.set(node.id, { ...existing })
         return
       }
+      const start = ringStart.get(node.id)
       const angle = (index / count) * Math.PI * 2
       nextPositions.set(node.id, {
-        x: radius * Math.cos(angle),
-        y: radius * Math.sin(angle),
+        x: start ? start.x : radius * Math.cos(angle),
+        y: start ? start.y : radius * Math.sin(angle),
         vx: 0,
         vy: 0,
       })
@@ -214,6 +224,7 @@ export function GraphView({ nodes, edges, error, onSelectNode }: GraphViewProps)
 
       const positions = positionsRef.current
       const ids = nodes.map((node) => node.id)
+      const leveled = hierarchyMode ? new Set(nodes.filter((node) => node.level !== undefined).map((node) => node.id)) : null
       const forces = new Map<string, { x: number; y: number }>()
 
       ids.forEach((id) => forces.set(id, { x: 0, y: 0 }))
@@ -252,7 +263,8 @@ export function GraphView({ nodes, edges, error, onSelectNode }: GraphViewProps)
         const dx = posB.x - posA.x
         const dy = posB.y - posA.y
         const distance = Math.max(20, Math.hypot(dx, dy))
-        const delta = distance - SPRING_LENGTH
+        const springLength = hierarchyMode && edge.kind === 'parent' ? DEFAULT_FORCES.ringSpacing : SPRING_LENGTH
+        const delta = distance - springLength
         const force = delta * SPRING_STRENGTH
         const fx = (force * dx) / distance
         const fy = (force * dy) / distance
@@ -272,6 +284,7 @@ export function GraphView({ nodes, edges, error, onSelectNode }: GraphViewProps)
         const pos = positions.get(id)
         const force = forces.get(id)
         if (!pos || !force) return
+        if (leveled?.has(id)) return
         const group = nodeGroupMap.get(id) ?? 'root'
         const center = groupCenters.get(group)
         if (!center) return
@@ -280,6 +293,15 @@ export function GraphView({ nodes, edges, error, onSelectNode }: GraphViewProps)
         force.x += dx * CLUSTER_STRENGTH
         force.y += dy * CLUSTER_STRENGTH
       })
+
+      if (hierarchyMode) {
+        hierarchyForces(nodes, positions).forEach((extra, id) => {
+          const force = forces.get(id)
+          if (!force) return
+          force.x += extra.x
+          force.y += extra.y
+        })
+      }
 
       ids.forEach((id) => {
         const pos = positions.get(id)
@@ -308,7 +330,7 @@ export function GraphView({ nodes, edges, error, onSelectNode }: GraphViewProps)
       active = false
       if (rafId) cancelAnimationFrame(rafId)
     }
-  }, [nodes, edgeList, groupCenters, nodeGroupMap])
+  }, [nodes, edgeList, groupCenters, nodeGroupMap, hierarchyMode])
 
   useEffect(() => {
     if (nodes.length === 0) return
@@ -537,6 +559,9 @@ export function GraphView({ nodes, edges, error, onSelectNode }: GraphViewProps)
           ))}
         </defs>
         <g transform={`translate(${pan.x} ${pan.y}) scale(${zoom})`}>
+          {ringRadii.map((r) => (
+            <circle key={`ring-${r}`} cx={0} cy={0} r={r} fill="none" stroke="#888" strokeOpacity={0.12} strokeWidth={1} />
+          ))}
           {edgeList.map((edge, index) => {
             const source = displayPositions.get(edge.source)
             const target = displayPositions.get(edge.target)
@@ -552,7 +577,7 @@ export function GraphView({ nodes, edges, error, onSelectNode }: GraphViewProps)
             const isGroupEdge = selectedGroup
               ? sourceGroup === selectedGroup && targetGroup === selectedGroup
               : false
-            let strokeOpacity = 0.4
+            let strokeOpacity = edge.kind === 'link' ? 0.12 : edge.kind === 'relation' ? 0.45 : edge.kind === 'parent' ? 0.5 : 0.4
             let strokeWidth = 1
             if (selectedGroup) {
               strokeOpacity = isGroupEdge ? 0.6 : 0.05
@@ -578,8 +603,11 @@ export function GraphView({ nodes, edges, error, onSelectNode }: GraphViewProps)
                 stroke={stroke}
                 strokeOpacity={strokeOpacity}
                 strokeWidth={strokeWidth}
+                strokeDasharray={edge.kind === 'relation' ? '4 3' : undefined}
                 style={{ transition: 'stroke 0.2s, stroke-opacity 0.2s, stroke-width 0.2s' }}
-              />
+              >
+                {edge.relation ? <title>{edge.relation}</title> : null}
+              </path>
             )
           })}
 
