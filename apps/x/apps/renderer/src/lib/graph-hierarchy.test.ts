@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { DEFAULT_FORCES, hierarchyForces, initialHierarchyPositions, parseHierarchy } from './graph-hierarchy'
+import { DEFAULT_FORCES, buildHierarchyGraph, hierarchyForces, initialHierarchyPositions, parseHierarchy } from './graph-hierarchy'
 
 const note = (front: string, body = '# Title\n') => `---\n${front}\n---\n${body}`
 
@@ -110,5 +110,49 @@ describe('initialHierarchyPositions', () => {
   it('initial positions survive a parent cycle', () => {
     const nodes = [{ id: 'a', level: 3, parentId: 'b' }, { id: 'b', level: 3, parentId: 'a' }]
     expect(initialHierarchyPositions(nodes).size).toBe(2)
+  })
+})
+
+describe('buildHierarchyGraph', () => {
+  const toNodeId = (wiki: string) => `knowledge/${wiki.split('|')[0].split('#')[0].trim()}.md`
+  const node = (path: string, front: string, body = '') => ({
+    path: `knowledge/${path}.md`,
+    data: front ? `---\n${front}\n---\n${body}` : body,
+  })
+
+  it('classifies parent, relation and link edges, strongest kind wins', () => {
+    const contents = [
+      node('Areas/Pipeline', 'level: 2\ndomain: sales'),
+      node('Organizations/Acme', 'level: 3\ndomain: register'),
+      node('Deals/X', 'level: 3\ndomain: sales\nparent: "[[Areas/Pipeline]]"\ncustomer: ["[[Organizations/Acme]]"]',
+           'See [[Areas/Pipeline]] and [[Organizations/Acme]].\n'),
+    ]
+    const nodeSet = new Set(contents.map((c) => c.path))
+    const { edges, info } = buildHierarchyGraph(contents, nodeSet, toNodeId)
+    expect(edges).toEqual([
+      { source: 'knowledge/Deals/X.md', target: 'knowledge/Areas/Pipeline.md', kind: 'parent' },
+      { source: 'knowledge/Deals/X.md', target: 'knowledge/Organizations/Acme.md', kind: 'relation', relation: 'customer' },
+    ])
+    expect(info.get('knowledge/Deals/X.md')).toEqual({ level: 3, parentId: 'knowledge/Areas/Pipeline.md', domain: 'sales' })
+  })
+
+  it('plain links stay kind link', () => {
+    const contents = [node('Topics/A', '', '[[Topics/B]]\n'), node('Topics/B', '', '')]
+    const { edges, info } = buildHierarchyGraph(contents, new Set(contents.map((c) => c.path)), toNodeId)
+    expect(edges).toEqual([{ source: 'knowledge/Topics/A.md', target: 'knowledge/Topics/B.md', kind: 'link' }])
+    expect(info.get('knowledge/Topics/A.md')).toEqual({ level: undefined, parentId: undefined, domain: undefined })
+  })
+
+  it('parentId only when the parent is a node', () => {
+    const contents = [node('Meetings/M', 'level: 4\nparent: "[[Areas/Meetings]]"')]
+    const { edges, info } = buildHierarchyGraph(contents, new Set(contents.map((c) => c.path)), toNodeId)
+    expect(edges).toEqual([])
+    expect(info.get('knowledge/Meetings/M.md')?.parentId).toBeUndefined()
+  })
+
+  it('ignores self links and unresolvable targets', () => {
+    const contents = [node('Topics/A', 'about: ["[[Topics/A]]"]', '[[Nowhere/X]]\n')]
+    const toNull = (wiki: string) => (wiki.startsWith('Nowhere') ? null : toNodeId(wiki))
+    expect(buildHierarchyGraph(contents, new Set(contents.map((c) => c.path)), toNull).edges).toEqual([])
   })
 })

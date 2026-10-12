@@ -136,3 +136,40 @@ export function initialHierarchyPositions(
   }
   return out
 }
+
+export type EdgeKind = 'parent' | 'relation' | 'link'
+export type HierarchyEdge = { source: string; target: string; kind: EdgeKind; relation?: string }
+export type NodeInfo = { level?: number; parentId?: string; domain?: string }
+
+const RANK: Record<EdgeKind, number> = { link: 0, relation: 1, parent: 2 }
+
+/** Typed edges (one per unordered pair, strongest kind wins) and hierarchy info per node. */
+export function buildHierarchyGraph(
+  contents: { path: string; data: string }[],
+  nodeSet: Set<string>,
+  toNodeId: (wikiTarget: string) => string | null,
+): { edges: HierarchyEdge[]; info: Map<string, NodeInfo> } {
+  const edges = new Map<string, HierarchyEdge>()
+  const info = new Map<string, NodeInfo>()
+  const add = (source: string, rawTarget: string, kind: EdgeKind, relation?: string) => {
+    const target = toNodeId(rawTarget)
+    if (!target || target === source || !nodeSet.has(target)) return
+    const key = source < target ? `${source}|${target}` : `${target}|${source}`
+    const existing = edges.get(key)
+    if (existing && RANK[existing.kind] >= RANK[kind]) return
+    edges.set(key, relation ? { source, target, kind, relation } : { source, target, kind })
+  }
+  for (const { path, data } of contents) {
+    const hierarchy = parseHierarchy(data)
+    const parentId = hierarchy.parent ? toNodeId(hierarchy.parent) : null
+    info.set(path, {
+      level: hierarchy.level,
+      parentId: parentId && nodeSet.has(parentId) ? parentId : undefined,
+      domain: hierarchy.domain,
+    })
+    if (hierarchy.parent) add(path, hierarchy.parent, 'parent')
+    for (const relation of hierarchy.relations) add(path, relation.target, 'relation', relation.name)
+    for (const match of data.matchAll(LINK)) add(path, match[1], 'link')
+  }
+  return { edges: Array.from(edges.values()), info }
+}

@@ -1,3 +1,4 @@
+// Modified for EHL (Flissel/rowboat ehl-schema-graph): hierarchical brain graph.
 import type * as React from 'react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Search, X } from 'lucide-react'
@@ -11,11 +12,16 @@ export type GraphNode = {
   group: string
   color: string
   stroke: string
+  level?: number
+  parentId?: string
+  domain?: string
 }
 
 export type GraphEdge = {
   source: string
   target: string
+  kind?: 'parent' | 'relation' | 'link'
+  relation?: string
 }
 
 type GraphViewProps = {

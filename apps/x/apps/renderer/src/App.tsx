@@ -1,3 +1,4 @@
+// Modified for EHL (Flissel/rowboat ehl-schema-graph): hierarchical brain graph.
 import { loadSpaceDirectory, getDirectorySpace } from '@/hooks/use-space-directory'
 import { OpenBrowserContext } from '@/contexts/browser-context';
 import { WorkspaceSessionTabs } from './components/code/workspace-session-tabs'
@@ -86,6 +87,7 @@ import { CreditCelebration } from "@/components/credit-celebration"
 import { matchBillingError, type BillingErrorMatch } from "@/lib/billing-error"
 import { dispatchCreditExhausted, dispatchCreditReplenished } from "@/lib/credit-status"
 import { ensureMarkdownExtension, normalizeWikiPath, splitWikiFragment, stripKnowledgePrefix, toKnowledgePath, wikiLabel } from '@/lib/wiki-links'
+import { buildHierarchyGraph } from '@/lib/graph-hierarchy'
 import { splitFrontmatter, joinFrontmatter } from '@/lib/frontmatter'
 import { extractConferenceLink } from '@/lib/calendar-event'
 import { OnboardingModal } from '@/components/onboarding'
@@ -145,7 +147,6 @@ interface TreeNode extends DirEntry {
 }
 
 const DEFAULT_CHAT_PANE_WIDTH = 460
-const wikiLinkRegex = /\[\[([^[\]]+)\]\]/g
 const graphPalette = [
   { hue: 210, sat: 72, light: 52 },
   { hue: 28, sat: 78, light: 52 },
@@ -7054,7 +7055,6 @@ function App() {
 
       const nodeSet = new Set(graphFilePaths)
       const edges: GraphEdge[] = []
-      const edgeKeys = new Set<string>()
 
       const contents = await Promise.all(
         graphFilePaths.map(async (path) => {
@@ -7068,18 +7068,8 @@ function App() {
         })
       )
 
-      for (const { path, data } of contents) {
-        for (const match of data.matchAll(wikiLinkRegex)) {
-          const rawTarget = match[1]?.trim() ?? ''
-          const targetPath = toKnowledgePath(rawTarget)
-          if (!targetPath || targetPath === path) continue
-          if (!nodeSet.has(targetPath)) continue
-          const edgeKey = path < targetPath ? `${path}|${targetPath}` : `${targetPath}|${path}`
-          if (edgeKeys.has(edgeKey)) continue
-          edgeKeys.add(edgeKey)
-          edges.push({ source: path, target: targetPath })
-        }
-      }
+      const { edges: typedEdges, info: hierarchyInfo } = buildHierarchyGraph(contents, nodeSet, toKnowledgePath)
+      edges.push(...typedEdges)
 
       const degreeMap = new Map<string, number>()
       edges.forEach((edge) => {
@@ -7119,7 +7109,10 @@ function App() {
       const nodes = graphFilePaths.map((path) => {
         const degree = degreeMap.get(path) ?? 0
         const radius = 6 + Math.min(18, degree * 2)
-        const { group, depth } = getNodeGroup(path)
+        const hierarchy = hierarchyInfo.get(path)
+        const folderGroup = getNodeGroup(path)
+        const group = hierarchy?.domain ?? folderGroup.group
+        const depth = folderGroup.depth
         const groupIndex = getGroupIndex(group)
         const colors = getNodeColors(groupIndex, depth)
         return {
@@ -7130,6 +7123,9 @@ function App() {
           group,
           color: colors.fill,
           stroke: colors.stroke,
+          level: hierarchy?.level,
+          parentId: hierarchy?.parentId,
+          domain: hierarchy?.domain,
         }
       })
 
