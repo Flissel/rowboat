@@ -1,4 +1,5 @@
 // Modified for EHL (Flissel/rowboat ehl-schema-graph): hierarchical brain graph.
+// Modified for VibeMind (Flissel/rowboat vibemind): tolerant graph file read (graphFileData).
 import { loadSpaceDirectory, getDirectorySpace } from '@/hooks/use-space-directory'
 import { OpenBrowserContext } from '@/contexts/browser-context';
 import { WorkspaceSessionTabs } from './components/code/workspace-session-tabs'

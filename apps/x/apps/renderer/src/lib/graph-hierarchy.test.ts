@@ -1,3 +1,4 @@
+// Modified for VibeMind (Flissel/rowboat vibemind): tests for graphFileData.
 import { describe, expect, it } from 'vitest'
 import { DEFAULT_FORCES, buildHierarchyGraph, graphFileData, hierarchyForces, initialHierarchyPositions, parseHierarchy, parseVaultMap, SHELL_SPACING_3D, shellRadius, toGraph3d, vaultMapNodeId } from './graph-hierarchy'
 

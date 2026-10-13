@@ -1,4 +1,5 @@
 // VibeMind addition (Flissel/rowboat vibemind): video links as inline players (vibemind-os f6695d46).
+// Fix (Flissel/rowboat vibemind): replacement positions are mapped through the transaction, so several video links in one note all load.
 /**
  * Video Link Extension for TipTap
  *
@@ -114,7 +115,10 @@ export const VideoLinkExtension = Node.create({
               title: child.text || '',
             })
             if (videoNode) {
-              tr = tr.replaceWith(pos, pos + node.nodeSize, videoNode)
+              // descendants() reports positions in newState.doc; earlier replacements already shifted tr.doc.
+              const from = tr.mapping.map(pos)
+              const to = tr.mapping.map(pos + node.nodeSize)
+              tr = tr.replaceWith(from, to, videoNode)
               modified = true
             }
           })

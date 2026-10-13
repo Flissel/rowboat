@@ -1,6 +1,7 @@
 // EHL addition (Flissel/rowboat ehl-schema-graph): hierarchical brain graph. Reads the vault schema's flat
 // front matter (level, parent, domain, typed relations) and lays notes out on one ring per level.
 // Spec: Flissel/ehl-munich-2026 docs/superpowers/specs/2026-10-12-brain-graph-hierarchy-design.md
+// Modified for VibeMind (Flissel/rowboat vibemind): graphFileData, a tolerant workspace:readFile result reader.
 import { splitFrontmatter } from './frontmatter'
 
 export type Relation = { name: string; target: string }
