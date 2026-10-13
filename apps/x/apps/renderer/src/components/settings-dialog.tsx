@@ -1,3 +1,4 @@
+// Modified for VibeMind (Flissel/rowboat vibemind): Plugins tab, accessible tab navigation.
 "use client"
 
 import * as React from "react"
@@ -28,6 +29,7 @@ import { toast } from "sonner"
 import { AnthropicIcon, DiscordIcon, GitHubIcon, OpenAIIcon } from "@/components/onboarding/provider-icons"
 import { AccountSettings } from "@/components/settings/account-settings"
 import { ConnectedAccountsSettings } from "@/components/settings/connected-accounts-settings"
+import { ConnectedPluginSettings } from "@/components/settings/plugin-settings"
 import { MobileChannelsSettings } from "@/components/settings/mobile-channels-settings"
 import { PhonePairingSettings } from "@/components/settings/phone-pairing-settings"
 import { RemoteServerSettings } from "@/components/settings/remote-server-settings"
@@ -42,7 +44,7 @@ import { ShortcutSettings } from "@/components/settings/shortcut-settings"
 import { ProvidersSection } from "@/components/settings/providers-section"
 import { useModels } from "@/hooks/use-models"
 
-export type ConfigTab = "account" | "connections" | "mobile" | "phone" | "models" | "mcp" | "security" | "code-mode" | "appearance" | "shortcuts" | "notifications" | "permissions" | "note-tagging" | "advanced" | "help"
+export type ConfigTab = "account" | "connections" | "plugins" | "mobile" | "phone" | "models" | "mcp" | "security" | "code-mode" | "appearance" | "shortcuts" | "notifications" | "permissions" | "note-tagging" | "advanced" | "help"
 
 interface TabConfig {
   id: ConfigTab
@@ -64,6 +66,12 @@ const tabs: TabConfig[] = [
     label: "Connections",
     icon: Plug,
     description: "Manage accounts and tools",
+  },
+  {
+    id: "plugins",
+    label: "Plugins",
+    icon: Plug,
+    description: "View and install server-authorized OpenAI plugins",
   },
   {
     id: "mobile",
@@ -151,7 +159,7 @@ const tabs: TabConfig[] = [
 
 /** Sidebar nav grouping: identity first, capabilities, then app-level. */
 const NAV_SECTIONS: { label: string | null; ids: ConfigTab[] }[] = [
-  { label: null, ids: ["account", "connections", "mobile", "phone"] },
+  { label: null, ids: ["account", "connections", "plugins", "mobile", "phone"] },
   { label: "Configure", ids: ["models", "mcp", "security", "code-mode", "note-tagging", "advanced"] },
   { label: "App", ids: ["appearance", "shortcuts", "notifications", "permissions", "help"] },
 ]
@@ -1973,7 +1981,7 @@ export function SettingsDialog({ children, defaultTab = "account", open: control
   }
 
   const loadConfig = useCallback(async (tab: ConfigTab) => {
-    if (tab === "appearance" || tab === "shortcuts" || tab === "models" || tab === "note-tagging" || tab === "account" || tab === "connections" || tab === "help" || tab === "code-mode" || tab === "notifications" || tab === "advanced") return
+    if (tab === "appearance" || tab === "shortcuts" || tab === "models" || tab === "note-tagging" || tab === "account" || tab === "connections" || tab === "plugins" || tab === "help" || tab === "code-mode" || tab === "notifications" || tab === "advanced") return
     const tabConfig = tabs.find((t) => t.id === tab)!
     if (!tabConfig.path) return
     setLoading(true)
@@ -2050,7 +2058,7 @@ export function SettingsDialog({ children, defaultTab = "account", open: control
             <div className="px-2 pt-3.5 pb-3 mb-2">
               <h2 className="font-semibold text-base tracking-tight">Settings</h2>
             </div>
-            <nav className="flex flex-col">
+            <nav className="flex flex-col" role="tablist" aria-label="Settings tabs">
               {NAV_SECTIONS.map((section) => {
                 const sectionTabs = visibleTabs.filter((tab) => section.ids.includes(tab.id))
                 if (sectionTabs.length === 0) return null
@@ -2064,6 +2072,8 @@ export function SettingsDialog({ children, defaultTab = "account", open: control
                     {sectionTabs.map((tab) => (
                       <button
                         key={tab.id}
+                        role="tab"
+                        aria-selected={activeTab === tab.id}
                         onClick={() => handleTabChange(tab.id)}
                         className={cn(
                           "flex items-center gap-2 px-2 py-1.5 rounded-md text-sm transition-colors text-left",
@@ -2101,6 +2111,8 @@ export function SettingsDialog({ children, defaultTab = "account", open: control
             <div className={cn("flex-1 px-6 pb-5 min-h-0", isJsonTab ? "overflow-hidden" : activeTab === "note-tagging" ? "overflow-hidden flex flex-col" : "overflow-y-auto")}>
               {activeTab === "account" ? (
                 <AccountSettings dialogOpen={open} />
+              ) : activeTab === "plugins" ? (
+                <ConnectedPluginSettings />
               ) : activeTab === "connections" ? (
                 <div className="space-y-6">
                   <div className="space-y-2">
