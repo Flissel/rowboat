@@ -194,8 +194,11 @@ const LINK_STYLE: Record<EdgeKind, { width: number; opacity: number }> = {
   link: { width: 0, opacity: 0.12 },
 }
 
+/** Distance between two sphere shells in the 3D view (wider than the 2D rings: shells hold more nodes). */
+export const SHELL_SPACING_3D = 300
+
 /** Radius of the sphere shell for a level; level 0 is the centre. */
-export function shellRadius(level: number, spacing: number = DEFAULT_FORCES.ringSpacing): number {
+export function shellRadius(level: number, spacing: number = SHELL_SPACING_3D): number {
   return level * spacing
 }
 

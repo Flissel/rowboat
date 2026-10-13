@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { DEFAULT_FORCES, buildHierarchyGraph, hierarchyForces, initialHierarchyPositions, parseHierarchy, shellRadius, toGraph3d } from './graph-hierarchy'
+import { DEFAULT_FORCES, buildHierarchyGraph, hierarchyForces, initialHierarchyPositions, parseHierarchy, SHELL_SPACING_3D, shellRadius, toGraph3d } from './graph-hierarchy'
 
 const note = (front: string, body = '# Title\n') => `---\n${front}\n---\n${body}`
 
@@ -190,6 +190,7 @@ describe('toGraph3d', () => {
 
   it('shell radius grows with the level and level 0 sits in the centre', () => {
     expect(shellRadius(0)).toBe(0)
-    expect(shellRadius(2)).toBe(2 * DEFAULT_FORCES.ringSpacing)
+    expect(shellRadius(2)).toBe(2 * SHELL_SPACING_3D)
+    expect(SHELL_SPACING_3D).toBeGreaterThanOrEqual(2 * DEFAULT_FORCES.ringSpacing)
   })
 })

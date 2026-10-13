@@ -127,6 +127,8 @@ export function GraphView({ nodes, edges, error, onSelectNode }: GraphViewProps)
 
   const hierarchyMode = useMemo(() => nodes.some((node) => node.level !== undefined), [nodes])
   const [view3d, setView3d] = useState(true)
+  // while the 3D view is shown, the 2D simulation and float animation pause (they re-render every frame)
+  const show3d = hierarchyMode && view3d
   const ringRadii = useMemo(() => {
     if (!hierarchyMode) return []
     const levels = new Set(nodes.map((node) => node.level).filter((level): level is number => level !== undefined && level > 0))
@@ -194,6 +196,7 @@ export function GraphView({ nodes, edges, error, onSelectNode }: GraphViewProps)
       positionsRef.current = new Map()
       return
     }
+    if (show3d) return
 
     const nextPositions = new Map<string, NodePosition>()
     const count = nodes.length
@@ -334,10 +337,10 @@ export function GraphView({ nodes, edges, error, onSelectNode }: GraphViewProps)
       active = false
       if (rafId) cancelAnimationFrame(rafId)
     }
-  }, [nodes, edgeList, groupCenters, nodeGroupMap, hierarchyMode])
+  }, [nodes, edgeList, groupCenters, nodeGroupMap, hierarchyMode, show3d])
 
   useEffect(() => {
-    if (nodes.length === 0) return
+    if (nodes.length === 0 || show3d) return
     let rafId = 0
     let lastTime = performance.now()
 
@@ -355,7 +358,7 @@ export function GraphView({ nodes, edges, error, onSelectNode }: GraphViewProps)
     return () => {
       if (rafId) cancelAnimationFrame(rafId)
     }
-  }, [nodes.length])
+  }, [nodes.length, show3d])
 
   const handlePointerDown = (event: React.PointerEvent) => {
     if (event.button !== 0) return
@@ -542,14 +545,14 @@ export function GraphView({ nodes, edges, error, onSelectNode }: GraphViewProps)
         </button>
       ) : null}
 
-      {hierarchyMode && view3d ? (
+      {show3d ? (
         <Suspense fallback={null}>
           <GraphView3D nodes={nodes} edges={edges} onSelectNode={onSelectNode} />
         </Suspense>
       ) : null}
 
       <svg
-        style={hierarchyMode && view3d ? { display: 'none' } : undefined}
+        style={show3d ? { display: 'none' } : undefined}
         className="h-full w-full touch-none"
         onPointerDown={handlePointerDown}
         onPointerMove={handlePointerMove}
