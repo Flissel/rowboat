@@ -87,7 +87,7 @@ import { CreditCelebration } from "@/components/credit-celebration"
 import { matchBillingError, type BillingErrorMatch } from "@/lib/billing-error"
 import { dispatchCreditExhausted, dispatchCreditReplenished } from "@/lib/credit-status"
 import { ensureMarkdownExtension, normalizeWikiPath, splitWikiFragment, stripKnowledgePrefix, toKnowledgePath, wikiLabel } from '@/lib/wiki-links'
-import { buildHierarchyGraph } from '@/lib/graph-hierarchy'
+import { buildHierarchyGraph, parseVaultMap, type NodeInfo } from '@/lib/graph-hierarchy'
 import { splitFrontmatter, joinFrontmatter } from '@/lib/frontmatter'
 import { extractConferenceLink } from '@/lib/calendar-event'
 import { OnboardingModal } from '@/components/onboarding'
@@ -7068,7 +7068,15 @@ function App() {
         })
       )
 
-      const { edges: typedEdges, info: hierarchyInfo } = buildHierarchyGraph(contents, nodeSet, toKnowledgePath)
+      // config/vault-map.json (ehl-schema map) places notes that carry no hierarchy front matter; optional.
+      let vaultMap: Map<string, NodeInfo> | undefined
+      try {
+        const mapFile = await window.ipc.invoke('workspace:readFile', { path: 'config/vault-map.json', encoding: 'utf8' })
+        vaultMap = parseVaultMap(mapFile.data as string, toKnowledgePath)
+      } catch {
+        vaultMap = undefined
+      }
+      const { edges: typedEdges, info: hierarchyInfo } = buildHierarchyGraph(contents, nodeSet, toKnowledgePath, vaultMap)
       edges.push(...typedEdges)
 
       const degreeMap = new Map<string, number>()

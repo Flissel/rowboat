@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { DEFAULT_FORCES, buildHierarchyGraph, hierarchyForces, initialHierarchyPositions, parseHierarchy, SHELL_SPACING_3D, shellRadius, toGraph3d } from './graph-hierarchy'
+import { DEFAULT_FORCES, buildHierarchyGraph, hierarchyForces, initialHierarchyPositions, parseHierarchy, parseVaultMap, SHELL_SPACING_3D, shellRadius, toGraph3d } from './graph-hierarchy'
 
 const note = (front: string, body = '# Title\n') => `---\n${front}\n---\n${body}`
 
@@ -192,5 +192,72 @@ describe('toGraph3d', () => {
     expect(shellRadius(0)).toBe(0)
     expect(shellRadius(2)).toBe(2 * SHELL_SPACING_3D)
     expect(SHELL_SPACING_3D).toBeGreaterThanOrEqual(2 * DEFAULT_FORCES.ringSpacing)
+  })
+})
+
+describe('parseVaultMap', () => {
+  const toNodeId = (wiki: string) => `knowledge/${wiki}.md`
+  const doc = (notes: unknown, version: unknown = 1) => JSON.stringify({ version, company: 'X', notes })
+
+  it('maps note paths to node ids with level, domain and parent', () => {
+    const map = parseVaultMap(doc({
+      'Agents/a (1)': { type: 'Agents', level: 3, domain: 'ai', parent: 'Areas/Agents' },
+      Company: { type: 'Company', level: 0, domain: 'company', parent: null },
+    }), toNodeId)
+    expect(map.get('knowledge/Agents/a (1).md')).toEqual({ level: 3, domain: 'ai', parentId: 'knowledge/Areas/Agents.md' })
+    expect(map.get('knowledge/Company.md')).toEqual({ level: 0, domain: 'company', parentId: undefined })
+  })
+
+  it('returns an empty map for broken JSON, a wrong version or a wrong shape', () => {
+    expect(parseVaultMap('{nope', toNodeId).size).toBe(0)
+    expect(parseVaultMap(doc({}, 2), toNodeId).size).toBe(0)
+    expect(parseVaultMap(JSON.stringify([1, 2]), toNodeId).size).toBe(0)
+    expect(parseVaultMap(doc({ 'A/b': 'x' }), toNodeId).size).toBe(0)
+  })
+
+  it('skips entries whose level is not an integer', () => {
+    const map = parseVaultMap(doc({ 'A/b': { level: 'three', domain: 'ai', parent: null } }), toNodeId)
+    expect(map.size).toBe(0)
+  })
+})
+
+describe('buildHierarchyGraph with a vault map', () => {
+  const toNodeId = (wiki: string) => `knowledge/${wiki.split('|')[0].split('#')[0].trim()}.md`
+  const node = (path: string, data: string) => ({ path: `knowledge/${path}.md`, data })
+
+  it('uses the map for notes without hierarchy front matter and adds the parent edge', () => {
+    const contents = [
+      node('Areas/Agents', '---\nlevel: 2\ndomain: ai\n---\n'),
+      node('Agents/a (1)', '---\ntyp: agent\nfakten:\n- schluessel: zustand\n---\n# a\n'),
+    ]
+    const nodeSet = new Set(contents.map((c) => c.path))
+    const fallback = new Map([['knowledge/Agents/a (1).md', { level: 3, domain: 'ai', parentId: 'knowledge/Areas/Agents.md' }]])
+    const { edges, info } = buildHierarchyGraph(contents, nodeSet, toNodeId, fallback)
+    expect(info.get('knowledge/Agents/a (1).md')).toEqual({ level: 3, parentId: 'knowledge/Areas/Agents.md', domain: 'ai' })
+    expect(edges).toContainEqual({ source: 'knowledge/Agents/a (1).md', target: 'knowledge/Areas/Agents.md', kind: 'parent' })
+  })
+
+  it('lets front matter win over the map', () => {
+    const contents = [
+      node('Areas/Pipeline', '---\nlevel: 2\ndomain: sales\n---\n'),
+      node('Areas/Agents', '---\nlevel: 2\ndomain: ai\n---\n'),
+      node('Deals/X', '---\nlevel: 3\ndomain: sales\nparent: "[[Areas/Pipeline]]"\n---\n'),
+    ]
+    const nodeSet = new Set(contents.map((c) => c.path))
+    const fallback = new Map([['knowledge/Deals/X.md', { level: 4, domain: 'ai', parentId: 'knowledge/Areas/Agents.md' }]])
+    const { edges, info } = buildHierarchyGraph(contents, nodeSet, toNodeId, fallback)
+    expect(info.get('knowledge/Deals/X.md')).toEqual({ level: 3, parentId: 'knowledge/Areas/Pipeline.md', domain: 'sales' })
+    expect(edges.filter((e) => e.kind === 'parent')).toEqual([
+      { source: 'knowledge/Deals/X.md', target: 'knowledge/Areas/Pipeline.md', kind: 'parent' },
+    ])
+  })
+
+  it('ignores a map parent that is not a node', () => {
+    const contents = [node('Agents/a', '# a\n')]
+    const nodeSet = new Set(contents.map((c) => c.path))
+    const fallback = new Map([['knowledge/Agents/a.md', { level: 3, domain: 'ai', parentId: 'knowledge/Areas/Agents.md' }]])
+    const { edges, info } = buildHierarchyGraph(contents, nodeSet, toNodeId, fallback)
+    expect(info.get('knowledge/Agents/a.md')).toEqual({ level: 3, parentId: undefined, domain: 'ai' })
+    expect(edges).toEqual([])
   })
 })

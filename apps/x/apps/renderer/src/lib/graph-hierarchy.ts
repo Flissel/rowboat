@@ -142,32 +142,70 @@ export type HierarchyEdge = { source: string; target: string; kind: EdgeKind; re
 export type NodeInfo = { level?: number; parentId?: string; domain?: string }
 
 const RANK: Record<EdgeKind, number> = { link: 0, relation: 1, parent: 2 }
+const VAULT_MAP_VERSION = 1
 
-/** Typed edges (one per unordered pair, strongest kind wins) and hierarchy info per node. */
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+/** config/vault-map.json (written by `ehl-schema map`): node id -> hierarchy info. Any problem gives an empty map,
+ * so the graph falls back to front matter only. */
+export function parseVaultMap(text: string, toNodeId: (wikiPath: string) => string | null): Map<string, NodeInfo> {
+  const out = new Map<string, NodeInfo>()
+  let doc: unknown
+  try {
+    doc = JSON.parse(text)
+  } catch {
+    return out
+  }
+  if (!isRecord(doc) || doc.version !== VAULT_MAP_VERSION || !isRecord(doc.notes)) return out
+  for (const [path, entry] of Object.entries(doc.notes)) {
+    if (!isRecord(entry) || typeof entry.level !== 'number' || !Number.isInteger(entry.level)) continue
+    const id = toNodeId(path)
+    if (!id) continue
+    const parentId = typeof entry.parent === 'string' ? toNodeId(entry.parent) ?? undefined : undefined
+    out.set(id, {
+      level: entry.level,
+      domain: typeof entry.domain === 'string' ? entry.domain : undefined,
+      parentId,
+    })
+  }
+  return out
+}
+
+/** Typed edges (one per unordered pair, strongest kind wins) and hierarchy info per node. Front matter wins;
+ * `fallback` (from the vault map) fills in level, domain and parent for notes that have none. */
 export function buildHierarchyGraph(
   contents: { path: string; data: string }[],
   nodeSet: Set<string>,
   toNodeId: (wikiTarget: string) => string | null,
+  fallback?: Map<string, NodeInfo>,
 ): { edges: HierarchyEdge[]; info: Map<string, NodeInfo> } {
   const edges = new Map<string, HierarchyEdge>()
   const info = new Map<string, NodeInfo>()
-  const add = (source: string, rawTarget: string, kind: EdgeKind, relation?: string) => {
-    const target = toNodeId(rawTarget)
-    if (!target || target === source || !nodeSet.has(target)) return
+  const addEdge = (source: string, target: string, kind: EdgeKind, relation?: string) => {
+    if (target === source || !nodeSet.has(target)) return
     const key = source < target ? `${source}|${target}` : `${target}|${source}`
     const existing = edges.get(key)
     if (existing && RANK[existing.kind] >= RANK[kind]) return
     edges.set(key, relation ? { source, target, kind, relation } : { source, target, kind })
   }
+  const add = (source: string, rawTarget: string, kind: EdgeKind, relation?: string) => {
+    const target = toNodeId(rawTarget)
+    if (target) addEdge(source, target, kind, relation)
+  }
   for (const { path, data } of contents) {
     const hierarchy = parseHierarchy(data)
-    const parentId = hierarchy.parent ? toNodeId(hierarchy.parent) : null
+    const mapped = fallback?.get(path)
+    const frontParent = hierarchy.parent ? toNodeId(hierarchy.parent) : null
+    const mappedParent = !hierarchy.parent && mapped?.parentId && nodeSet.has(mapped.parentId) ? mapped.parentId : undefined
     info.set(path, {
-      level: hierarchy.level,
-      parentId: parentId && nodeSet.has(parentId) ? parentId : undefined,
-      domain: hierarchy.domain,
+      level: hierarchy.level ?? mapped?.level,
+      parentId: frontParent && nodeSet.has(frontParent) ? frontParent : mappedParent,
+      domain: hierarchy.domain ?? mapped?.domain,
     })
     if (hierarchy.parent) add(path, hierarchy.parent, 'parent')
+    else if (mappedParent) addEdge(path, mappedParent, 'parent')
     for (const relation of hierarchy.relations) add(path, relation.target, 'relation', relation.name)
     for (const match of data.matchAll(LINK)) add(path, match[1], 'link')
   }
