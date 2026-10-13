@@ -154,6 +154,13 @@ export function vaultMapNodeId(path: string): string {
   return `knowledge/${path}.md`
 }
 
+/** Text of a workspace:readFile result; anything unexpected reads as an empty note (VibeMind: vibemind-os 2f0f2974). */
+export function graphFileData(result: unknown): string {
+  if (typeof result !== 'object' || result === null) return ''
+  const data = (result as { data?: unknown }).data
+  return typeof data === 'string' ? data : ''
+}
+
 /** config/vault-map.json (written by `ehl-schema map`): node id -> hierarchy info. Any problem gives an empty map,
  * so the graph falls back to front matter only. */
 export function parseVaultMap(text: string, toNodeId: (wikiPath: string) => string | null): Map<string, NodeInfo> {

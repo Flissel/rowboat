@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { DEFAULT_FORCES, buildHierarchyGraph, hierarchyForces, initialHierarchyPositions, parseHierarchy, parseVaultMap, SHELL_SPACING_3D, shellRadius, toGraph3d, vaultMapNodeId } from './graph-hierarchy'
+import { DEFAULT_FORCES, buildHierarchyGraph, graphFileData, hierarchyForces, initialHierarchyPositions, parseHierarchy, parseVaultMap, SHELL_SPACING_3D, shellRadius, toGraph3d, vaultMapNodeId } from './graph-hierarchy'
 
 const note = (front: string, body = '# Title\n') => `---\n${front}\n---\n${body}`
 
@@ -276,5 +276,14 @@ describe('vaultMapNodeId', () => {
     } }), vaultMapNodeId)
     expect(map.get('knowledge/Notes/C# tips.md')?.parentId).toBe('knowledge/Areas/Topics.md')
     expect(map.get('knowledge/Videos/demo.mp4.md')?.level).toBe(4)
+  })
+})
+
+describe('graphFileData', () => {
+  it('returns the text of a read result and an empty string for anything else', () => {
+    expect(graphFileData({ data: '# a' })).toBe('# a')
+    expect(graphFileData({ data: 42 })).toBe('')
+    expect(graphFileData(null)).toBe('')
+    expect(graphFileData(undefined)).toBe('')
   })
 })

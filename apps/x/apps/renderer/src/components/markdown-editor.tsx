@@ -1,3 +1,4 @@
+// Modified for VibeMind (Flissel/rowboat vibemind): video link blocks.
 import { useEditor, EditorContent, Extension, Editor } from '@tiptap/react'
 import { Plugin, PluginKey, TextSelection } from '@tiptap/pm/state'
 import { Decoration, DecorationSet, EditorView } from '@tiptap/pm/view'
@@ -21,6 +22,7 @@ import { CalendarBlockExtension } from '@/extensions/calendar-block'
 import { EmailBlockExtension, EmailsBlockExtension } from '@/extensions/email-block'
 import { TranscriptBlockExtension } from '@/extensions/transcript-block'
 import { MermaidBlockExtension } from '@/extensions/mermaid-block'
+import { VideoLinkExtension } from '@/extensions/video-link'
 import { Markdown } from 'tiptap-markdown'
 import { useEffect, useCallback, useMemo, useRef, useState, forwardRef, useImperativeHandle } from 'react'
 import { Calendar, ChevronDown, ExternalLink } from 'lucide-react'
@@ -139,7 +141,7 @@ const tableRenderHelpers: MarkdownRendererHelpers = {
 
 // Serialize a single top-level block to its markdown string. Empty paragraphs (or blank-marker
 // paragraphs) return '' to signal "blank line slot" for the join logic in serializeBlocksToMarkdown.
-function blockToMarkdown(node: JsonNode): string {
+export function blockToMarkdown(node: JsonNode): string {
   switch (node.type) {
     case 'paragraph': {
       const text = nodeToText(node)
@@ -197,6 +199,11 @@ function blockToMarkdown(node: JsonNode): string {
       const src = (node.attrs?.src as string) || ''
       const alt = (node.attrs?.alt as string) || ''
       return `![${alt}](${src})`
+    }
+    case 'videoLink': {
+      const src = (node.attrs?.src as string) || ''
+      const title = (node.attrs?.title as string) || '▶ Video abspielen'
+      return src ? `[${title}](${src})` : ''
     }
     default:
       return ''
@@ -785,6 +792,7 @@ export const MarkdownEditor = forwardRef<MarkdownEditorHandle, MarkdownEditorPro
       EmailBlockExtension,
       TranscriptBlockExtension,
       MermaidBlockExtension,
+      VideoLinkExtension,
       WikiLink.configure({
         onCreate: (path: string) => {
           void wikiLinksRef.current?.onCreate?.(path)

@@ -87,7 +87,7 @@ import { CreditCelebration } from "@/components/credit-celebration"
 import { matchBillingError, type BillingErrorMatch } from "@/lib/billing-error"
 import { dispatchCreditExhausted, dispatchCreditReplenished } from "@/lib/credit-status"
 import { ensureMarkdownExtension, normalizeWikiPath, splitWikiFragment, stripKnowledgePrefix, toKnowledgePath, wikiLabel } from '@/lib/wiki-links'
-import { buildHierarchyGraph, parseVaultMap, vaultMapNodeId, type NodeInfo } from '@/lib/graph-hierarchy'
+import { buildHierarchyGraph, graphFileData, parseVaultMap, vaultMapNodeId, type NodeInfo } from '@/lib/graph-hierarchy'
 import { splitFrontmatter, joinFrontmatter } from '@/lib/frontmatter'
 import { extractConferenceLink } from '@/lib/calendar-event'
 import { OnboardingModal } from '@/components/onboarding'
@@ -7060,7 +7060,7 @@ function App() {
         graphFilePaths.map(async (path) => {
           try {
             const result = await window.ipc.invoke('workspace:readFile', { path })
-            return { path, data: result.data as string }
+            return { path, data: graphFileData(result) }
           } catch (err) {
             console.error('Failed to read file for graph:', path, err)
             return { path, data: '' }
