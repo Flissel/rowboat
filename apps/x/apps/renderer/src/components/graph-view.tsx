@@ -1,9 +1,12 @@
 // Modified for EHL (Flissel/rowboat ehl-schema-graph): hierarchical brain graph.
 import type * as React from 'react'
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Search, X } from 'lucide-react'
 import { Input } from '@/components/ui/input'
 import { DEFAULT_FORCES, hierarchyForces, initialHierarchyPositions } from '@/lib/graph-hierarchy'
+
+// three.js is only loaded when the 3D view is shown
+const GraphView3D = lazy(() => import('./graph-view-3d').then((module) => ({ default: module.GraphView3D })))
 
 export type GraphNode = {
   id: string
@@ -123,6 +126,7 @@ export function GraphView({ nodes, edges, error, onSelectNode }: GraphViewProps)
   }, [nodes])
 
   const hierarchyMode = useMemo(() => nodes.some((node) => node.level !== undefined), [nodes])
+  const [view3d, setView3d] = useState(true)
   const ringRadii = useMemo(() => {
     if (!hierarchyMode) return []
     const levels = new Set(nodes.map((node) => node.level).filter((level): level is number => level !== undefined && level > 0))
@@ -528,7 +532,24 @@ export function GraphView({ nodes, edges, error, onSelectNode }: GraphViewProps)
         </div>
       ) : null}
 
+      {hierarchyMode ? (
+        <button
+          type="button"
+          className="absolute right-4 top-4 z-20 rounded-md border border-border bg-background/80 px-3 py-1 text-xs"
+          onClick={() => setView3d((value) => !value)}
+        >
+          {view3d ? '2D' : '3D'}
+        </button>
+      ) : null}
+
+      {hierarchyMode && view3d ? (
+        <Suspense fallback={null}>
+          <GraphView3D nodes={nodes} edges={edges} onSelectNode={onSelectNode} />
+        </Suspense>
+      ) : null}
+
       <svg
+        style={hierarchyMode && view3d ? { display: 'none' } : undefined}
         className="h-full w-full touch-none"
         onPointerDown={handlePointerDown}
         onPointerMove={handlePointerMove}

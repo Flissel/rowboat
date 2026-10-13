@@ -173,3 +173,46 @@ export function buildHierarchyGraph(
   }
   return { edges: Array.from(edges.values()), info }
 }
+
+// ---- 3D view (react-force-graph-3d): nodes on one sphere shell per level ----
+
+export type Graph3dNode = { id: string; name: string; color: string; level: number; val: number }
+export type Graph3dLink = {
+  source: string
+  target: string
+  kind: EdgeKind
+  relation?: string
+  width: number
+  opacity: number
+}
+type InNode = { id: string; label: string; color: string; degree: number; level?: number }
+type InEdge = { source: string; target: string; kind?: EdgeKind; relation?: string }
+
+const LINK_STYLE: Record<EdgeKind, { width: number; opacity: number }> = {
+  parent: { width: 1.2, opacity: 0.6 },
+  relation: { width: 0.6, opacity: 0.5 },
+  link: { width: 0, opacity: 0.12 },
+}
+
+/** Radius of the sphere shell for a level; level 0 is the centre. */
+export function shellRadius(level: number, spacing: number = DEFAULT_FORCES.ringSpacing): number {
+  return level * spacing
+}
+
+/** Graph data for the 3D view. Nodes without a level go one shell beyond the deepest level. */
+export function toGraph3d(nodes: InNode[], edges: InEdge[]): { nodes: Graph3dNode[]; links: Graph3dLink[] } {
+  const deepest = nodes.reduce((max, n) => (n.level !== undefined && n.level > max ? n.level : max), 0)
+  return {
+    nodes: nodes.map((n) => ({
+      id: n.id,
+      name: n.label,
+      color: n.color,
+      level: n.level ?? deepest + 1,
+      val: 1 + Math.min(12, n.degree),
+    })),
+    links: edges.map((e) => {
+      const kind = e.kind ?? 'link'
+      return { source: e.source, target: e.target, kind, relation: e.relation, ...LINK_STYLE[kind] }
+    }),
+  }
+}

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { DEFAULT_FORCES, buildHierarchyGraph, hierarchyForces, initialHierarchyPositions, parseHierarchy } from './graph-hierarchy'
+import { DEFAULT_FORCES, buildHierarchyGraph, hierarchyForces, initialHierarchyPositions, parseHierarchy, shellRadius, toGraph3d } from './graph-hierarchy'
 
 const note = (front: string, body = '# Title\n') => `---\n${front}\n---\n${body}`
 
@@ -154,5 +154,42 @@ describe('buildHierarchyGraph', () => {
     const contents = [node('Topics/A', 'about: ["[[Topics/A]]"]', '[[Nowhere/X]]\n')]
     const toNull = (wiki: string) => (wiki.startsWith('Nowhere') ? null : toNodeId(wiki))
     expect(buildHierarchyGraph(contents, new Set(contents.map((c) => c.path)), toNull).edges).toEqual([])
+  })
+})
+
+describe('toGraph3d', () => {
+  const nodes = [
+    { id: 'c', label: 'Company', color: 'hsl(1 1% 1%)', degree: 4, level: 0 },
+    { id: 'd', label: 'Sales', color: 'hsl(2 2% 2%)', degree: 2, level: 1, parentId: 'c' },
+    { id: 'x', label: 'Loose note', color: 'hsl(3 3% 3%)', degree: 0 },
+  ]
+  const edges = [
+    { source: 'd', target: 'c', kind: 'parent' as const },
+    { source: 'd', target: 'x', kind: 'relation' as const, relation: 'about' },
+    { source: 'x', target: 'c' },
+  ]
+
+  it('keeps ids, labels, colours and levels; nodes without a level go to the outer shell', () => {
+    const data = toGraph3d(nodes, edges)
+    expect(data.nodes.map((n) => [n.id, n.name, n.color, n.level])).toEqual([
+      ['c', 'Company', 'hsl(1 1% 1%)', 0],
+      ['d', 'Sales', 'hsl(2 2% 2%)', 1],
+      ['x', 'Loose note', 'hsl(3 3% 3%)', 2],
+    ])
+  })
+
+  it('styles links by kind', () => {
+    const links = toGraph3d(nodes, edges).links
+    expect(links.map((l) => [l.kind, l.width, l.relation])).toEqual([
+      ['parent', 1.2, undefined],
+      ['relation', 0.6, 'about'],
+      ['link', 0, undefined],
+    ])
+    expect(links[2].opacity).toBeLessThan(links[0].opacity)
+  })
+
+  it('shell radius grows with the level and level 0 sits in the centre', () => {
+    expect(shellRadius(0)).toBe(0)
+    expect(shellRadius(2)).toBe(2 * DEFAULT_FORCES.ringSpacing)
   })
 })
