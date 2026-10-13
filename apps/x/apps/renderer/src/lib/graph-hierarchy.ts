@@ -148,6 +148,12 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
+/** Node id of an exact vault-relative note path from the vault map (no wiki-link parsing: names may contain
+ * `#`, `...` or a media extension). */
+export function vaultMapNodeId(path: string): string {
+  return `knowledge/${path}.md`
+}
+
 /** config/vault-map.json (written by `ehl-schema map`): node id -> hierarchy info. Any problem gives an empty map,
  * so the graph falls back to front matter only. */
 export function parseVaultMap(text: string, toNodeId: (wikiPath: string) => string | null): Map<string, NodeInfo> {

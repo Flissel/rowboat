@@ -87,7 +87,7 @@ import { CreditCelebration } from "@/components/credit-celebration"
 import { matchBillingError, type BillingErrorMatch } from "@/lib/billing-error"
 import { dispatchCreditExhausted, dispatchCreditReplenished } from "@/lib/credit-status"
 import { ensureMarkdownExtension, normalizeWikiPath, splitWikiFragment, stripKnowledgePrefix, toKnowledgePath, wikiLabel } from '@/lib/wiki-links'
-import { buildHierarchyGraph, parseVaultMap, type NodeInfo } from '@/lib/graph-hierarchy'
+import { buildHierarchyGraph, parseVaultMap, vaultMapNodeId, type NodeInfo } from '@/lib/graph-hierarchy'
 import { splitFrontmatter, joinFrontmatter } from '@/lib/frontmatter'
 import { extractConferenceLink } from '@/lib/calendar-event'
 import { OnboardingModal } from '@/components/onboarding'
@@ -7072,7 +7072,7 @@ function App() {
       let vaultMap: Map<string, NodeInfo> | undefined
       try {
         const mapFile = await window.ipc.invoke('workspace:readFile', { path: 'config/vault-map.json', encoding: 'utf8' })
-        vaultMap = parseVaultMap(mapFile.data as string, toKnowledgePath)
+        vaultMap = parseVaultMap(mapFile.data as string, vaultMapNodeId)
       } catch {
         vaultMap = undefined
       }

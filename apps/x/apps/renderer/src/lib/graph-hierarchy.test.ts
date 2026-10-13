@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { DEFAULT_FORCES, buildHierarchyGraph, hierarchyForces, initialHierarchyPositions, parseHierarchy, parseVaultMap, SHELL_SPACING_3D, shellRadius, toGraph3d } from './graph-hierarchy'
+import { DEFAULT_FORCES, buildHierarchyGraph, hierarchyForces, initialHierarchyPositions, parseHierarchy, parseVaultMap, SHELL_SPACING_3D, shellRadius, toGraph3d, vaultMapNodeId } from './graph-hierarchy'
 
 const note = (front: string, body = '# Title\n') => `---\n${front}\n---\n${body}`
 
@@ -259,5 +259,22 @@ describe('buildHierarchyGraph with a vault map', () => {
     const { edges, info } = buildHierarchyGraph(contents, nodeSet, toNodeId, fallback)
     expect(info.get('knowledge/Agents/a.md')).toEqual({ level: 3, parentId: undefined, domain: 'ai' })
     expect(edges).toEqual([])
+  })
+})
+
+describe('vaultMapNodeId', () => {
+  it('turns exact vault paths into node ids, whatever characters the name has', () => {
+    expect(vaultMapNodeId('Notes/C# tips')).toBe('knowledge/Notes/C# tips.md')
+    expect(vaultMapNodeId('Notes/Wait... what')).toBe('knowledge/Notes/Wait... what.md')
+    expect(vaultMapNodeId('Videos/demo.mp4')).toBe('knowledge/Videos/demo.mp4.md')
+  })
+
+  it('keeps such names placed when parsing the map', () => {
+    const map = parseVaultMap(JSON.stringify({ version: 1, notes: {
+      'Notes/C# tips': { level: 3, domain: 'knowledge', parent: 'Areas/Topics' },
+      'Videos/demo.mp4': { level: 4, domain: 'marketing', parent: 'Areas/Content' },
+    } }), vaultMapNodeId)
+    expect(map.get('knowledge/Notes/C# tips.md')?.parentId).toBe('knowledge/Areas/Topics.md')
+    expect(map.get('knowledge/Videos/demo.mp4.md')?.level).toBe(4)
   })
 })
