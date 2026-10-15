@@ -53,22 +53,48 @@ function istIpLiteral(host: string): boolean {
   return host.startsWith('[') || /^\d{1,3}(\.\d{1,3}){3}$/.test(host)
 }
 
+function parseUrl(raw: string): URL | null {
+  try { return new URL(raw) } catch { return null }
+}
+
+// Liefert die geparste, gepruefte URL; geoeffnet wird genau deren href (nicht der Rohtext).
+function gepruefteAnmeldeUrl(raw: string): URL | null {
+  const u = parseUrl(raw)
+  if (!u) return null
+  return u.protocol === 'https:' && u.username === '' && u.password === '' && u.hostname !== '' && !istIpLiteral(u.hostname) ? u : null
+}
+
+function gepruefterSchluesselLink(raw: string, id: string): URL | null {
+  const u = parseUrl(raw)
+  if (!u) return null
+  if (u.protocol !== 'http:' || u.hostname !== '127.0.0.1' || u.port !== '4200') return null
+  if (u.search !== '' || u.hash !== '' || u.username !== '' || u.password !== '') return null
+  const prefix = `/api/integrations/${id}/schluessel/`
+  if (!u.pathname.startsWith(prefix)) return null
+  const token = u.pathname.slice(prefix.length)
+  return /^[A-Za-z0-9_-]{1,256}$/.test(token) && token !== 'link' ? u : null
+}
+
 export function pruefeAnmeldeUrl(raw: string): boolean {
-  let u: URL
-  try { u = new URL(raw) } catch { return false }
-  return u.protocol === 'https:' && u.username === '' && u.password === '' && u.hostname !== '' && !istIpLiteral(u.hostname)
+  return gepruefteAnmeldeUrl(raw) !== null
 }
 
 export function pruefeSchluesselLink(raw: string, id: string): boolean {
-  let u: URL
-  try { u = new URL(raw) } catch { return false }
-  if (u.protocol !== 'http:' || u.hostname !== '127.0.0.1' || u.port !== '4200') return false
-  if (u.search !== '' || u.hash !== '' || u.username !== '' || u.password !== '') return false
-  const prefix = `/api/integrations/${id}/schluessel/`
-  if (!u.pathname.startsWith(prefix)) return false
-  const token = u.pathname.slice(prefix.length)
-  return /^[A-Za-z0-9_-]{1,256}$/.test(token) && token !== 'link'
+  return gepruefterSchluesselLink(raw, id) !== null
 }
+
+// Liest OPENFANG_API_KEY genau einmal und entfernt ihn IMMER aus env (auch leer), damit
+// kein Kindprozess (rowboat-server, Terminal, Agenten-Shell, ACP-Agenten) ihn erbt.
+export function takeOpenFangKey(env: Record<string, string | undefined>): string | undefined {
+  const raw = env.OPENFANG_API_KEY
+  delete env.OPENFANG_API_KEY
+  const key = typeof raw === 'string' ? raw.trim() : ''
+  return key === '' ? undefined : key
+}
+
+// Nur diese Zustaende zeigen detail an; bei anderen (z. B. fehlt_schluessel) setzt OpenFang
+// Referenznamen wie INTEGRATION_GITHUB_PAT hinein.
+const ZUSTAENDE_MIT_DETAIL = new Set(['anmeldung_noetig', 'nicht_erreichbar'])
 
 class VerbindungsFehler extends Error { constructor(readonly art: Exclude<Verbindung, 'ok'>) { super(art) } }
 interface Antwort { status: number; body: unknown }
@@ -127,8 +153,9 @@ export function createOpenFangIntegrations(deps: OpenFangDeps): OpenFangIntegrat
     const a = await rufe('POST', `/api/integrations/${id}/oauth/start`, `anmelden id=${id}`, {})
     if (!gut(a)) return fehler(a)
     const url = obj(a.body).anmelde_url
-    if (typeof url !== 'string' || !pruefeAnmeldeUrl(url)) return UNGUELTIGER_LINK
-    await deps.openExternal(url)
+    const geprueft = typeof url === 'string' ? gepruefteAnmeldeUrl(url) : null
+    if (!geprueft) return UNGUELTIGER_LINK
+    await deps.openExternal(geprueft.href)
     return { ok: true }
   }
 
@@ -136,8 +163,9 @@ export function createOpenFangIntegrations(deps: OpenFangDeps): OpenFangIntegrat
     const a = await rufe('POST', `/api/integrations/${id}/schluessel/link`, `schluessel id=${id}`, {})
     if (!gut(a)) return fehler(a)
     const url = obj(a.body).url
-    if (typeof url !== 'string' || !pruefeSchluesselLink(url, id)) return UNGUELTIGER_LINK
-    await deps.openExternal(url)
+    const geprueft = typeof url === 'string' ? gepruefterSchluesselLink(url, id) : null
+    if (!geprueft) return UNGUELTIGER_LINK
+    await deps.openExternal(geprueft.href)
     return { ok: true }
   }
 
@@ -177,7 +205,7 @@ export function createOpenFangIntegrations(deps: OpenFangDeps): OpenFangIntegrat
               name: str(x.name, id),
               icon: str(x.icon),
               zustand,
-              detail: typeof x.detail === 'string' ? x.detail : null,
+              detail: ZUSTAENDE_MIT_DETAIL.has(zustand) && typeof x.detail === 'string' ? x.detail : null,
               werkzeuge: zustand === 'verbunden' && Number.isInteger(x.tool_count) && (x.tool_count as number) >= 0 ? (x.tool_count as number) : 0,
               statischerSchluessel: arr(x.auth_headers).length > 0,
               offeneFreigaben: offen.filter((t) => t.startsWith(werkzeugPraefix(id))).length,

@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from 'vitest'
 import {
-  createOpenFangIntegrations, pruefeAnmeldeUrl, pruefeSchluesselLink, sichereMeldung, OPENFANG_BASE,
+  createOpenFangIntegrations, pruefeAnmeldeUrl, pruefeSchluesselLink, sichereMeldung, takeOpenFangKey, OPENFANG_BASE,
 } from './openfang-integrations.js'
 
 type Route = { status: number; body?: unknown; headers?: Record<string, string> }
@@ -216,5 +216,57 @@ describe('Fix round 1', () => {
     expect(r.ok).toBe(false)
     expect(r.zustand).toBe('anmeldung_noetig')
     expect(typeof r.meldung).toBe('string')
+  })
+})
+
+describe('Final fix', () => {
+  it('I1 takeOpenFangKey: liefert den Wert und entfernt ihn aus env', () => {
+    const env: Record<string, string | undefined> = { OPENFANG_API_KEY: '  FAKE-KEY-1  ', ANDERES: 'x' }
+    expect(takeOpenFangKey(env)).toBe('FAKE-KEY-1')
+    expect('OPENFANG_API_KEY' in env).toBe(false)
+    expect(env.ANDERES).toBe('x')
+  })
+  it('I1 takeOpenFangKey: leer/Leerzeichen -> undefined und trotzdem entfernt', () => {
+    for (const v of ['', '   ']) {
+      const env: Record<string, string | undefined> = { OPENFANG_API_KEY: v }
+      expect(takeOpenFangKey(env)).toBeUndefined()
+      expect('OPENFANG_API_KEY' in env).toBe(false)
+    }
+  })
+  it('I1 takeOpenFangKey: fehlt -> undefined', () => {
+    const env: Record<string, string | undefined> = {}
+    expect(takeOpenFangKey(env)).toBeUndefined()
+    expect('OPENFANG_API_KEY' in env).toBe(false)
+  })
+  it('M1 detail nur bei anmeldung_noetig und nicht_erreichbar', async () => {
+    const { client } = deps({ ...OK3, 'GET /api/integrations': { status: 200, body: { installed: [
+      { id: 'github', name: 'G', icon: 'g', zustand: 'fehlt_schluessel', detail: 'fehlende Schluessel: INTEGRATION_GITHUB_PAT', tool_count: 0, auth_headers: [] },
+      { id: 'vercel', name: 'V', icon: 'v', zustand: 'anmeldung_noetig', detail: 'abgemeldet', tool_count: 0, auth_headers: [] },
+      { id: 'linear', name: 'L', icon: 'l', zustand: 'nicht_erreichbar', detail: 'zeitueberschreitung', tool_count: 0, auth_headers: [] },
+      { id: 'notion', name: 'N', icon: 'n', zustand: 'verbunden', detail: 'irgendwas', tool_count: 1, auth_headers: [] },
+    ] } } })
+    const s = await client.status()
+    expect(s.installiert.map((i) => i.detail)).toEqual([null, 'abgemeldet', 'zeitueberschreitung', null])
+    const flat = JSON.stringify(s)
+    expect(flat).not.toContain('INTEGRATION_GITHUB_PAT')
+    expect(flat).not.toContain('irgendwas')
+  })
+  it('M3 anmelden oeffnet die normalisierte, gepruefte URL', async () => {
+    const { client, openExternal } = deps({ 'POST /api/integrations/vercel/oauth/start': { status: 200, body: { anmelde_url: 'https://Vercel.COM/oauth/authorize?x=1' } } })
+    expect(await client.anmelden('vercel')).toEqual({ ok: true })
+    expect(openExternal).toHaveBeenCalledWith('https://vercel.com/oauth/authorize?x=1')
+  })
+  it('M3 schluessel oeffnet die normalisierte, gepruefte URL', async () => {
+    const { client, openExternal } = deps({ 'POST /api/integrations/github/schluessel/link': { status: 200, body: { url: 'HTTP://127.0.0.1:4200/api/integrations/github/schluessel/abc' } } })
+    expect(await client.schluessel('github')).toEqual({ ok: true })
+    expect(openExternal).toHaveBeenCalledWith('http://127.0.0.1:4200/api/integrations/github/schluessel/abc')
+  })
+  it('M4 Positivliste: anmelde_url und token einer installierten Integration fehlen', async () => {
+    const { client } = deps({ ...OK3, 'GET /api/integrations': { status: 200, body: { installed: [
+      { id: 'vercel', name: 'V', icon: 'v', zustand: 'anmeldung_noetig', detail: null, tool_count: 0, auth_headers: [],
+        anmelde_url: 'https://x.example/?state=STATE-XYZ', token: 'TOKEN-XYZ' },
+    ] } } })
+    const flat = JSON.stringify(await client.status())
+    for (const verboten of ['anmelde_url', 'STATE-XYZ', 'TOKEN-XYZ', 'token']) expect(flat).not.toContain(verboten)
   })
 })
