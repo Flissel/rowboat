@@ -36,8 +36,10 @@ const VERBINDUNG_MELDUNG: Record<Exclude<Verbindung, 'ok'>, string> = {
 // wird nie angezeigt.
 const SICHERE_KLASSE = new RegExp(
   '^(?:tresor nicht verfuegbar|erneuerung fehlgeschlagen|anmeldung abgebrochen|state ungueltig' +
-  '|ermittlung fehlgeschlagen: [a-z0-9 ]{1,40}' +
-  '|nicht erreichbar: [a-z0-9 ]{1,40}' +
+  '|ermittlung fehlgeschlagen: (?:fremder host|iss passt nicht|issuer passt nicht|kein anmeldeserver|kein s256|keine client_id' +
+  '|keine selbstregistrierung|resource passt nicht|schutzbeschreibung fremder host|schutzbeschreibung nicht lesbar' +
+  '|ungueltige url|unsicheres schema|unzulaessiger host|weiterleitung)' +
+  '|nicht erreichbar: [a-z ]{1,30}' +
   '|(?:registrierung abgelehnt|token-tausch fehlgeschlagen|erneuerung fehlgeschlagen|widerruf fehlgeschlagen) \\(http \\d{3}\\))$',
 )
 
@@ -101,7 +103,7 @@ export function createOpenFangIntegrations(deps: OpenFangDeps): OpenFangIntegrat
       throw new VerbindungsFehler('openfang_aus')
     }
     log(`integrations ${label} status=${res.status} dauer_ms=${Date.now() - start}`)
-    if (res.status >= 300 && res.status < 400) throw new VerbindungsFehler('openfang_aus')
+    if (res.type === 'opaqueredirect' || res.status === 0 || (res.status >= 300 && res.status < 400)) throw new VerbindungsFehler('openfang_aus')
     if (res.status === 401) throw new VerbindungsFehler('schluessel_falsch')
     const parsed = await res.json().catch(() => null)
     return { status: res.status, body: parsed }
@@ -144,6 +146,16 @@ export function createOpenFangIntegrations(deps: OpenFangDeps): OpenFangIntegrat
     return gut(a) ? { ok: true } : fehler(a)
   }
 
+  async function folge(zustand: string, f: () => Promise<AktionsErgebnis>): Promise<AktionsErgebnis> {
+    try {
+      const r = await f()
+      return r.ok ? { ok: true, zustand } : { ...r, zustand }
+    } catch (e) {
+      if (e instanceof VerbindungsFehler) return { ok: false, zustand, meldung: VERBINDUNG_MELDUNG[e.art] }
+      throw e
+    }
+  }
+
   return {
     async status() {
       try {
@@ -152,7 +164,9 @@ export function createOpenFangIntegrations(deps: OpenFangDeps): OpenFangIntegrat
           rufe('GET', '/api/integrations/available', 'verfuegbar'),
           rufe('GET', '/api/approvals', 'freigaben'),
         ])
-        const offen = arr(obj(frei.body).approvals).map(obj).filter((x) => x.status === 'pending').map((x) => str(x.tool_name))
+        if (!gut(inst) && inst.status !== 401) throw new VerbindungsFehler('openfang_aus')
+        if (!gut(verf) && verf.status !== 401) throw new VerbindungsFehler('openfang_aus')
+        const offen = (gut(frei) ? arr(obj(frei.body).approvals) : []).map(obj).filter((x) => x.status === 'pending').map((x) => str(x.tool_name))
         const installiert = arr(obj(inst.body).installed).map(obj)
           .filter((x) => typeof x.id === 'string' && INTEGRATION_ID_RE.test(x.id as string))
           .map((x): InstallierteIntegration => {
@@ -184,8 +198,8 @@ export function createOpenFangIntegrations(deps: OpenFangDeps): OpenFangIntegrat
       const a = await rufe('POST', '/api/integrations/add', `add id=${id}`, { id })
       if (!gut(a)) return fehler(a)
       const zustand = str(obj(a.body).zustand, 'unbekannt')
-      if (zustand === 'anmeldung_noetig') { const r = await oeffneAnmeldung(id); return r.ok ? { ok: true, zustand } : { ...r, zustand } }
-      if (zustand === 'fehlt_schluessel') { const r = await oeffneSchluessel(id); return r.ok ? { ok: true, zustand } : { ...r, zustand } }
+      if (zustand === 'anmeldung_noetig') { const r = await folge(zustand, () => oeffneAnmeldung(id)); return r }
+      if (zustand === 'fehlt_schluessel') { const r = await folge(zustand, () => oeffneSchluessel(id)); return r }
       return { ok: true, zustand }
     }),
     anmelden: (id) => aktion('anmelden', id, () => oeffneAnmeldung(id)),

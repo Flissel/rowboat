@@ -177,3 +177,37 @@ describe('URL-Pruefung', () => {
       expect(sichereMeldung(bad, 500)).toBe('Aktion fehlgeschlagen (HTTP 500)')
   })
 })
+
+describe('Fix round 1', () => {
+  it('500 auf /api/integrations -> openfang_aus, leere Listen', async () => {
+    const s = await deps({ ...OK3, 'GET /api/integrations': { status: 500, body: {} } }).client.status()
+    expect(s).toEqual({ verbindung: 'openfang_aus', installiert: [], verfuegbar: [] })
+  })
+  it('404 auf /available -> openfang_aus', async () => {
+    const s = await deps({ ...OK3, 'GET /api/integrations/available': { status: 404, body: {} } }).client.status()
+    expect(s).toEqual({ verbindung: 'openfang_aus', installiert: [], verfuegbar: [] })
+  })
+  it('500 auf /api/approvals -> ok, installiert intakt, offeneFreigaben 0', async () => {
+    const s = await deps({ ...OK3, 'GET /api/approvals': { status: 500, body: {} } }).client.status()
+    expect(s.verbindung).toBe('ok')
+    expect(s.installiert).toHaveLength(2)
+    expect(s.installiert.map((i) => i.offeneFreigaben)).toEqual([0, 0])
+  })
+  it('opaqueredirect / status 0 -> openfang_aus', async () => {
+    const fake = (async () => ({ status: 0, type: 'opaqueredirect', json: async () => ({}) })) as unknown as typeof fetch
+    const client = createOpenFangIntegrations({ fetch: fake, apiKey: () => 'K', openExternal: async () => {} })
+    expect((await client.status()).verbindung).toBe('openfang_aus')
+  })
+  it('sichereMeldung: strengere Klassen', () => {
+    for (const bad of ['ermittlung fehlgeschlagen: abc123def456', 'nicht erreichbar: a1b2'])
+      expect(sichereMeldung({ error: bad }, 500)).toBe('Aktion fehlgeschlagen (HTTP 500)')
+    expect(sichereMeldung({ error: 'ermittlung fehlgeschlagen: keine client_id' }, 409)).toBe('ermittlung fehlgeschlagen: keine client_id')
+  })
+  it('add: Folgeaufruf scheitert -> ok false mit zustand', async () => {
+    const { client } = deps({ 'POST /api/integrations/add': { status: 201, body: { zustand: 'anmeldung_noetig' } } })
+    const r = await client.add('vercel')
+    expect(r.ok).toBe(false)
+    expect(r.zustand).toBe('anmeldung_noetig')
+    expect(typeof r.meldung).toBe('string')
+  })
+})
