@@ -79,4 +79,22 @@ describe('IntegrationsPage', () => {
     await act(async () => { await vi.advanceTimersByTimeAsync(60_000) })
     expect(invoke.mock.calls.filter((c) => c[0] === 'integrations:status').length).toBe(n0 + 1)
   })
+  it('M2 bei openfang_aus nur der Hinweis, keine Leer-Texte der Listen', async () => {
+    invoke.mockImplementation(async () => ({ verbindung: 'openfang_aus', installiert: [], verfuegbar: [] }))
+    render(<IntegrationsPage visible />)
+    expect(await screen.findByText('OpenFang läuft nicht (127.0.0.1:4200)')).toBeInTheDocument()
+    expect(screen.queryByText('Noch keine Integration installiert.')).not.toBeInTheDocument()
+    expect(screen.queryByText('Keine weiteren Vorlagen verfügbar.')).not.toBeInTheDocument()
+    expect(screen.queryByText('Installiert')).not.toBeInTheDocument()
+  })
+  it('nach erfolgreicher Browser-Aktion kommt die erste schnelle Abfrage nach 3 s', async () => {
+    vi.useFakeTimers()
+    render(<IntegrationsPage visible />)
+    await act(async () => { await vi.advanceTimersByTimeAsync(0) })
+    const btn = screen.getByRole('button', { name: 'Notion hinzufügen' })
+    await act(async () => { fireEvent.click(btn); await vi.advanceTimersByTimeAsync(0) })
+    const n0 = invoke.mock.calls.filter((c) => c[0] === 'integrations:status').length
+    await act(async () => { await vi.advanceTimersByTimeAsync(3_000) })
+    expect(invoke.mock.calls.filter((c) => c[0] === 'integrations:status').length).toBe(n0 + 1)
+  })
 })

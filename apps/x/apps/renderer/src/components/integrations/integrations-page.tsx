@@ -25,6 +25,9 @@ export function IntegrationsPage({ visible }: { visible: boolean }) {
   const [status, setStatus] = useState<Status | null>(null)
   const [laufend, setLaufend] = useState<Set<string>>(new Set())
   const [rueckfrage, setRueckfrage] = useState<Rueckfrage>(null)
+  // Erhoeht nach erfolgreicher Browser-Aktion: startet die Abfrage neu, damit die erste
+  // schnelle Runde nicht hinter einem laufenden 10-s-Timer wartet.
+  const [neustart, setNeustart] = useState(0)
   const schnellBis = useRef(0)
   const laufendRef = useRef<Set<string>>(new Set())
 
@@ -44,7 +47,7 @@ export function IntegrationsPage({ visible }: { visible: boolean }) {
     }
     void runde()
     return () => { aus = true; if (timer) clearTimeout(timer) }
-  }, [visible, laden])
+  }, [visible, laden, neustart])
 
   const ausfuehren = useCallback(async (schluessel: string, f: () => Promise<{ ok: boolean; meldung?: string }>, browser: boolean) => {
     if (laufendRef.current.has(schluessel)) return
@@ -53,8 +56,12 @@ export function IntegrationsPage({ visible }: { visible: boolean }) {
     try {
       const r = await f()
       if (!r.ok) toast.error(r.meldung ?? 'Aktion fehlgeschlagen')
-      else if (browser) schnellBis.current = Date.now() + SCHNELL_DAUER_MS
-      await laden()
+      if (r.ok && browser) {
+        schnellBis.current = Date.now() + SCHNELL_DAUER_MS
+        setNeustart((n) => n + 1) // Effekt laedt sofort neu und plant die naechste Runde in 3 s
+      } else {
+        await laden()
+      }
     } catch {
       toast.error('Aktion fehlgeschlagen')
     } finally {
@@ -80,6 +87,7 @@ export function IntegrationsPage({ visible }: { visible: boolean }) {
         {verbindung === 'openfang_aus' && <div role="alert" className="rounded-md border border-red-500/40 bg-red-500/10 p-3 text-sm">OpenFang läuft nicht (127.0.0.1:4200)</div>}
         {(verbindung === 'schluessel_fehlt' || verbindung === 'schluessel_falsch') && <div role="alert" className="rounded-md border border-amber-500/40 bg-amber-500/10 p-3 text-sm">{SCHLUESSEL_HINWEIS}</div>}
 
+        {verbindung === 'ok' && <>
         <section className="flex flex-col gap-3">
           <h2 className="text-sm font-medium text-muted-foreground">Installiert</h2>
           {status?.installiert.length === 0 && <p className="text-sm text-muted-foreground">Noch keine Integration installiert.</p>}
@@ -106,6 +114,7 @@ export function IntegrationsPage({ visible }: { visible: boolean }) {
             </div>
           ))}
         </section>
+        </>}
       </div>
 
       <AlertDialog open={rueckfrage !== null} onOpenChange={(o) => { if (!o) setRueckfrage(null) }}>
