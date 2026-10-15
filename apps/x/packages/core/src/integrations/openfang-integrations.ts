@@ -178,7 +178,7 @@ export function createOpenFangIntegrations(deps: OpenFangDeps): OpenFangIntegrat
               icon: str(x.icon),
               zustand,
               detail: typeof x.detail === 'string' ? x.detail : null,
-              werkzeuge: zustand === 'verbunden' && typeof x.tool_count === 'number' ? x.tool_count : 0,
+              werkzeuge: zustand === 'verbunden' && Number.isInteger(x.tool_count) && (x.tool_count as number) >= 0 ? (x.tool_count as number) : 0,
               statischerSchluessel: arr(x.auth_headers).length > 0,
               offeneFreigaben: offen.filter((t) => t.startsWith(werkzeugPraefix(id))).length,
             }

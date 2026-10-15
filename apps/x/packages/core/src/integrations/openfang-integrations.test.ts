@@ -64,6 +64,13 @@ describe('status', () => {
       'GET /api/approvals': { status: 200, body: { approvals: [{ tool_name: 'mcp_azure_mcp_list', status: 'pending' }, { tool_name: 'mcp_azure_list', status: 'pending' }] } } })
     expect((await client.status()).installiert[0].offeneFreigaben).toBe(1)
   })
+  it('tool_count ausserhalb Ganzzahl >= 0 ergibt werkzeuge 0', async () => {
+    for (const tc of [-1, 2.5, NaN, Infinity, '46']) {
+      const { client } = deps({ ...OK3,
+        'GET /api/integrations': { status: 200, body: { installed: [{ id: 'g', name: 'G', icon: 'g', zustand: 'verbunden', detail: null, tool_count: tc, auth_headers: [] }] } } })
+      expect((await client.status()).installiert[0].werkzeuge).toBe(0)
+    }
+  })
   it('ohne Schluessel: schluessel_fehlt ohne Netzaufruf', async () => {
     const { client, calls } = deps(OK3, '')
     expect((await client.status()).verbindung).toBe('schluessel_fehlt')
