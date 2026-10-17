@@ -131,14 +131,19 @@ if (singleInstance && !app.requestSingleInstanceLock()) {
 
 // Register as the OS handler for rowboat:// URLs.
 // In dev, point at the right argv so the OS can re-invoke us correctly.
-if (process.defaultApp) {
-  if (process.argv.length >= 2) {
-    app.setAsDefaultProtocolClient(DEEP_LINK_SCHEME, process.execPath, [
-      path.resolve(process.argv[1]),
-    ]);
+// VibeMind-Einbettung: nicht registrieren. Die Registrierung zeigt auf diesen Kern ohne --embed;
+// ein vom OS gestarteter Deep Link liefe dann ohne Single-Instance-Sperre (ungebaut) und
+// startete einen zweiten Kern auf demselben WorkDir.
+if (!embedRequested()) {
+  if (process.defaultApp) {
+    if (process.argv.length >= 2) {
+      app.setAsDefaultProtocolClient(DEEP_LINK_SCHEME, process.execPath, [
+        path.resolve(process.argv[1]),
+      ]);
+    }
+  } else {
+    app.setAsDefaultProtocolClient(DEEP_LINK_SCHEME);
   }
-} else {
-  app.setAsDefaultProtocolClient(DEEP_LINK_SCHEME);
 }
 
 // First-launch URL on Windows/Linux comes through argv.
@@ -896,6 +901,9 @@ app.on("window-all-closed", () => {
   // Resident app: with a tray present, keep running with no windows so
   // meeting detection/notifications stay alive (Granola-style). Without a
   // tray (creation failed), fall back to the platform-default quit.
+  // VibeMind-Einbettung: nie beenden — die eingebettete Ansicht in der voice-App braucht den Kern
+  // auch dann, wenn jemand Rowboats eigenes Fenster schliesst.
+  if (embedRequested()) return;
   if (process.platform !== "darwin" && !hasTray()) {
     app.quit();
   }
