@@ -2,10 +2,11 @@ import crypto from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import type { Duplex } from 'node:stream';
+import { Readable, type Duplex } from 'node:stream';
+import type { ReadableStream as WebReadableStream } from 'node:stream/web';
 import { WebSocket, WebSocketServer, type RawData } from 'ws';
 import { z } from 'zod';
-import { tokenMatches } from './auth.js';
+import { extractBearer, tokenMatches } from './auth.js';
 
 // VibeMind-Einbettung (Spec vibemind-os 2026-10-17-rowboat-einbettung): ein lokaler Zugang, ueber
 // den eine fremde Electron-Ansicht (die Multiverse-Ansicht der voice-App) Rowboats eigene
@@ -225,10 +226,48 @@ export async function startEmbedBridge(opts: EmbedBridgeOptions): Promise<EmbedB
     socket.on('error', (err) => log(`[embed] socket error: ${err.message}`));
   }
 
-  // Task 3 ersetzt das durch den app://-Medienweg.
-  async function handleHttp(_req: IncomingMessage, res: ServerResponse): Promise<void> {
-    res.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' });
-    res.end('Not Found');
+  function endText(res: ServerResponse, status: number, text: string): void {
+    res.writeHead(status, { 'content-type': 'text/plain; charset=utf-8' });
+    res.end(text);
+  }
+
+  // app:// ueber HTTP: dieselben Inhalte, die die App ueber ihr Protokoll liefert (Oberflaeche,
+  // Workspace-Dateien, Vorschauen, Space-Blobs/-Dokumente), fuer die eingebettete Ansicht.
+  async function handleHttp(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    try {
+      if (closing) return endText(res, 503, 'Service Unavailable');
+      if (!hostOk(req) || fromBrowser(req)) return endText(res, 403, 'Forbidden');
+      const url = new URL(req.url ?? '/', `http://127.0.0.1:${port}`);
+      if (!url.pathname.startsWith('/app/')) return endText(res, 404, 'Not Found');
+      if (req.method !== 'GET' && req.method !== 'HEAD') return endText(res, 405, 'Method Not Allowed');
+      const presented = extractBearer(req.headers.authorization);
+      if (!presented || !tokenMatches(presented, opts.token)) return endText(res, 401, 'Unauthorized');
+      const rest = url.pathname.slice('/app/'.length);
+      const slash = rest.indexOf('/');
+      const host = slash === -1 ? rest : rest.slice(0, slash);
+      const pathPart = slash === -1 ? '/' : rest.slice(slash);
+      if (!host) return endText(res, 404, 'Not Found');
+      const headers = new Headers();
+      if (typeof req.headers.range === 'string') headers.set('range', req.headers.range);
+      const response = await opts.serveApp(new Request(`app://${host}${pathPart}${url.search}`, { method: req.method, headers }));
+      res.writeHead(response.status, Object.fromEntries(response.headers));
+      if (req.method === 'HEAD' || !response.body) {
+        await response.body?.cancel();
+        res.end();
+        return;
+      }
+      const body = Readable.fromWeb(response.body as WebReadableStream<Uint8Array>);
+      body.on('error', (err) => {
+        log(`[embed] app stream failed: ${errorMessage(err)}`);
+        res.destroy();
+      });
+      res.on('close', () => body.destroy());
+      body.pipe(res);
+    } catch (err) {
+      log(`[embed] app request failed: ${errorMessage(err)}`);
+      if (!res.headersSent) endText(res, 500, 'Internal Error');
+      else res.destroy();
+    }
   }
 
   await new Promise<void>((resolve, reject) => {

@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest'
+import { request as httpRequest } from 'node:http'
 import { WebSocket } from 'ws'
 import { ipc } from '@x/shared'
 import {
@@ -240,5 +241,79 @@ describe('Einbettungszugang: Schliessen und Fehlerpfade', () => {
     const c = await loggedIn(b)
     c.send({ type: 'invoke', id: 1, channel: 'workspace:exists', args: null })
     expect(await c.next()).toEqual({ type: 'result', id: 1, ok: false, error: { message: 'u kaputt' } })
+  })
+})
+
+function get(b: EmbedBridge, path: string, headers: Record<string, string> = {}, method = 'GET') {
+  return new Promise<{ status: number; headers: Record<string, string | string[] | undefined>; body: string }>((resolve, reject) => {
+    const req = httpRequest({ host: '127.0.0.1', port: b.port, path, method, headers }, (res) => {
+      let body = ''
+      res.setEncoding('utf8')
+      res.on('data', (c: string) => { body += c })
+      res.on('end', () => resolve({ status: res.statusCode ?? 0, headers: res.headers, body }))
+    })
+    req.on('error', reject)
+    req.end()
+  })
+}
+const auth = { authorization: `Bearer ${TOKEN}` }
+
+describe('Einbettungszugang: app:// ueber HTTP', () => {
+  it('reicht die Anfrage als app://-Request an serveApp und liefert die Antwort', async () => {
+    const seen: string[] = []
+    const { b } = await bridge({ serveApp: async (r) => { seen.push(r.url); return new Response('<html>ok</html>', { headers: { 'content-type': 'text/html' } }) } })
+    const res = await get(b, '/app/-/index.html', auth)
+    expect(res.status).toBe(200)
+    expect(res.body).toBe('<html>ok</html>')
+    expect(res.headers['content-type']).toBe('text/html')
+    expect(seen).toEqual(['app://-/index.html'])
+  })
+  it('ohne oder mit falschem Token: 401, serveApp wird nicht gerufen', async () => {
+    const seen: string[] = []
+    const { b } = await bridge({ serveApp: async (r) => { seen.push(r.url); return new Response('x') } })
+    expect((await get(b, '/app/-/index.html')).status).toBe(401)
+    expect((await get(b, '/app/-/index.html', { authorization: 'Bearer falsch' })).status).toBe(401)
+    expect(seen).toEqual([])
+  })
+  it('Range geht durch, 206 und content-range kommen zurueck', async () => {
+    let range: string | null = null
+    const { b } = await bridge({
+      serveApp: async (r) => { range = r.headers.get('range'); return new Response('abc', { status: 206, headers: { 'content-range': 'bytes 0-2/10' } }) },
+    })
+    const res = await get(b, '/app/workspace/video.mp4', { ...auth, range: 'bytes=0-2' })
+    expect(range).toBe('bytes=0-2')
+    expect(res.status).toBe(206)
+    expect(res.headers['content-range']).toBe('bytes 0-2/10')
+    expect(res.body).toBe('abc')
+  })
+  it('Query und kodierte Pfade kommen genau einmal kodiert an', async () => {
+    const seen: string[] = []
+    const { b } = await bridge({ serveApp: async (r) => { seen.push(r.url); return new Response('x') } })
+    await get(b, '/app/space-blob/o1/s1/h1?thumb=64', auth)
+    await get(b, '/app/workspace/Meine%20Notizen/b%C3%A4r.png', auth)
+    expect(seen).toEqual(['app://space-blob/o1/s1/h1?thumb=64', 'app://workspace/Meine%20Notizen/b%C3%A4r.png'])
+  })
+  it('Status von serveApp (404) geht durch', async () => {
+    const { b } = await bridge({ serveApp: async () => new Response('Not Found', { status: 404 }) })
+    expect((await get(b, '/app/workspace/fehlt.png', auth)).status).toBe(404)
+  })
+  it('HEAD liefert Header ohne Body', async () => {
+    const { b } = await bridge({ serveApp: async () => new Response('abc', { headers: { 'content-type': 'text/plain' } }) })
+    const res = await get(b, '/app/-/index.html', auth, 'HEAD')
+    expect(res.status).toBe(200)
+    expect(res.body).toBe('')
+  })
+  it('andere Pfade 404, andere Methoden 405, Origin und fremder Host 403', async () => {
+    const { b } = await bridge()
+    expect((await get(b, '/sonstwas', auth)).status).toBe(404)
+    expect((await get(b, '/app/-/index.html', auth, 'POST')).status).toBe(405)
+    expect((await get(b, '/app/-/index.html', { ...auth, origin: 'https://evil.example' })).status).toBe(403)
+    expect((await get(b, '/app/-/index.html', { ...auth, host: 'localhost' })).status).toBe(403)
+  })
+  it('Fehler in serveApp: 500, Zugang laeuft weiter', async () => {
+    const { b } = await bridge({ serveApp: async () => { throw new Error('kaputt') } })
+    expect((await get(b, '/app/-/index.html', auth)).status).toBe(500)
+    const c = await loggedIn(b)
+    expect(c.welcome.type).toBe('welcome')
   })
 })
