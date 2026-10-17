@@ -109,6 +109,9 @@ export async function startEmbedBridge(opts: EmbedBridgeOptions): Promise<EmbedB
   const helloTimeoutMs = opts.helloTimeoutMs ?? EMBED_HELLO_TIMEOUT_MS;
   const maxBytes = opts.maxMessageBytes ?? EMBED_MAX_MESSAGE_BYTES;
   const connections = new Set<Connection>();
+  // Jede Verbindung ab attach(), auch vor dem hello; close() beendet alle.
+  const sockets = new Set<WebSocket>();
+  let closing = false;
   let port = 0;
 
   const fromBrowser = (req: IncomingMessage) => req.headers.origin !== undefined;
@@ -125,11 +128,20 @@ export async function startEmbedBridge(opts: EmbedBridgeOptions): Promise<EmbedB
       socket.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n');
       return;
     }
+    if (closing) {
+      socket.end('HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\n\r\n');
+      return;
+    }
     wss.handleUpgrade(req, socket, head, (ws) => attach(ws));
   });
 
   function attach(socket: WebSocket): void {
     let sender: EmbedSenderImpl | null = null;
+    sockets.add(socket);
+    if (closing) {
+      socket.terminate();
+      return;
+    }
     const helloTimer = setTimeout(() => socket.close(EMBED_CLOSE_UNAUTHORIZED, 'hello timeout'), helloTimeoutMs);
     const sendJson = (msg: unknown): void => {
       if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify(msg));
@@ -144,7 +156,7 @@ export async function startEmbedBridge(opts: EmbedBridgeOptions): Promise<EmbedB
         return;
       }
       if (!sender) {
-        if (msg.type !== 'hello' || !tokenMatches(msg.token, opts.token)) {
+        if (closing || msg.type !== 'hello' || !tokenMatches(msg.token, opts.token)) {
           socket.close(EMBED_CLOSE_UNAUTHORIZED, 'unauthorized');
           return;
         }
@@ -154,32 +166,59 @@ export async function startEmbedBridge(opts: EmbedBridgeOptions): Promise<EmbedB
         const entry: Connection = { socket, sender: own };
         connections.add(entry);
         socket.once('close', () => connections.delete(entry));
-        sendJson({ type: 'welcome', v: EMBED_PROTOCOL_VERSION, invokeChannels: [...opts.invokeChannels()] });
+        // Wirft invokeChannels, bleibt die Kanalliste leer (geloggt); die Verbindung bleibt nutzbar.
+        let channels: string[] = [];
+        try {
+          channels = [...opts.invokeChannels()];
+        } catch (err) {
+          log(`[embed] invokeChannels failed: ${errorMessage(err)}`);
+        }
+        sendJson({ type: 'welcome', v: EMBED_PROTOCOL_VERSION, invokeChannels: channels });
         return;
       }
       if (msg.type === 'hello') return;
       if (msg.type === 'show-app') {
-        opts.onShowApp();
+        try {
+          opts.onShowApp();
+        } catch (err) {
+          log(`[embed] onShowApp failed: ${errorMessage(err)}`);
+        }
         return;
       }
       const { id, channel, args } = msg;
-      if (opts.isUnsupported(channel)) {
+      const fail = (err: unknown): void => sendJson({ type: 'result', id, ok: false, error: { message: errorMessage(err) } });
+      let unsupported: boolean;
+      try {
+        unsupported = opts.isUnsupported(channel);
+      } catch (err) {
+        fail(err);
+        return;
+      }
+      if (unsupported) {
         sendJson({ type: 'result', id, ok: false, error: { code: EMBED_UNSUPPORTED, message: `${EMBED_UNSUPPORTED}: ${channel} gibt es nur im Rowboat-Fenster` } });
         return;
       }
-      opts.invoke(channel, sender, args).then(
-        (result) => {
-          const text = JSON.stringify({ type: 'result', id, ok: true, result });
-          if (Buffer.byteLength(text) > maxBytes) {
-            sendJson({ type: 'result', id, ok: false, error: { code: EMBED_TOO_LARGE, message: `${EMBED_TOO_LARGE}: Antwort auf ${channel} ueber ${maxBytes} Bytes` } });
-            return;
-          }
-          if (socket.readyState === WebSocket.OPEN) socket.send(text);
-        },
-        (err: unknown) => sendJson({ type: 'result', id, ok: false, error: { message: errorMessage(err) } }),
-      );
+      const own = sender;
+      Promise.resolve()
+        .then(() => opts.invoke(channel, own, args))
+        .then(
+          (result) => {
+            try {
+              const text = JSON.stringify({ type: 'result', id, ok: true, result });
+              if (Buffer.byteLength(text) > maxBytes) {
+                sendJson({ type: 'result', id, ok: false, error: { code: EMBED_TOO_LARGE, message: `${EMBED_TOO_LARGE}: Antwort auf ${channel} ueber ${maxBytes} Bytes` } });
+                return;
+              }
+              if (socket.readyState === WebSocket.OPEN) socket.send(text);
+            } catch (err) {
+              fail(err);
+            }
+          },
+          fail,
+        );
     });
     socket.on('close', () => {
+      sockets.delete(socket);
       clearTimeout(helloTimer);
       sender?.destroy();
     });
@@ -210,7 +249,8 @@ export async function startEmbedBridge(opts: EmbedBridgeOptions): Promise<EmbedB
     },
     connectionCount: () => connections.size,
     async close() {
-      for (const c of connections) c.socket.terminate();
+      closing = true;
+      for (const s of sockets) s.terminate();
       wss.close();
       http.closeAllConnections();
       await new Promise<void>((resolve) => http.close(() => resolve()));

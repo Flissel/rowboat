@@ -193,3 +193,52 @@ describe('Einbettungszugang: Absender und Push', () => {
     expect((await anon.next()).type).toBe('welcome') // kein Push vor der Anmeldung
   })
 })
+
+describe('Einbettungszugang: Schliessen und Fehlerpfade', () => {
+  it('close() endet zuegig, auch mit unangemeldeter Verbindung', async () => {
+    const { b } = await bridge({ helloTimeoutMs: 60_000 })
+    const c = client(b); await c.opened
+    const done = await Promise.race([
+      b.close().then(() => 'closed'),
+      new Promise((r) => setTimeout(() => r('hang'), 3000)),
+    ])
+    expect(done).toBe('closed')
+    await c.closed
+  })
+  it('hello nach Beginn von close() ergibt kein welcome und keinen Handleraufruf', async () => {
+    const { b, calls } = await bridge({ helloTimeoutMs: 60_000 })
+    const c = client(b); await c.opened
+    const closing = b.close()
+    let welcomed = false
+    c.ws.on('message', () => { welcomed = true })
+    try { c.send({ type: 'hello', v: 1, token: TOKEN }) } catch { /* Socket schon zu */ }
+    try { c.send({ type: 'invoke', id: 1, channel: 'workspace:exists', args: null }) } catch { /* ebenso */ }
+    await c.closed
+    await closing
+    expect(welcomed).toBe(false)
+    expect(calls).toEqual([])
+    expect(b.connectionCount()).toBe(0)
+  })
+  it('synchron werfender invoke ergibt ok:false mit Meldung', async () => {
+    const { b } = await bridge({ invoke: (() => { throw new Error('sync kaputt') }) as EmbedBridgeOptions['invoke'] })
+    const c = await loggedIn(b)
+    c.send({ type: 'invoke', id: 1, channel: 'workspace:exists', args: null })
+    expect(await c.next()).toEqual({ type: 'result', id: 1, ok: false, error: { message: 'sync kaputt' } })
+  })
+  it('nicht serialisierbares Ergebnis (BigInt) ergibt ok:false, Verbindung bleibt nutzbar', async () => {
+    let n = 0
+    const { b } = await bridge({ invoke: async () => (n++ === 0 ? { v: 10n } : 'fein') })
+    const c = await loggedIn(b)
+    c.send({ type: 'invoke', id: 1, channel: 'workspace:exists', args: null })
+    const r = await c.next()
+    expect(r).toMatchObject({ type: 'result', id: 1, ok: false })
+    c.send({ type: 'invoke', id: 2, channel: 'workspace:exists', args: null })
+    expect(await c.next()).toEqual({ type: 'result', id: 2, ok: true, result: 'fein' })
+  })
+  it('werfendes isUnsupported ergibt ok:false fuer diese id', async () => {
+    const { b } = await bridge({ isUnsupported: () => { throw new Error('u kaputt') } })
+    const c = await loggedIn(b)
+    c.send({ type: 'invoke', id: 1, channel: 'workspace:exists', args: null })
+    expect(await c.next()).toEqual({ type: 'result', id: 1, ok: false, error: { message: 'u kaputt' } })
+  })
+})
