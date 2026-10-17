@@ -316,4 +316,39 @@ describe('Einbettungszugang: app:// ueber HTTP', () => {
     const c = await loggedIn(b)
     expect(c.welcome.type).toBe('welcome')
   })
+  it('Abbruch des Clients waehrend serveApp noch wartet: Quell-Stream wird abgebrochen', async () => {
+    let cancelled = false
+    let started!: () => void
+    const reached = new Promise<void>((r) => { started = r })
+    let release!: () => void
+    const gate = new Promise<void>((r) => { release = r })
+    const uncaught: unknown[] = []
+    const onUncaught = (e: unknown) => { uncaught.push(e) }
+    process.on('uncaughtException', onUncaught)
+    try {
+      const { b } = await bridge({
+        serveApp: async () => {
+          started()
+          await gate
+          return new Response(new ReadableStream<Uint8Array>({
+            pull(c) { c.enqueue(new Uint8Array([1, 2, 3])) },
+            cancel() { cancelled = true },
+          }))
+        },
+      })
+      const req = httpRequest({ host: '127.0.0.1', port: b.port, path: '/app/workspace/video.mp4', headers: auth })
+      req.on('error', () => {})
+      req.end()
+      await reached
+      req.destroy()
+      await new Promise((r) => setTimeout(r, 100))
+      release()
+      for (let i = 0; i < 50 && !cancelled; i++) await new Promise((r) => setTimeout(r, 20))
+      expect(cancelled).toBe(true)
+      await new Promise((r) => setTimeout(r, 50))
+      expect(uncaught).toEqual([])
+    } finally {
+      process.off('uncaughtException', onUncaught)
+    }
+  })
 })

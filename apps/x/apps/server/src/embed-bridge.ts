@@ -249,7 +249,13 @@ export async function startEmbedBridge(opts: EmbedBridgeOptions): Promise<EmbedB
       if (!host) return endText(res, 404, 'Not Found');
       const headers = new Headers();
       if (typeof req.headers.range === 'string') headers.set('range', req.headers.range);
+      let aborted = res.destroyed || req.destroyed;
+      res.once('close', () => { aborted = true; });
       const response = await opts.serveApp(new Request(`app://${host}${pathPart}${url.search}`, { method: req.method, headers }));
+      if (aborted || res.destroyed) {
+        await response.body?.cancel().catch(() => {});
+        return;
+      }
       res.writeHead(response.status, Object.fromEntries(response.headers));
       if (req.method === 'HEAD' || !response.body) {
         await response.body?.cancel();
