@@ -42,6 +42,9 @@ const linkDistance = (link: Link3d) => LINK_DISTANCE[link.kind]
 // graph or rebuilding it after a workspace change continues from where the nodes were instead of a fresh layout.
 const knownPositions = new Map<string, Point3d>()
 
+// Nodes of the scene on screen; their live (mid-layout) positions seed the next data when the content changes.
+let shownNodes: Node3d[] = []
+
 function rememberPositions(nodes: Node3d[]) {
   for (const n of nodes) {
     if (typeof n.id === 'string' && Number.isFinite(n.x) && Number.isFinite(n.y) && Number.isFinite(n.z)) {
@@ -53,11 +56,15 @@ function rememberPositions(nodes: Node3d[]) {
 function GraphView3DInner({ nodes, edges, onSelectNode }: Props) {
   const containerRef = useRef<HTMLDivElement>(null)
   const [size, setSize] = useState<{ width: number; height: number } | null>(null)
-  // The app rebuilds its graph arrays on every workspace change; only a real content change makes new graph data.
-  const signature = useMemo(() => graph3dSignature(nodes, edges), [nodes, edges])
-  // Keyed on the signature alone on purpose: nodes/edges with the same content must keep the same data object.
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  const data = useMemo(() => toGraph3d(nodes, edges, knownPositions), [signature])
+  // The app rebuilds its graph arrays on every workspace change, even when no note changed. Holding on to the input
+  // until its content changes spares the view a needless relayout (and the camera a jump).
+  const signature = graph3dSignature(nodes, edges)
+  const [input, setInput] = useState({ signature, nodes, edges })
+  if (input.signature !== signature) setInput({ signature, nodes, edges })
+  const data = useMemo(() => {
+    rememberPositions(shownNodes)
+    return toGraph3d(input.nodes, input.edges, knownPositions)
+  }, [input])
   // A hidden keep-alive section runs its effect cleanups, and that destroys the 3D scene for good: three-render-objects
   // re-inits it invisible and without the graph (19.10.: graph gone after opening a note and going back). So the
   // scene is unmounted while hidden and built fresh when shown; the nodes keep their positions across that.
@@ -97,6 +104,14 @@ function Scene({ data, width, height, onSelectNode }: SceneProps) {
 
   useEffect(() => () => rememberPositions(data.nodes as Node3d[]), [data])
 
+  // Release the WebGL context on unmount: the library's destructor only disposes the renderer, so every hide/show
+  // would leave a live context behind (Chromium evicts at ~16). Layout cleanup: refs are already detached in a
+  // passive cleanup when the section hides.
+  useLayoutEffect(() => {
+    const renderer = graphRef.current?.renderer()
+    return () => renderer?.forceContextLoss()
+  }, [])
+
   // Layout effect: the forces must be in place before the library's first (deferred) layout pass runs.
   useLayoutEffect(() => {
     const graph = graphRef.current
@@ -105,19 +120,21 @@ function Scene({ data, width, height, onSelectNode }: SceneProps) {
     graph.d3Force('charge')?.strength?.(CHARGE)
     graph.d3Force('link')?.distance?.(linkDistance)
     graph.d3ReheatSimulation()
+    shownNodes = data.nodes as Node3d[]
+    // Frame the graph once, from the start positions (nodes start on their shells or where they were, so the layout
+    // barely grows). Not via zoomToFit: on the first ticks the meshes are still at the origin and it frames nothing.
+    if (!fittedRef.current) {
+      fittedRef.current = true
+      const radius = Math.max(SHELL_SPACING_3D, ...data.nodes.map((n) => Math.hypot(n.x ?? 0, n.y ?? 0, n.z ?? 0)))
+      const fov = (graph.camera() as { fov?: number }).fov ?? 50
+      const distance = (radius / Math.tan((fov / 2) * (Math.PI / 180))) * 1.15
+      graph.cameraPosition({ x: 0, y: 0, z: distance }, { x: 0, y: 0, z: 0 }, 0)
+    }
   }, [data])
 
   const handleNodeClick = useCallback((node: Node3d) => {
     if (typeof node.id === 'string') onSelectNode?.(node.id)
   }, [onSelectNode])
-
-  // Nodes start on their shells (or where they were), so the layout barely grows: frame it once right away, without
-  // animation, instead of a fly-in from the library's default camera followed by a late zoom when the layout stops.
-  const handleEngineTick = useCallback(() => {
-    if (fittedRef.current) return
-    fittedRef.current = true
-    graphRef.current?.zoomToFit(0, 40)
-  }, [])
 
   const handleEngineStop = useCallback(() => rememberPositions(data.nodes as Node3d[]), [data])
 
@@ -137,7 +154,6 @@ function Scene({ data, width, height, onSelectNode }: SceneProps) {
       linkLabel={linkLabel}
       onNodeClick={handleNodeClick}
       cooldownTicks={200}
-      onEngineTick={handleEngineTick}
       onEngineStop={handleEngineStop}
     />
   )
