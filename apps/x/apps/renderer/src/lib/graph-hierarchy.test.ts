@@ -1,6 +1,8 @@
 // Modified for VibeMind (Flissel/rowboat vibemind): tests for graphFileData.
 import { describe, expect, it } from 'vitest'
-import { DEFAULT_FORCES, buildHierarchyGraph, graphFileData, hierarchyForces, initialHierarchyPositions, parseHierarchy, parseVaultMap, SHELL_SPACING_3D, shellRadius, toGraph3d, vaultMapNodeId } from './graph-hierarchy'
+import { DEFAULT_FORCES, buildHierarchyGraph, graphFileData, hierarchyForces, initialHierarchyPositions, parseHierarchy, parseVaultMap, SHELL_SPACING_3D, graph3dSignature, seedPosition3d, shellRadius, toGraph3d, vaultMapNodeId } from './graph-hierarchy'
+
+type Graph3dNodeLike = { x?: number; y?: number; z?: number }
 
 const note = (front: string, body = '# Title\n') => `---\n${front}\n---\n${body}`
 
@@ -187,6 +189,60 @@ describe('toGraph3d', () => {
       ['link', 0, undefined],
     ])
     expect(links[2].opacity).toBeLessThan(links[0].opacity)
+  })
+
+  it('starts every node on its own shell, the same spot for the same id', () => {
+    const data = toGraph3d(nodes, edges)
+    for (const n of data.nodes) {
+      expect(Math.hypot(n.x ?? NaN, n.y ?? NaN, n.z ?? NaN)).toBeCloseTo(shellRadius(n.level), 6)
+    }
+    expect(toGraph3d(nodes, edges).nodes[1]).toEqual(data.nodes[1])
+    expect(seedPosition3d('a', 1)).not.toEqual(seedPosition3d('b', 1))
+  })
+
+  it('starts a child in the direction of its parent (no swirl across the shell)', () => {
+    const tree = [
+      { id: 'root', label: 'R', color: 'c', degree: 1, level: 0 },
+      { id: 'hub', label: 'H', color: 'c', degree: 2, level: 1 },
+      ...Array.from({ length: 20 }, (_, i) => ({ id: `kid${i}`, label: `K${i}`, color: 'c', degree: 1, level: 2 })),
+    ]
+    const parents = [
+      { source: 'hub', target: 'root', kind: 'parent' as const },
+      ...tree.slice(2).map((k) => ({ source: k.id, target: 'hub', kind: 'parent' as const })),
+    ]
+    const byId = new Map(toGraph3d(tree, parents).nodes.map((n) => [n.id, n]))
+    const hub = byId.get('hub')!
+    const angle = (a: Graph3dNodeLike, b: Graph3dNodeLike) =>
+      Math.acos((a.x! * b.x! + a.y! * b.y! + a.z! * b.z!) / (Math.hypot(a.x!, a.y!, a.z!) * Math.hypot(b.x!, b.y!, b.z!)))
+    for (let i = 0; i < 20; i++) {
+      const kid = byId.get(`kid${i}`)!
+      expect(Math.hypot(kid.x!, kid.y!, kid.z!)).toBeCloseTo(shellRadius(2), 6)
+      expect(angle(kid, hub)).toBeLessThan(0.8)
+    }
+  })
+
+  it('spreads the children of the centre node over the whole sphere', () => {
+    const tree = [
+      { id: 'root', label: 'R', color: 'c', degree: 30, level: 0 },
+      ...Array.from({ length: 30 }, (_, i) => ({ id: `area${i}`, label: `A${i}`, color: 'c', degree: 1, level: 1 })),
+    ]
+    const parents = tree.slice(1).map((k) => ({ source: k.id, target: 'root', kind: 'parent' as const }))
+    const kids = toGraph3d(tree, parents).nodes.slice(1)
+    const mean = kids.reduce((m, n) => ({ x: m.x + n.x! / kids.length, y: m.y + n.y! / kids.length, z: m.z + n.z! / kids.length }), { x: 0, y: 0, z: 0 })
+    expect(Math.hypot(mean.x, mean.y, mean.z)).toBeLessThan(0.5 * shellRadius(1))
+  })
+
+  it('keeps a known position instead of the seed', () => {
+    const known = new Map([['d', { x: 1, y: 2, z: 3 }]])
+    const d = toGraph3d(nodes, edges, known).nodes.find((n) => n.id === 'd')
+    expect([d?.x, d?.y, d?.z]).toEqual([1, 2, 3])
+  })
+
+  it('signature ignores new array identities but sees real changes', () => {
+    const sig = graph3dSignature(nodes, edges)
+    expect(graph3dSignature(nodes.map((n) => ({ ...n })), edges.map((e) => ({ ...e })))).toBe(sig)
+    expect(graph3dSignature(nodes, edges.slice(1))).not.toBe(sig)
+    expect(graph3dSignature([...nodes, { id: 'y', label: 'New', color: 'red', degree: 0 }], edges)).not.toBe(sig)
   })
 
   it('shell radius grows with the level and level 0 sits in the centre', () => {
