@@ -379,8 +379,9 @@ describe("ChannelRunGuard.check", () => {
             .resolves.toEqual({ kind: "default" });
         await expect(guard.check(builtin("todo-propose", { items: [{ text: "@rowboat research X" }] }), policy))
             .resolves.toMatchObject({ kind: "deny" });
+        // todo-propose feeds the scheduled Morning planner: not offered to channels at all.
         await expect(guard.check(builtin("todo-propose", { items: [{ text: "Am Desktop: X lesen" }] }), policy))
-            .resolves.toEqual({ kind: "default" });
+            .resolves.toMatchObject({ kind: "deny" });
     });
 
     it("round 4: run-starting, memory, MCP-config, browser, composio, blob and shell tools are cut", async () => {

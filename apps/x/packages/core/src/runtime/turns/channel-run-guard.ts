@@ -90,7 +90,6 @@ const CHANNEL_BUILTINS = new Set<string>([
     "executeMcpTool",
     "list-models",
     "todo-add",
-    "todo-propose",
     "home-status",
     "whiteboard-read",
     "list_scheduled",
@@ -112,7 +111,8 @@ const SENSITIVE_ENTRIES = [
 // The only workspace subtree a channel run may modify is the quarantine
 // knowledge/Kanal/ (fix round 4): nothing autonomous reads it, so a note a
 // prompt-injected channel run writes cannot steer a background agent. To-dos
-// are written through todo-add / todo-propose, never with file tools.
+// are written through todo-add, never with file tools. todo-propose is not
+// offered: its entries feed the scheduled Morning planner (round-4 review I1).
 const WRITE_ROOT = "knowledge";
 
 // Appended to the system prompt of every channel turn (runtime createTurn).
