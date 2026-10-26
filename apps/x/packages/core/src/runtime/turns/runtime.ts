@@ -203,7 +203,7 @@ export class TurnRuntime implements ITurnRuntime {
                     ? {}
                     : {
                           channel: {
-                              readOnlyMcpServers: [...channel.readOnlyMcpServers],
+                              readOnlyMcpTools: [...channel.readOnlyMcpTools],
                           },
                       }),
             },
@@ -1094,11 +1094,13 @@ class TurnAdvance {
         // invite the model to retry it (§21.4).
         let settled: z.infer<typeof ToolResultData>;
         try {
+            const channel = this.definition.config.channel;
             const result = await syncTool.execute(tc.input, {
                 turnId: this.turnId,
                 sessionId: this.definition.sessionId,
                 toolCallId: tc.toolCallId,
                 signal: this.signal,
+                ...(channel ? { channel } : {}),
                 reportProgress: async (progress) => {
                     await this.append({
                         type: "tool_progress",

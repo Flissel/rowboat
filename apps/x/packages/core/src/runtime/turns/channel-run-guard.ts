@@ -11,6 +11,9 @@
 //   2. before the permission checker for every tool call, so a call that
 //      slips through anyway (a stale/inherited snapshot, a hallucinated
 //      name) is refused with a clear message instead of executing.
+// Execution-time layers ride ToolContext.channel: file-grep / file-glob
+// filter every match through readFilter(), fetch-url uses channel-fetch.ts
+// (no private hosts, manual redirects).
 // The guard is an ALLOWLIST: a builtin not named below is unavailable in
 // channel runs — new catalog entries stay locked out until reviewed here.
 // Desktop (non-channel) turns never reach this module.
@@ -21,12 +24,13 @@ import type { z } from "zod";
 import type { ToolDescriptor } from "@x/shared/dist/turns.js";
 import { WorkDir } from "../../config/config.js";
 import { isPathInside, resolveFilePathForPermission } from "../../filesystem/files.js";
+import { splitFrontmatter } from "../../application/lib/parse-frontmatter.js";
 
 export interface ChannelRunPolicy {
-    // MCP servers whose tools are treated as read-only: auto-approved in
+    // MCP tools ("server:tool") treated as read-only: auto-approved in
     // channel runs without the LLM permission classifier. Every other MCP
-    // server is refused.
-    readOnlyMcpServers: string[];
+    // tool is refused.
+    readOnlyMcpTools: string[];
 }
 
 export interface ChannelToolCall {
@@ -55,8 +59,9 @@ const ASK_HUMAN = "ask-human";
 // Builtins a channel run may use. Everything else — executeCommand,
 // addMcpServer, listMcpServers (prints server env/headers), code agents,
 // background tasks, browser, composio, spawn-agent (its child turn would
-// not carry the channel flag), image/voice/deck/spreadsheet writers, ... —
-// is not offered and refused if called.
+// not carry the channel flag), save-to-memory (lands in every desktop
+// system prompt), image/voice/deck/spreadsheet writers, ... — is not offered
+// and refused if called.
 const CHANNEL_BUILTINS = new Set<string>([
     "loadSkill",
     ASK_HUMAN,
@@ -78,7 +83,6 @@ const CHANNEL_BUILTINS = new Set<string>([
     "fetch-url",
     "listMcpTools",
     "executeMcpTool",
-    "save-to-memory",
     "list-models",
     "todo-add",
     "todo-propose",
@@ -88,7 +92,7 @@ const CHANNEL_BUILTINS = new Set<string>([
 ]);
 
 // Workspace entries a channel run may never touch (read, list, search or
-// write): credentials and app-internal state.
+// write): credentials, app-internal state, deleted files.
 const SENSITIVE_ENTRIES = [
     "config",
     "server-key",
@@ -97,11 +101,14 @@ const SENSITIVE_ENTRIES = [
     ".electron-data",
     // telegram-state.json and the WhatsApp linked-device credentials.
     "channels",
+    ".trash",
 ];
 
 // The only workspace subtree a channel run may modify (notes). To-dos are
 // written through todo-add / todo-propose, never with file tools.
-const WRITE_ROOTS = ["knowledge"];
+const WRITE_ROOT = "knowledge";
+// Loaded into every desktop system prompt — never writable from a channel.
+const AGENT_NOTES = "agent notes";
 
 // Same pattern the todo runner uses to decide that an item is delegated
 // (todo/fileops.ts ROWBOAT_MENTION_RE): such an item starts a background
@@ -111,6 +118,38 @@ const ROWBOAT_MENTION_RE = /(^|\s)@rowboat\b/i;
 function isSensitiveSegment(segment: string): boolean {
     const s = segment.toLowerCase();
     return s.endsWith(".env") || s.startsWith(".env") || s.includes("token");
+}
+
+// A glob that could leave its cwd or that glob v13 would expand into other
+// directories: braces (brace expansion), "..", absolute / UNC / drive paths,
+// home expansion. Channel runs reject all of them outright.
+export function isUnsafeChannelGlob(pattern: string | undefined): boolean {
+    if (!pattern) return false;
+    return (
+        /[{}]/.test(pattern) ||
+        pattern.includes("..") ||
+        /^[\\/]/.test(pattern) ||
+        pattern.startsWith("~") ||
+        /^[a-zA-Z]:/.test(pattern)
+    );
+}
+
+// True when the content's frontmatter carries a `live:` key — the live-note
+// scheduler would run a near-full-tool background agent on such a note.
+// Checked both the way the scheduler parses (splitFrontmatter) and with a
+// textual scan of the leading frontmatter block, so YAML tricks that the
+// parser would accept differently still count.
+export function hasLiveFrontmatter(content: string): boolean {
+    try {
+        if (Object.prototype.hasOwnProperty.call(splitFrontmatter(content).frontmatter, "live")) {
+            return true;
+        }
+    } catch {
+        // fall through to the textual scan
+    }
+    const block = /^﻿?[ \t]*---[^\n]*\n([\s\S]*?)(?:\r?\n[ \t]*---|$)/.exec(content);
+    if (!block) return false;
+    return /(^|[\s{,?])["']?live["']?\s*:/m.test(block[1]);
 }
 
 type FileOp = "read" | "list" | "search" | "write";
@@ -160,15 +199,6 @@ function fileTargets(toolName: string, args: Record<string, unknown>): FileTarge
     }
 }
 
-// A glob pattern that is absolute or climbs with ".." escapes its cwd.
-function escapesCwd(pattern: string | undefined): boolean {
-    if (!pattern) return false;
-    if (path.isAbsolute(pattern) || /^[a-zA-Z]:/.test(pattern) || pattern.startsWith("~")) {
-        return true;
-    }
-    return pattern.split(/[\\/]+/).some((segment) => segment === "..");
-}
-
 function asRecord(input: unknown): Record<string, unknown> {
     return input && typeof input === "object" && !Array.isArray(input)
         ? (input as Record<string, unknown>)
@@ -181,6 +211,8 @@ export interface ChannelRunGuardDeps {
     // Canonical absolute path for a tool-supplied path (relative paths
     // resolve against the workspace, symlinks are followed).
     resolvePath?: (inputPath: string) => Promise<string>;
+    // Current text of a canonical path; null when missing/unreadable.
+    readText?: (absPath: string) => Promise<string | null>;
 }
 
 async function defaultWorkspaceRoot(): Promise<string> {
@@ -195,13 +227,23 @@ async function defaultResolvePath(inputPath: string): Promise<string> {
     return (await resolveFilePathForPermission(inputPath)).canonicalPath;
 }
 
+async function defaultReadText(absPath: string): Promise<string | null> {
+    try {
+        return await fs.readFile(absPath, "utf8");
+    } catch {
+        return null;
+    }
+}
+
 export class ChannelRunGuard implements IChannelRunGuard {
     private readonly workspaceRoot: () => Promise<string>;
     private readonly resolvePath: (inputPath: string) => Promise<string>;
+    private readonly readText: (absPath: string) => Promise<string | null>;
 
     constructor(deps: ChannelRunGuardDeps = {}) {
         this.workspaceRoot = deps.workspaceRoot ?? defaultWorkspaceRoot;
         this.resolvePath = deps.resolvePath ?? defaultResolvePath;
+        this.readText = deps.readText ?? defaultReadText;
     }
 
     offers(descriptor: z.infer<typeof ToolDescriptor>, policy: ChannelRunPolicy): boolean {
@@ -210,7 +252,8 @@ export class ChannelRunGuard implements IChannelRunGuard {
             return CHANNEL_BUILTINS.has(toolId.slice("builtin:".length));
         }
         if (toolId.startsWith("mcp:")) {
-            return isReadOnlyServer(mcpServerOf(toolId), policy);
+            const { server, tool } = parseMcpToolId(toolId);
+            return isReadOnlyTool(server, tool, policy);
         }
         return false;
     }
@@ -218,10 +261,10 @@ export class ChannelRunGuard implements IChannelRunGuard {
     async check(call: ChannelToolCall, policy: ChannelRunPolicy): Promise<ChannelGuardDecision> {
         const { toolId } = call;
         if (toolId.startsWith("mcp:")) {
-            const server = mcpServerOf(toolId);
-            return isReadOnlyServer(server, policy)
+            const { server, tool } = parseMcpToolId(toolId);
+            return isReadOnlyTool(server, tool, policy)
                 ? { kind: "allow" }
-                : deny(`MCP server "${server ?? "?"}" is not on the read-only list for channel runs.`);
+                : deny(`MCP tool "${server ?? "?"}:${tool ?? "?"}" is not on the read-only list for channel runs.`);
         }
         if (!toolId.startsWith("builtin:")) {
             return deny(`Tool "${call.toolName}" is not available in channel runs.`);
@@ -236,19 +279,27 @@ export class ChannelRunGuard implements IChannelRunGuard {
         switch (name) {
             case "fetch-url": {
                 const method = (str(args.method) ?? "GET").toUpperCase();
-                return method === "GET" || method === "HEAD"
-                    ? { kind: "default" }
-                    : deny(`fetch-url with method ${method} is not allowed in channel runs — only GET and HEAD.`);
+                if (method !== "GET" && method !== "HEAD") {
+                    return deny(`fetch-url with method ${method} is not allowed in channel runs — only GET and HEAD.`);
+                }
+                if (Object.keys(asRecord(args.headers)).length > 0) {
+                    return deny("fetch-url with custom headers is not allowed in channel runs.");
+                }
+                // Host / redirect checks happen at execution (channel-fetch.ts).
+                return { kind: "default" };
             }
-            case "executeMcpTool":
+            case "executeMcpTool": {
+                const server = str(args.serverName);
+                const tool = str(args.toolName);
+                return isReadOnlyTool(server, tool, policy)
+                    ? { kind: "allow" }
+                    : deny(`MCP tool "${server ?? "?"}:${tool ?? "?"}" is not on the read-only list for channel runs.`);
+            }
             case "listMcpTools": {
                 const server = str(args.serverName);
-                if (!isReadOnlyServer(server, policy)) {
-                    return deny(`MCP server "${server ?? "?"}" is not on the read-only list for channel runs.`);
-                }
-                // executeMcpTool would otherwise go to the classifier; the
-                // allowlisted servers are approved without it.
-                return { kind: "allow" };
+                return server && policy.readOnlyMcpTools.some((entry) => entry.startsWith(`${server}:`))
+                    ? { kind: "allow" }
+                    : deny(`MCP server "${server ?? "?"}" has no read-only tools for channel runs.`);
             }
             case "todo-add": {
                 const items = Array.isArray(args.items) ? args.items : [];
@@ -267,33 +318,64 @@ export class ChannelRunGuard implements IChannelRunGuard {
         if (!targets) {
             return { kind: "default" };
         }
-        if (name === "file-glob" && escapesCwd(str(args.pattern))) {
-            return deny("Glob patterns that are absolute or contain \"..\" are not allowed in channel runs.");
+        if (name === "file-glob" && isUnsafeChannelGlob(str(args.pattern))) {
+            return deny("Glob patterns with braces, \"..\", absolute paths or ~ are not allowed in channel runs.");
         }
-        if (name === "file-grep" && escapesCwd(str(args.fileGlob))) {
-            return deny("File globs that are absolute or contain \"..\" are not allowed in channel runs.");
+        if (name === "file-grep" && isUnsafeChannelGlob(str(args.fileGlob))) {
+            return deny("File globs with braces, \"..\", absolute paths or ~ are not allowed in channel runs.");
         }
-        return this.checkFileTargets(targets);
+        return this.checkFileTargets(name, args, targets);
     }
 
-    private async checkFileTargets(targets: FileTarget[]): Promise<ChannelGuardDecision> {
+    // Second layer for search tools: every match must pass before it is
+    // read or listed (symlinks inside an allowed root, *.env inside
+    // knowledge/, ...). Errors count as "not readable".
+    readFilter(): (absPath: string) => Promise<boolean> {
+        return async (absPath) => {
+            try {
+                const root = await this.workspaceRoot();
+                const resolved = await this.resolvePath(absPath);
+                return this.protectedReason(root, resolved) === null;
+            } catch {
+                return false;
+            }
+        };
+    }
+
+    private protectedReason(root: string, resolved: string): string | null {
+        if (!isPathInside(root, resolved)) {
+            return "outside";
+        }
+        const rel = path.relative(root, resolved);
+        const segments = rel === "" ? [] : rel.split(path.sep);
+        const sensitive = SENSITIVE_ENTRIES.map((entry) => path.join(root, entry));
+        if (
+            sensitive.some((entry) => isPathInside(entry, resolved)) ||
+            segments.some(isSensitiveSegment)
+        ) {
+            return "protected";
+        }
+        return null;
+    }
+
+    private async checkFileTargets(
+        name: string,
+        args: Record<string, unknown>,
+        targets: FileTarget[],
+    ): Promise<ChannelGuardDecision> {
         const root = await this.workspaceRoot();
+        const sensitive = SENSITIVE_ENTRIES.map((entry) => path.join(root, entry));
         for (const target of targets) {
             if (!target.path) {
                 return deny("A path is required.");
             }
             const resolved = await this.resolvePath(target.path);
-            if (!isPathInside(root, resolved)) {
+            const reason = this.protectedReason(root, resolved);
+            if (reason === "outside") {
                 return deny(`Path "${target.path}" is outside the workspace; channel runs may only use workspace files.`);
             }
-            const rel = path.relative(root, resolved);
-            const segments = rel === "" ? [] : rel.split(path.sep);
-            const sensitive = SENSITIVE_ENTRIES.map((entry) => path.join(root, entry));
-            if (
-                sensitive.some((entry) => isPathInside(entry, resolved)) ||
-                segments.some(isSensitiveSegment)
-            ) {
-                return deny(`Path "${target.path}" is protected (credentials / app config) and cannot be used from a mobile channel.`);
+            if (reason === "protected") {
+                return deny(`Path "${target.path}" is protected (credentials / app state) and cannot be used from a mobile channel.`);
             }
             if (
                 target.op === "search" &&
@@ -301,14 +383,59 @@ export class ChannelRunGuard implements IChannelRunGuard {
             ) {
                 return deny(`Searching "${target.path}" would include protected files; search a subfolder such as knowledge/ instead.`);
             }
-            if (
-                target.op === "write" &&
-                !WRITE_ROOTS.some((dir) => isPathInside(path.join(root, dir), resolved))
-            ) {
-                return deny(`Channel runs may only write notes under knowledge/ (to-dos via todo-add); "${target.path}" is outside.`);
+            if (target.op === "write") {
+                const writeRoot = path.join(root, WRITE_ROOT);
+                if (!isPathInside(writeRoot, resolved)) {
+                    return deny(`Channel runs may only write notes under knowledge/ (to-dos via todo-add); "${target.path}" is outside.`);
+                }
+                const inner = path.relative(writeRoot, resolved);
+                const innerSegments = inner === "" ? [] : inner.split(path.sep);
+                if (innerSegments[0]?.toLowerCase() === AGENT_NOTES) {
+                    return deny("knowledge/Agent Notes is loaded into the desktop agent's instructions and cannot be written from a mobile channel.");
+                }
+                if (innerSegments.some((segment) => segment.startsWith("."))) {
+                    return deny(`Hidden files and folders ("${target.path}") cannot be written from a mobile channel.`);
+                }
+            }
+            // Live notes: the scheduler runs a background agent on any note
+            // whose frontmatter has `live:` — never create, change, copy or
+            // move one from a channel.
+            if (target.op === "write" || (name === "file-copy" && target.op === "read")) {
+                const current = await this.readText(resolved);
+                if (current !== null && hasLiveFrontmatter(current)) {
+                    return deny(`"${target.path}" is a live note; live notes cannot be changed, copied or moved from a mobile channel.`);
+                }
             }
         }
-        return { kind: "default" };
+        const liveError = await this.resultingLiveContent(name, args, targets);
+        return liveError ?? { kind: "default" };
+    }
+
+    private async resultingLiveContent(
+        name: string,
+        args: Record<string, unknown>,
+        targets: FileTarget[],
+    ): Promise<ChannelGuardDecision | null> {
+        let next: string | null = null;
+        if (name === "file-writeText") {
+            next = typeof args.data === "string" ? args.data : null;
+        } else if (name === "file-editText") {
+            const current = await this.readText(await this.resolvePath(targets[0].path));
+            const oldString = typeof args.oldString === "string" ? args.oldString : "";
+            const newString = typeof args.newString === "string" ? args.newString : "";
+            if (current !== null && oldString) {
+                next = args.replaceAll === true
+                    ? current.split(oldString).join(newString)
+                    : current.replace(oldString, () => newString);
+            } else {
+                // Unknown result: judge the inserted text on its own.
+                next = `---\n${newString}\n---\n`;
+            }
+        }
+        if (next !== null && hasLiveFrontmatter(next)) {
+            return deny("Notes with a `live:` frontmatter key start a background agent and cannot be created from a mobile channel.");
+        }
+        return null;
     }
 }
 
@@ -316,12 +443,17 @@ function deny(reason: string): ChannelGuardDecision {
     return { kind: "deny", reason };
 }
 
-function mcpServerOf(toolId: string): string | undefined {
+function parseMcpToolId(toolId: string): { server?: string; tool?: string } {
     const rest = toolId.slice("mcp:".length);
     const separator = rest.indexOf(":");
-    return separator > 0 ? rest.slice(0, separator) : undefined;
+    if (separator <= 0) return {};
+    return { server: rest.slice(0, separator), tool: rest.slice(separator + 1) };
 }
 
-function isReadOnlyServer(server: string | undefined, policy: ChannelRunPolicy): boolean {
-    return !!server && policy.readOnlyMcpServers.includes(server);
+function isReadOnlyTool(
+    server: string | undefined,
+    tool: string | undefined,
+    policy: ChannelRunPolicy,
+): boolean {
+    return !!server && !!tool && policy.readOnlyMcpTools.includes(`${server}:${tool}`);
 }

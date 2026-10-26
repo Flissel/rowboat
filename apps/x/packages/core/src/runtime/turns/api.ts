@@ -32,7 +32,7 @@ export interface CreateTurnInput {
         // Modified for VibeMind (Flissel/rowboat vibemind): set by the
         // mobile-channel bridge only. Restricts the turn to tools without
         // external effect (see channel-run-guard.ts); omitted = desktop turn.
-        channel?: { readOnlyMcpServers: string[] };
+        channel?: { readOnlyMcpTools: string[] };
     };
 }
 

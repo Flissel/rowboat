@@ -197,11 +197,11 @@ export const TurnCreated = z.object({
         // Modified for VibeMind (Flissel/rowboat vibemind): present only on
         // turns started from a mobile channel (Telegram/WhatsApp bridge).
         // The runtime then offers and executes only tools without external
-        // effect (core runtime/turns/channel-run-guard.ts); MCP servers
-        // named here are auto-approved without the permission classifier.
-        // Absent = desktop turn, behaviour unchanged.
+        // effect (core runtime/turns/channel-run-guard.ts); MCP tools named
+        // here ("server:tool") are auto-approved without the permission
+        // classifier. Absent = desktop turn, behaviour unchanged.
         channel: z
-            .object({ readOnlyMcpServers: z.array(z.string()) })
+            .object({ readOnlyMcpTools: z.array(z.string()) })
             .optional(),
     }),
 });

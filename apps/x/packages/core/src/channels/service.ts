@@ -1,19 +1,15 @@
-// Modified for VibeMind (Flissel/rowboat vibemind): bridge gets the read-only MCP server list from channels.json (Teil E).
+// Modified for VibeMind (Flissel/rowboat vibemind): bridge gets the read-only MCP tool list from channels.json (fail closed) (Teil E).
 import path from "node:path";
 import fs from "node:fs/promises";
 import type { z } from "zod";
-import {
-    DEFAULT_CHANNEL_READ_ONLY_MCP_SERVERS,
-    type ChannelsConfig,
-    type ChannelsStatus,
-} from "@x/shared/dist/channels.js";
+import type { ChannelsConfig, ChannelsStatus } from "@x/shared/dist/channels.js";
 import container from "../di/container.js";
 import { WorkDir } from "../config/config.js";
 import type { ISessions } from "../runtime/sessions/api.js";
 import type { ITurnEventBus } from "../runtime/turns/event-hub.js";
 import { getModelCatalog, providerDisplayName } from "../models/catalog.js";
 import { ChannelBridge, type ModelChoice } from "./bridge.js";
-import type { IChannelsConfigRepo } from "./repo.js";
+import { readChannelReadOnlyMcpTools, type IChannelsConfigRepo } from "./repo.js";
 import { TelegramTransport } from "./transports/telegram.js";
 // Type-only: the real module (which pulls the ~9MB baileys dependency) is
 // loaded dynamically in startWhatsApp, so boot pays nothing while disabled.
@@ -104,12 +100,7 @@ function ensureBridge(): ChannelBridge {
             turnEventBus: container.resolve<ITurnEventBus>("turnEventBus"),
             listModels: listBridgeModels,
             // Read per message so a settings change applies to the next turn.
-            readOnlyMcpServers: async () => {
-                const config = await container
-                    .resolve<IChannelsConfigRepo>("channelsConfigRepo")
-                    .getConfig();
-                return config.readOnlyMcpServers ?? [...DEFAULT_CHANNEL_READ_ONLY_MCP_SERVERS];
-            },
+            readOnlyMcpTools: () => readChannelReadOnlyMcpTools(),
         });
     }
     return bridge;

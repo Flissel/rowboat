@@ -1,4 +1,4 @@
-// Modified for VibeMind (Flissel/rowboat vibemind): readOnlyMcpServers for channel runs (Teil E).
+// Modified for VibeMind (Flissel/rowboat vibemind): readOnlyMcpTools for channel runs (Teil E).
 import { z } from "zod";
 
 // ---------------------------------------------------------------------------
@@ -24,20 +24,30 @@ export const TelegramChannelConfig = z.object({
     allowFrom: z.array(z.string()),
 });
 
-// Modified for VibeMind (Flissel/rowboat vibemind): MCP servers treated as
-// read-only for channel runs — their tools are auto-approved without the
-// permission classifier; every other MCP server is refused in channel runs.
-// Absent = DEFAULT_CHANNEL_READ_ONLY_MCP_SERVERS.
-export const DEFAULT_CHANNEL_READ_ONLY_MCP_SERVERS: readonly string[] = [
-    "wissen",
-    "vibemind-werkzeuge",
-    "exa",
+// Modified for VibeMind (Flissel/rowboat vibemind): MCP tools treated as
+// read-only for channel runs, as "server:tool" — they are auto-approved
+// without the permission classifier; every other MCP tool is refused in
+// channel runs. Key absent = DEFAULT_CHANNEL_READ_ONLY_MCP_TOOLS; an
+// unreadable channels.json = empty list (fail closed).
+export const DEFAULT_CHANNEL_READ_ONLY_MCP_TOOLS: readonly string[] = [
+    "wissen:wissen_suchen",
+    "wissen:wissen_stand",
+    // vibemind-os spaces/rowboat/deploy/headless/werkzeuge/server.py
+    "vibemind-werkzeuge:github_repos",
+    "vibemind-werkzeuge:github_issues",
+    "vibemind-werkzeuge:github_prs",
+    "vibemind-werkzeuge:github_commits",
+    "vibemind-werkzeuge:github_datei",
+    "vibemind-werkzeuge:github_ueberblick",
+    "vibemind-werkzeuge:pc_suchen",
+    "exa:web_search_exa",
+    "exa:web_fetch_exa",
 ];
 
 export const ChannelsConfig = z.object({
     whatsapp: WhatsAppChannelConfig,
     telegram: TelegramChannelConfig,
-    readOnlyMcpServers: z.array(z.string()).optional(),
+    readOnlyMcpTools: z.array(z.string()).optional(),
 });
 
 export const DEFAULT_CHANNELS_CONFIG: z.infer<typeof ChannelsConfig> = {

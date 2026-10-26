@@ -427,9 +427,14 @@ export class SessionsImpl implements ISessions {
             ...(config.origin === undefined ? {} : { origin: config.origin }),
             config: {
                 humanAvailable: config.humanAvailable ?? true,
-                ...(config.autoPermission === undefined
-                    ? {}
-                    : { autoPermission: config.autoPermission }),
+                // VibeMind Teil E: the first desktop turn after a channel
+                // turn carries channel-supplied content in its context —
+                // it runs without the automatic permission classifier.
+                ...(latestTurnState?.definition.config.channel && !config.channel
+                    ? { autoPermission: false }
+                    : config.autoPermission === undefined
+                      ? {}
+                      : { autoPermission: config.autoPermission }),
                 ...(config.maxModelCalls === undefined
                     ? {}
                     : { maxModelCalls: config.maxModelCalls }),

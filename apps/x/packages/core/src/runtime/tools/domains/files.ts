@@ -1,3 +1,4 @@
+// Modified for VibeMind (Flissel/rowboat vibemind): channel read filter for file-grep / file-glob (Teil E).
 // Builtin tools: files domain. Entries moved VERBATIM from the historical
 // monolith — the merge order in ../builtin-tools.ts preserves the original
 // catalog key order (provider-payload bytes; see the key-order test there).
@@ -6,6 +7,8 @@ import { z } from "zod";
 import * as files from "../../../filesystem/files.js";
 import { WorkDir } from "../../../config/config.js";
 import { BuiltinToolsSchema } from "../types.js";
+import type { ToolContext } from "../exec-tool.js";
+import { ChannelRunGuard } from "../../turns/channel-run-guard.js";
 
 
 export const fileTools: z.infer<typeof BuiltinToolsSchema> = {
@@ -273,9 +276,9 @@ export const fileTools: z.infer<typeof BuiltinToolsSchema> = {
             pattern: z.string().describe('Glob pattern to match files'),
             cwd: z.string().optional().describe('Directory to search in (default: default root)'),
         }),
-        execute: async ({ pattern, cwd }: { pattern: string; cwd?: string }) => {
+        execute: async ({ pattern, cwd }: { pattern: string; cwd?: string }, ctx?: ToolContext) => {
             try {
-                return await files.glob(pattern, cwd);
+                return await files.glob(pattern, cwd, ctx?.channel ? new ChannelRunGuard().readFilter() : undefined);
             } catch (error) {
                 return { error: error instanceof Error ? error.message : 'Unknown error' };
             }
@@ -304,9 +307,13 @@ export const fileTools: z.infer<typeof BuiltinToolsSchema> = {
             fileGlob?: string;
             contextLines?: number;
             maxResults?: number;
-        }) => {
+        }, ctx?: ToolContext) => {
             try {
-                return await files.grep({ pattern, searchPath, fileGlob, contextLines, maxResults });
+                return await files.grep({
+                    pattern, searchPath, fileGlob, contextLines, maxResults,
+                    // Channel runs: every match must pass the read filter.
+                    ...(ctx?.channel ? { pathFilter: new ChannelRunGuard().readFilter() } : {}),
+                });
             } catch (error) {
                 return { error: error instanceof Error ? error.message : 'Unknown error' };
             }

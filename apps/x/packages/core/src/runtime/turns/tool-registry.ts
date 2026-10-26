@@ -1,3 +1,4 @@
+// Modified for VibeMind (Flissel/rowboat vibemind): ToolExecutionContext.channel (Teil E).
 import type { z } from "zod";
 import type {
     JsonValue,
@@ -15,6 +16,9 @@ export interface ToolExecutionContext {
     signal: AbortSignal;
     // The loop appends a durable tool_progress event before resolving.
     reportProgress(progress: JsonValue): Promise<void>;
+    // Modified for VibeMind (Flissel/rowboat vibemind): the turn's
+    // config.channel for channel-origin turns (Teil E); absent otherwise.
+    channel?: { readOnlyMcpTools: string[] };
 }
 
 export interface SyncRuntimeTool {

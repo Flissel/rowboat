@@ -46,7 +46,7 @@ export interface SendMessageConfig {
     // effect (runtime/turns/channel-run-guard.ts). Lands on the turn only
     // when the message starts one: sendOrQueueMessage steering into a live
     // turn keeps that turn's own restriction.
-    channel?: { readOnlyMcpServers: string[] };
+    channel?: { readOnlyMcpTools: string[] };
 }
 
 export interface ISessions {

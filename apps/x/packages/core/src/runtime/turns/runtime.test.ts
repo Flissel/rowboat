@@ -3540,16 +3540,40 @@ describe("channel runs (VibeMind Teil E)", () => {
         model: { provider: "fake", model: "m" },
         tools: [fetchUrl, shell, addMcp, execMcp, wissen, github],
     };
-    const channel = { readOnlyMcpServers: ["wissen", "vibemind-werkzeuge", "exa"] };
+    const channel = { readOnlyMcpTools: ["wissen:search", "exa:search"] };
 
-    function recordingTools(executed: string[]): RuntimeTool[] {
+    function recordingTools(
+        executed: string[],
+        contexts: ToolExecutionContext[] = [],
+    ): RuntimeTool[] {
         return channelAgent.tools.map((descriptor) =>
-            syncTool(descriptor, async () => {
+            syncTool(descriptor, async (_input, ctx) => {
                 executed.push(descriptor.name);
+                contexts.push(ctx);
                 return { output: { ok: true }, isError: false };
             }),
         );
     }
+
+    it("hands the channel restriction to executing tools (desktop: none)", async () => {
+        const contexts: ToolExecutionContext[] = [];
+        const run = async (config: Parameters<TurnRuntime["createTurn"]>[0]["config"]) => {
+            const { runtime } = makeRuntime({
+                agent: channelAgent,
+                tools: recordingTools([], contexts),
+                models: [
+                    respond(completedResp(assistantCalls(toolCallPart("G", "fetch-url", { url: "https://x" })))),
+                    respond(completedResp(assistantText("done"))),
+                ],
+            });
+            const turnId = await newTurn(runtime, { config });
+            await advanceAndSettle(runtime, turnId);
+        };
+        await run({ humanAvailable: true, autoPermission: true, channel });
+        await run({ humanAvailable: true, autoPermission: true });
+        expect(contexts[0].channel).toEqual(channel);
+        expect(contexts[1]).not.toHaveProperty("channel");
+    });
 
     function resultFor(log: TEvent[], toolCallId: string) {
         return log.find(
@@ -3629,6 +3653,7 @@ describe("channel runs (VibeMind Teil E)", () => {
                     toolCallPart("W", "wissen_search", { q: "x" }),
                     toolCallPart("E", "executeMcpTool", { serverName: "exa", toolName: "search" }),
                     toolCallPart("X", "executeMcpTool", { serverName: "github", toolName: "create_issue" }),
+                    toolCallPart("Y", "executeMcpTool", { serverName: "exa", toolName: "crawl_everything" }),
                 ))),
                 respond(completedResp(assistantText("done"))),
             ],
@@ -3642,6 +3667,8 @@ describe("channel runs (VibeMind Teil E)", () => {
         expect(resultFor(log, "W")).toMatchObject({ source: "sync", result: { isError: false } });
         expect(resultFor(log, "E")).toMatchObject({ source: "sync", result: { isError: false } });
         expect(resultFor(log, "X")).toMatchObject({ source: "runtime", result: { isError: true } });
+        // Allowlist is per server:tool — another tool on an allowlisted server is refused.
+        expect(resultFor(log, "Y")).toMatchObject({ source: "runtime", result: { isError: true } });
         expect(executed.sort()).toEqual(["executeMcpTool", "wissen_search"]);
         expect(classifier.batches).toEqual([]);
         expect(checker.calls).toEqual([]);

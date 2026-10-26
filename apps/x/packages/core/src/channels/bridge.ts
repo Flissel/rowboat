@@ -1,7 +1,7 @@
 // Modified for VibeMind (Flissel/rowboat vibemind): every turn is marked as a
 // channel run (config.channel) — no tools with external effect (Teil E).
 import type { SessionIndexEntry } from "@x/shared/dist/sessions.js";
-import { DEFAULT_CHANNEL_READ_ONLY_MCP_SERVERS } from "@x/shared/dist/channels.js";
+import { DEFAULT_CHANNEL_READ_ONLY_MCP_TOOLS } from "@x/shared/dist/channels.js";
 import { reduceTurn, type TurnStreamEvent } from "@x/shared/dist/turns.js";
 import { assistantText, lastAssistantText } from "../runtime/assembly/headless.js";
 import { TurnInputError } from "../runtime/turns/api.js";
@@ -142,17 +142,20 @@ export class ChannelBridge {
             sessions: ISessions;
             turnEventBus: ITurnEventBus;
             listModels: () => Promise<ModelChoice[]>;
-            // MCP servers auto-approved in channel runs (read-only by
-            // operator decision); default DEFAULT_CHANNEL_READ_ONLY_MCP_SERVERS.
-            readOnlyMcpServers?: () => Promise<string[]>;
+            // MCP tools ("server:tool") auto-approved in channel runs
+            // (read-only by operator decision). Not given = defaults;
+            // rejecting = empty list (fail closed).
+            readOnlyMcpTools?: () => Promise<string[]>;
         },
     ) {}
 
-    private async channelPolicy(): Promise<{ readOnlyMcpServers: string[] }> {
-        const configured = await this.deps.readOnlyMcpServers?.().catch(() => undefined);
-        return {
-            readOnlyMcpServers: [...(configured ?? DEFAULT_CHANNEL_READ_ONLY_MCP_SERVERS)],
-        };
+    private async channelPolicy(): Promise<{ readOnlyMcpTools: string[] }> {
+        if (!this.deps.readOnlyMcpTools) {
+            return { readOnlyMcpTools: [...DEFAULT_CHANNEL_READ_ONLY_MCP_TOOLS] };
+        }
+        // A list that cannot be read means NO auto-approved MCP tools.
+        const configured = await this.deps.readOnlyMcpTools().catch(() => []);
+        return { readOnlyMcpTools: [...configured] };
     }
 
     async handleInbound(senderKey: string, text: string, reply: ReplyFn): Promise<void> {
