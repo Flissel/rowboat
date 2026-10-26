@@ -112,8 +112,17 @@ export function hasInlineTaskTrigger(content: string): boolean {
     if (frontmatterKeyIn(content, "live_note")) {
         return true;
     }
-    return content.split('\n').some((line) => isInlineTaskFenceStart(line.trim()));
+    if (content.split('\n').some((line) => isInlineTaskFenceStart(line.trim()))) {
+        return true;
+    }
+    // Variants the runner does not parse today but the desktop editor
+    // normalizes back to ```task on the next save (~~~ fences, 4+ backticks,
+    // `language-task` code classes) — refused so a later save cannot arm them.
+    return LOOSE_TASK_FENCE.test(content) || TASK_CODE_CLASS.test(content);
 }
+
+const LOOSE_TASK_FENCE = /^[ \t]*(?:`{3,}|~{3,})[ \t]*(?:task|tell-rowboat)/m;
+const TASK_CODE_CLASS = /language-(?:task|tell-rowboat)\b/;
 
 export function hasAutorunTrigger(content: string): boolean {
     return hasLiveFrontmatter(content) || hasInlineTaskTrigger(content);

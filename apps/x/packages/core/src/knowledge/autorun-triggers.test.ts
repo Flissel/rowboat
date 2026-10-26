@@ -23,6 +23,16 @@ describe("autorun triggers", () => {
         expect(hasInlineTaskTrigger("# t\n```ts\nlet task = 1\n```\nlive_note: true in prose")).toBe(false);
     });
 
+    it("round 3: also tilde fences, 4+ backticks and editor class names", () => {
+        expect(hasInlineTaskTrigger("x\n~~~task\n{}\n~~~")).toBe(true);
+        expect(hasInlineTaskTrigger("x\n  ~~~~tell-rowboat\n{}\n~~~~")).toBe(true);
+        expect(hasInlineTaskTrigger("x\n````task\n{}\n````")).toBe(true);
+        expect(hasInlineTaskTrigger("x\n`````  tell-rowboat\n{}\n`````")).toBe(true);
+        expect(hasInlineTaskTrigger('<pre><code class="language-task">{}</code></pre>')).toBe(true);
+        expect(hasInlineTaskTrigger('<code class="hljs language-tell-rowboat">')).toBe(true);
+        expect(hasInlineTaskTrigger("x\n~~~ts\nlet task\n~~~")).toBe(false);
+    });
+
     it("detects live-note frontmatter and combines both", () => {
         expect(hasLiveFrontmatter("---\nlive:\n  objective: x\n---\n")).toBe(true);
         expect(hasLiveFrontmatter("---\nbase: &b {objective: x}\nlive: *b\n---\n")).toBe(true);
