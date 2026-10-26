@@ -1,4 +1,4 @@
-// Modified for VibeMind (Flissel/rowboat vibemind): detection helpers moved to autorun-triggers.ts (Teil E).
+// Modified for VibeMind (Flissel/rowboat vibemind): detection helpers moved to autorun-triggers.ts; scanner skips knowledge/Kanal/ (Teil E).
 import fs from 'fs';
 import path from 'path';
 import { CronExpressionParser } from 'cron-parser';
@@ -11,6 +11,7 @@ import { createLanguageModel } from '../models/models.js';
 import { inlineTask } from '@x/shared';
 import { captureLlmUsage } from '../analytics/usage.js';
 import { withUseCase } from '../analytics/use_case.js';
+import { isQuarantinedPath } from './quarantine.js';
 // Modified for VibeMind (Flissel/rowboat vibemind): frontmatter + fence detection
 // shared with the channel/background write guards (Teil E) — one parser.
 import {
@@ -66,13 +67,15 @@ type InlineTaskSchedule =
 // Helpers
 // ---------------------------------------------------------------------------
 
-function scanDirectoryRecursive(dir: string): string[] {
+export function scanDirectoryRecursive(dir: string): string[] {
     if (!fs.existsSync(dir)) return [];
     const files: string[] = [];
     const entries = fs.readdirSync(dir);
     for (const entry of entries) {
         if (entry.startsWith('.')) continue;
         const fullPath = path.join(dir, entry);
+        // VibeMind Teil E: channel output never feeds the inline-task agent.
+        if (isQuarantinedPath(fullPath)) continue;
         const stat = fs.statSync(fullPath);
         if (stat.isDirectory()) {
             files.push(...scanDirectoryRecursive(fullPath));
