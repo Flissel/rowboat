@@ -1,3 +1,4 @@
+// Modified for VibeMind (Flissel/rowboat vibemind): SendMessageConfig.channel pass-through (Teil E).
 import type { z } from "zod";
 import type { UserMessage } from "@x/shared/dist/message.js";
 import type { SessionOrigin } from "@x/shared/dist/origins.js";
@@ -435,6 +436,9 @@ export class SessionsImpl implements ISessions {
                 ...(config.reasoningEffort === undefined
                     ? {}
                     : { reasoningEffort: config.reasoningEffort }),
+                ...(config.channel === undefined
+                    ? {}
+                    : { channel: config.channel }),
             },
         });
 

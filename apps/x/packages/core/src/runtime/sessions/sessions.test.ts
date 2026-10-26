@@ -1,3 +1,4 @@
+// Modified for VibeMind (Flissel/rowboat vibemind): SendMessageConfig.channel pass-through (Teil E).
 import { projectSessionComposition } from '../../code-mode/sessions/composition.js';
 import { describe, expect, it } from "vitest";
 import type { z } from "zod";
@@ -391,6 +392,22 @@ describe("createSession and listing", () => {
 });
 
 describe("sendMessage (13.3)", () => {
+    // Modified for VibeMind (Flissel/rowboat vibemind): channel flag pass-through (Teil E).
+    it("passes the channel-run restriction to the turn; omits it otherwise", async () => {
+        const { sessions, fake } = makeSessions();
+        const sessionId = await sessions.createSession();
+        await sessions.sendMessage(sessionId, user("hi"), {
+            agent: { agentId: "copilot" },
+            autoPermission: true,
+            channel: { readOnlyMcpServers: ["wissen"] },
+        });
+        expect(fake.createTurnInputs[0].config).toEqual({
+            humanAvailable: true,
+            autoPermission: true,
+            channel: { readOnlyMcpServers: ["wissen"] },
+        });
+    });
+
     it("first message: inline empty context, config on the turn, denormalized ref, default title", async () => {
         const { sessions, repo, fake } = makeSessions();
         const sessionId = await sessions.createSession();

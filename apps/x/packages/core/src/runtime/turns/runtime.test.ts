@@ -1,3 +1,4 @@
+// Modified for VibeMind (Flissel/rowboat vibemind): channel-run tests (Teil E).
 import { describe, expect, it, vi } from "vitest";
 import type { z } from "zod";
 import {
@@ -34,6 +35,7 @@ import type {
 } from "./permission.js";
 import { composeModelRequest } from "./compose-model-request.js";
 import { TurnRuntime } from "./runtime.js";
+import type { IChannelRunGuard } from "./channel-run-guard.js";
 import { getCurrentUseCase } from "../../analytics/use_case.js";
 import type {
     IToolRegistry,
@@ -333,6 +335,7 @@ function makeRuntime(opts: {
     idStart?: number;
     modelRegistry?: IModelRegistry;
     toolRegistry?: IToolRegistry;
+    channelRunGuard?: IChannelRunGuard;
 } = {}) {
     const repo = opts.repo ?? new InMemoryTurnRepo();
     const models = new FakeModelRegistry(opts.models ?? []);
@@ -354,6 +357,7 @@ function makeRuntime(opts: {
         lifecycleBus: bus,
         turnEventBus,
         usageReporter: usage,
+        ...(opts.channelRunGuard ? { channelRunGuard: opts.channelRunGuard } : {}),
     });
     return { runtime, repo, models, checker, classifier, bus, turnEventBus, usage };
 }
@@ -3506,5 +3510,200 @@ describe("added inputs (steering)", () => {
             "model_call_completed",
             "turn_completed",
         ]);
+    });
+});
+
+// ---------------------------------------------------------------------------
+// Modified for VibeMind (Flissel/rowboat vibemind): channel-origin turns
+// (Teil E) — no tools with external effect, allowlisted MCP without the
+// classifier, desktop turns unchanged.
+// ---------------------------------------------------------------------------
+
+describe("channel runs (VibeMind Teil E)", () => {
+    const d = (toolId: string, name: string): z.infer<typeof ToolDescriptor> => ({
+        toolId,
+        name,
+        description: name,
+        inputSchema: {},
+        execution: "sync",
+        requiresHuman: false,
+    });
+    const fetchUrl = d("builtin:fetch-url", "fetch-url");
+    const shell = d("builtin:executeCommand", "executeCommand");
+    const addMcp = d("builtin:addMcpServer", "addMcpServer");
+    const execMcp = d("builtin:executeMcpTool", "executeMcpTool");
+    const wissen = d("mcp:wissen:search", "wissen_search");
+    const github = d("mcp:github:create_issue", "github_create_issue");
+    const channelAgent: z.infer<typeof ResolvedAgent> = {
+        agentId: "copilot",
+        systemPrompt: "SYS",
+        model: { provider: "fake", model: "m" },
+        tools: [fetchUrl, shell, addMcp, execMcp, wissen, github],
+    };
+    const channel = { readOnlyMcpServers: ["wissen", "vibemind-werkzeuge", "exa"] };
+
+    function recordingTools(executed: string[]): RuntimeTool[] {
+        return channelAgent.tools.map((descriptor) =>
+            syncTool(descriptor, async () => {
+                executed.push(descriptor.name);
+                return { output: { ok: true }, isError: false };
+            }),
+        );
+    }
+
+    function resultFor(log: TEvent[], toolCallId: string) {
+        return log.find(
+            (e): e is Extract<TEvent, { type: "tool_result" }> =>
+                e.type === "tool_result" && e.toolCallId === toolCallId,
+        );
+    }
+
+    it("does not offer shell / MCP-config / non-allowlisted MCP tools", async () => {
+        const executed: string[] = [];
+        const { runtime, repo, models } = makeRuntime({
+            agent: channelAgent,
+            tools: recordingTools(executed),
+            models: [respond(completedResp(assistantText("hi")))],
+        });
+        const turnId = await newTurn(runtime, {
+            config: { humanAvailable: true, autoPermission: true, channel },
+        });
+        await advanceAndSettle(runtime, turnId);
+        const log = await persisted(repo, turnId);
+        const created = log[0] as Extract<TEvent, { type: "turn_created" }>;
+        expect(created.config.channel).toEqual(channel);
+        const offered = (created.agent.resolved as { tools: Array<{ name: string }> }).tools.map((t) => t.name);
+        expect(offered).toEqual(["fetch-url", "executeMcpTool", "wissen_search"]);
+        const sentTools = (models.requests[0] as unknown as { tools: Array<{ name: string }> }).tools.map((t) => t.name);
+        expect(sentTools).toEqual(offered);
+    });
+
+    it("refuses fetch-url POST and a called-anyway executeCommand without executing", async () => {
+        const executed: string[] = [];
+        const checker = new FakePermissionChecker();
+        const { runtime, repo } = makeRuntime({
+            agent: channelAgent,
+            tools: recordingTools(executed),
+            checker,
+            models: [
+                respond(completedResp(assistantCalls(
+                    toolCallPart("P", "fetch-url", { url: "https://x", method: "POST", body: "secret" }),
+                    toolCallPart("G", "fetch-url", { url: "https://x" }),
+                    toolCallPart("S", "executeCommand", { command: "cat config/channels.json" }),
+                    toolCallPart("A", "addMcpServer", { serverName: "x", config: {} }),
+                ))),
+                respond(completedResp(assistantText("done"))),
+            ],
+        });
+        const turnId = await newTurn(runtime, {
+            config: { humanAvailable: true, autoPermission: true, channel },
+        });
+        const { outcome } = await advanceAndSettle(runtime, turnId);
+        expect(outcome?.status).toBe("completed");
+        const log = await persisted(repo, turnId);
+        expect(resultFor(log, "P")).toMatchObject({ source: "runtime", result: { isError: true } });
+        expect(JSON.stringify(resultFor(log, "P")?.result.output)).toContain("GET");
+        expect(resultFor(log, "S")).toMatchObject({ source: "runtime", result: { isError: true } });
+        expect(resultFor(log, "A")).toMatchObject({ source: "runtime", result: { isError: true } });
+        expect(resultFor(log, "G")).toMatchObject({ source: "sync", result: { isError: false } });
+        expect(executed).toEqual(["fetch-url"]);
+        expect(checker.calls.map((c) => c.toolCallId)).toEqual(["G"]);
+    });
+
+    it("auto-approves allowlisted MCP without checker or classifier; refuses other servers", async () => {
+        const executed: string[] = [];
+        // Desktop policy would require permission for both MCP paths.
+        const checker = new FakePermissionChecker({
+            wissen_search: { request: { kind: "mcp" } },
+            executeMcpTool: { request: { kind: "mcp" } },
+        });
+        // Throws if called: the classifier must stay out of channel runs.
+        const classifier = new FakePermissionClassifier();
+        const { runtime, repo } = makeRuntime({
+            agent: channelAgent,
+            tools: recordingTools(executed),
+            checker,
+            classifier,
+            models: [
+                respond(completedResp(assistantCalls(
+                    toolCallPart("W", "wissen_search", { q: "x" }),
+                    toolCallPart("E", "executeMcpTool", { serverName: "exa", toolName: "search" }),
+                    toolCallPart("X", "executeMcpTool", { serverName: "github", toolName: "create_issue" }),
+                ))),
+                respond(completedResp(assistantText("done"))),
+            ],
+        });
+        const turnId = await newTurn(runtime, {
+            config: { humanAvailable: true, autoPermission: true, channel },
+        });
+        const { outcome } = await advanceAndSettle(runtime, turnId);
+        expect(outcome?.status).toBe("completed");
+        const log = await persisted(repo, turnId);
+        expect(resultFor(log, "W")).toMatchObject({ source: "sync", result: { isError: false } });
+        expect(resultFor(log, "E")).toMatchObject({ source: "sync", result: { isError: false } });
+        expect(resultFor(log, "X")).toMatchObject({ source: "runtime", result: { isError: true } });
+        expect(executed.sort()).toEqual(["executeMcpTool", "wissen_search"]);
+        expect(classifier.batches).toEqual([]);
+        expect(checker.calls).toEqual([]);
+        expect(log.some((e) => e.type === "tool_permission_required")).toBe(false);
+    });
+
+    it("desktop turns are unchanged: full tool set, POST runs, MCP goes through checker + classifier", async () => {
+        const executed: string[] = [];
+        const checker = new FakePermissionChecker({ executeMcpTool: { request: { kind: "mcp" } } });
+        const classifier = new FakePermissionClassifier((requests) =>
+            requests.map((r) => ({ toolCallId: r.toolCallId, decision: "allow" as const, reason: "ok" })),
+        );
+        const { runtime, repo } = makeRuntime({
+            agent: channelAgent,
+            tools: recordingTools(executed),
+            checker,
+            classifier,
+            models: [
+                respond(completedResp(assistantCalls(
+                    toolCallPart("P", "fetch-url", { url: "https://x", method: "POST" }),
+                    toolCallPart("S", "executeCommand", { command: "ls" }),
+                    toolCallPart("X", "executeMcpTool", { serverName: "github", toolName: "create_issue" }),
+                ))),
+                respond(completedResp(assistantText("done"))),
+            ],
+        });
+        const turnId = await newTurn(runtime, {
+            config: { humanAvailable: true, autoPermission: true },
+        });
+        const { outcome } = await advanceAndSettle(runtime, turnId);
+        expect(outcome?.status).toBe("completed");
+        const log = await persisted(repo, turnId);
+        const created = log[0] as Extract<TEvent, { type: "turn_created" }>;
+        expect(created.config.channel).toBeUndefined();
+        expect((created.agent.resolved as { tools: unknown[] }).tools).toHaveLength(6);
+        expect(executed.sort()).toEqual(["executeCommand", "executeMcpTool", "fetch-url"]);
+        expect(classifier.batches).toHaveLength(1);
+        expect(checker.calls.map((c) => c.toolName)).toEqual(["fetch-url", "executeCommand", "executeMcpTool"]);
+    });
+
+    it("a failing guard fails closed: the call is refused, nothing executes", async () => {
+        const executed: string[] = [];
+        const { runtime, repo } = makeRuntime({
+            agent: channelAgent,
+            tools: recordingTools(executed),
+            channelRunGuard: {
+                offers: () => true,
+                check: async () => {
+                    throw new Error("boom");
+                },
+            },
+            models: [
+                respond(completedResp(assistantCalls(toolCallPart("G", "fetch-url", { url: "https://x" })))),
+                respond(completedResp(assistantText("done"))),
+            ],
+        });
+        const turnId = await newTurn(runtime, {
+            config: { humanAvailable: true, autoPermission: true, channel },
+        });
+        await advanceAndSettle(runtime, turnId);
+        const log = await persisted(repo, turnId);
+        expect(resultFor(log, "G")).toMatchObject({ source: "runtime", result: { isError: true } });
+        expect(executed).toEqual([]);
     });
 });
