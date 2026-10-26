@@ -1,7 +1,12 @@
+// Modified for VibeMind (Flissel/rowboat vibemind): bridge gets the read-only MCP server list from channels.json (Teil E).
 import path from "node:path";
 import fs from "node:fs/promises";
 import type { z } from "zod";
-import type { ChannelsConfig, ChannelsStatus } from "@x/shared/dist/channels.js";
+import {
+    DEFAULT_CHANNEL_READ_ONLY_MCP_SERVERS,
+    type ChannelsConfig,
+    type ChannelsStatus,
+} from "@x/shared/dist/channels.js";
 import container from "../di/container.js";
 import { WorkDir } from "../config/config.js";
 import type { ISessions } from "../runtime/sessions/api.js";
@@ -98,6 +103,13 @@ function ensureBridge(): ChannelBridge {
             sessions: container.resolve<ISessions>("sessions"),
             turnEventBus: container.resolve<ITurnEventBus>("turnEventBus"),
             listModels: listBridgeModels,
+            // Read per message so a settings change applies to the next turn.
+            readOnlyMcpServers: async () => {
+                const config = await container
+                    .resolve<IChannelsConfigRepo>("channelsConfigRepo")
+                    .getConfig();
+                return config.readOnlyMcpServers ?? [...DEFAULT_CHANNEL_READ_ONLY_MCP_SERVERS];
+            },
         });
     }
     return bridge;

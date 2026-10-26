@@ -1,3 +1,4 @@
+// Modified for VibeMind (Flissel/rowboat vibemind): channel-run restriction tests (Teil E).
 import { describe, expect, it, vi } from "vitest";
 import type { SessionIndexEntry } from "@x/shared/dist/sessions.js";
 import type { TurnStreamEvent } from "@x/shared/dist/turns.js";
@@ -139,6 +140,39 @@ describe("ChannelBridge commands", () => {
         const h = harness([entry({ sessionId: "s1", title: "Only chat" })]);
         await h.bridge.handleInbound(SENDER, "resume 5", h.reply);
         expect(h.replies[0]).toContain("No chat #5");
+    });
+});
+
+// Modified for VibeMind (Flissel/rowboat vibemind): channel runs are marked (Teil E).
+describe("ChannelBridge channel-run restriction", () => {
+    it("marks every turn as a channel run with the default read-only MCP servers", async () => {
+        const h = harness();
+        settleOnSend(h, completedEvent("t1", "ok"));
+        await h.bridge.handleInbound(SENDER, "hello", h.reply);
+        expect(h.sessions.sendMessage).toHaveBeenCalledWith(
+            "s1",
+            expect.anything(),
+            expect.objectContaining({
+                channel: { readOnlyMcpServers: ["wissen", "vibemind-werkzeuge", "exa"] },
+            }),
+        );
+    });
+
+    it("uses the configured read-only MCP servers", async () => {
+        const h = harness();
+        const bridge = new ChannelBridge({
+            sessions: h.sessions as unknown as ISessions,
+            turnEventBus: h.bus,
+            listModels: async () => MODELS,
+            readOnlyMcpServers: async () => ["wissen"],
+        });
+        settleOnSend(h, completedEvent("t1", "ok"));
+        await bridge.handleInbound(SENDER, "hello", h.reply);
+        expect(h.sessions.sendMessage).toHaveBeenCalledWith(
+            "s1",
+            expect.anything(),
+            expect.objectContaining({ channel: { readOnlyMcpServers: ["wissen"] } }),
+        );
     });
 });
 
