@@ -1,3 +1,4 @@
+// Modified for VibeMind (Flissel/rowboat vibemind): readOnlyMcpServers for channel runs (Teil E).
 import { z } from "zod";
 
 // ---------------------------------------------------------------------------
@@ -23,9 +24,20 @@ export const TelegramChannelConfig = z.object({
     allowFrom: z.array(z.string()),
 });
 
+// Modified for VibeMind (Flissel/rowboat vibemind): MCP servers treated as
+// read-only for channel runs — their tools are auto-approved without the
+// permission classifier; every other MCP server is refused in channel runs.
+// Absent = DEFAULT_CHANNEL_READ_ONLY_MCP_SERVERS.
+export const DEFAULT_CHANNEL_READ_ONLY_MCP_SERVERS: readonly string[] = [
+    "wissen",
+    "vibemind-werkzeuge",
+    "exa",
+];
+
 export const ChannelsConfig = z.object({
     whatsapp: WhatsAppChannelConfig,
     telegram: TelegramChannelConfig,
+    readOnlyMcpServers: z.array(z.string()).optional(),
 });
 
 export const DEFAULT_CHANNELS_CONFIG: z.infer<typeof ChannelsConfig> = {

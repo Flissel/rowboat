@@ -1,3 +1,4 @@
+// Modified for VibeMind (Flissel/rowboat vibemind): turn_created.config.channel (channel-run restrictions).
 import { z } from "zod";
 import {
     AssistantContentPart,
@@ -193,6 +194,15 @@ export const TurnCreated = z.object({
         // default). Stamped into every model call's parameters and mapped
         // to provider-specific options at invoke time.
         reasoningEffort: ReasoningEffort.optional(),
+        // Modified for VibeMind (Flissel/rowboat vibemind): present only on
+        // turns started from a mobile channel (Telegram/WhatsApp bridge).
+        // The runtime then offers and executes only tools without external
+        // effect (core runtime/turns/channel-run-guard.ts); MCP servers
+        // named here are auto-approved without the permission classifier.
+        // Absent = desktop turn, behaviour unchanged.
+        channel: z
+            .object({ readOnlyMcpServers: z.array(z.string()) })
+            .optional(),
     }),
 });
 
