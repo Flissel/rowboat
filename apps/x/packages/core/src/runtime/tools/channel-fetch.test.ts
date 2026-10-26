@@ -93,7 +93,11 @@ describe("channelFetch", () => {
         const d = deps({ "docs.example": ["93.184.216.34"] }, [response(200, "hello")]);
         const result = await channelFetch("https://docs.example/a", "GET", d);
         expect(result).toMatchObject({ ok: true, status: 200, body: "hello" });
-        expect(d.fetch).toHaveBeenCalledWith("https://docs.example/a", { method: "GET", redirect: "manual" });
+        expect(d.fetch).toHaveBeenCalledWith("https://docs.example/a", {
+            method: "GET",
+            redirect: "manual",
+            signal: expect.any(AbortSignal),
+        });
     });
 
     it("re-checks every redirect hop", async () => {
@@ -119,6 +123,42 @@ describe("channelFetch", () => {
             ok: false,
             error: expect.stringContaining("redirects"),
         });
+    });
+
+    it("round 2: aborts after the timeout", async () => {
+        const d: ChannelFetchDeps = {
+            lookup: async () => ["93.184.216.34"],
+            fetch: (_url, init) =>
+                new Promise<Response>((_resolve, reject) => {
+                    init.signal.addEventListener("abort", () => reject(init.signal.reason), { once: true });
+                }),
+            timeoutMs: 30,
+        };
+        await expect(channelFetch("https://slow.example/", "GET", d)).resolves.toMatchObject({
+            ok: false,
+            error: expect.stringContaining("timed out"),
+        });
+    });
+
+    it("round 2: stops reading the body at the truncation limit", async () => {
+        let pulled = 0;
+        const chunk = "x".repeat(50_000);
+        const stream = new ReadableStream<Uint8Array>({
+            pull(controller) {
+                pulled++;
+                if (pulled > 100) {
+                    controller.close();
+                    return;
+                }
+                controller.enqueue(new TextEncoder().encode(chunk));
+            },
+        });
+        const d = deps({ "big.example": ["93.184.216.34"] }, [new Response(stream, { status: 200 })]);
+        const result = await channelFetch("https://big.example/", "GET", d);
+        expect(result).toMatchObject({ ok: true, truncated: true });
+        expect((result as { body: string }).body.length).toBe(200_000);
+        expect(pulled).toBeLessThan(10);
+        expect(d.fetch.mock.calls[0][1].signal).toBeInstanceOf(AbortSignal);
     });
 
     it("refuses non-http(s) URLs and non-GET/HEAD methods", async () => {

@@ -1,7 +1,8 @@
 // Modified for VibeMind (Flissel/rowboat vibemind): new module — fetch-url for
 // channel-origin turns (Teil E, fix round 1). GET/HEAD only, no custom
 // headers, no internal hosts (names, literals and every DNS answer are
-// checked), redirects followed manually with the same check per hop.
+// checked), redirects followed manually with the same check per hop, a 20 s
+// deadline for the whole chain, body reading stops at the truncation limit.
 // Residual: the address is resolved again by fetch itself (DNS rebinding
 // between the check and the connect is not prevented).
 
@@ -11,8 +12,15 @@ import net from "node:net";
 export interface ChannelFetchDeps {
     // All addresses a host name resolves to.
     lookup: (host: string) => Promise<string[]>;
-    fetch: (url: string, init: { method: string; redirect: "manual" }) => Promise<Response>;
+    fetch: (
+        url: string,
+        init: { method: string; redirect: "manual"; signal: AbortSignal },
+    ) => Promise<Response>;
+    // Deadline for the whole request chain (default 20 s).
+    timeoutMs?: number;
 }
+
+const DEFAULT_TIMEOUT_MS = 20_000;
 
 export const defaultChannelFetchDeps: ChannelFetchDeps = {
     lookup: async (host) =>
@@ -165,27 +173,58 @@ export async function channelFetch(
     } catch {
         return { ok: false, status: 0, error: "Invalid URL." };
     }
+    // One deadline for the whole chain: every hop and the body read.
+    const timeoutMs = deps.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+    const signal = AbortSignal.timeout(timeoutMs);
     try {
         for (let hop = 0; ; hop++) {
             const blocked = await checkHost(url, deps);
             if (blocked) {
                 return { ok: false, status: 0, error: blocked };
             }
-            const res = await deps.fetch(url.toString(), { method, redirect: "manual" });
+            const res = await deps.fetch(url.toString(), { method, redirect: "manual", signal });
             const location = res.headers.get("location");
             if (res.status >= 300 && res.status < 400 && location) {
+                await res.body?.cancel().catch(() => undefined);
                 if (hop >= MAX_REDIRECTS) {
                     return { ok: false, status: 0, error: `Too many redirects (more than ${MAX_REDIRECTS}).` };
                 }
                 url = new URL(location, url);
                 continue;
             }
-            let text = await res.text();
-            const truncated = text.length > MAX_BODY;
-            if (truncated) text = text.slice(0, MAX_BODY);
+            const { text, truncated } = await readLimited(res, MAX_BODY);
             return { ok: res.ok, status: res.status, statusText: res.statusText, body: text, truncated };
         }
     } catch (e) {
+        if (signal.aborted) {
+            return { ok: false, status: 0, error: `fetch-url timed out after ${Math.round(timeoutMs / 1000)} s.` };
+        }
         return { ok: false, status: 0, error: e instanceof Error ? e.message : String(e) };
     }
+}
+
+// Reads at most `limit` characters, then cancels the stream instead of
+// downloading the rest.
+async function readLimited(res: Response, limit: number): Promise<{ text: string; truncated: boolean }> {
+    if (!res.body) {
+        return { text: "", truncated: false };
+    }
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let text = "";
+    for (;;) {
+        const { done, value } = await reader.read();
+        if (done) {
+            text += decoder.decode();
+            break;
+        }
+        text += decoder.decode(value, { stream: true });
+        if (text.length > limit) {
+            await reader.cancel().catch(() => undefined);
+            return { text: text.slice(0, limit), truncated: true };
+        }
+    }
+    return text.length > limit
+        ? { text: text.slice(0, limit), truncated: true }
+        : { text, truncated: false };
 }
