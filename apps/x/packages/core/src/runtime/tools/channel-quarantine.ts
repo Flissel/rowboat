@@ -33,30 +33,94 @@ export function quarantineMode(ctx?: {
     return null;
 }
 
-// Blocked runs fail closed: EVERY string anywhere in a builtin's input
-// (top-level, nested objects, arrays — path, from, to, cwd, searchPath,
-// outputPath, filePath, files[], paths[], attachments, ...) is resolved as a
-// path; one that lands in the quarantine or the transcripts refuses the call.
-// Multi-line or very long strings (note bodies, prompts) cannot be a path and
-// are skipped. A guard test enumerates every builtin schema to keep it so.
+// Blocked runs fail closed. Every string anywhere in a builtin's input
+// (top-level, nested objects, arrays) is examined:
+//   - Path arguments (isPathKey: path, from, to, cwd, searchPath, outputPath,
+//     filePath, file, files[], paths[], projectDir, toPath, ... — the guard
+//     test derives them from every builtin schema) are ALWAYS checked: a value
+//     with control / invisible characters or longer than MAX_PATH_LENGTH is
+//     refused outright; otherwise the raw, trimmed and NFKC-normalised forms
+//     are resolved (realpath) and matched lexically.
+//   - Every other string, at any length, is trimmed, NFKC-normalised and
+//     split into tokens; a token with a `kanal` path segment or a
+//     `storage/turns` segment refuses the call (no resolve). Short single-line
+//     values are resolved as well (symlinks).
+//   - Inputs nested deeper than MAX_DEPTH or with more than MAX_STRINGS
+//     strings are refused instead of being skipped.
 const MAX_PATH_LENGTH = 4096;
-const MAX_DEPTH = 8;
+const MAX_DEPTH = 10;
+const MAX_STRINGS = 50_000;
 
-function collectStrings(value: unknown, at: string, out: Array<{ at: string; value: string }>, depth = 0): void {
-    if (depth > MAX_DEPTH) return;
+const PATH_KEY_NAMES = new Set([
+    "from", "to", "cwd", "target", "source", "destination", "dest",
+    "skillname", "agentname", "fileglob", "projectdir", "topath", "appfolder",
+    // bg-task folder name under bg-tasks/.
+    "slug", "taskslug",
+]);
+const PATH_KEY_SUFFIX_RE = /(path|paths|dir|dirs|directory|directories|folder|folders|file|files|filename|filenames)$/i;
+
+// True for an argument name that carries a file system path.
+export function isPathKey(key: string): boolean {
+    return PATH_KEY_NAMES.has(key.toLowerCase()) || PATH_KEY_SUFFIX_RE.test(key);
+}
+
+// C0/C1 controls, zero-width and bidi characters.
+// eslint-disable-next-line no-control-regex
+const UNSAFE_CHARS_RE = /[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u2028\u2029\u202a-\u202e\u2060-\u2064\u2066-\u2069\ufeff]/;
+// eslint-disable-next-line no-control-regex
+const UNSAFE_CHARS_GLOBAL_RE = /[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u2028\u2029\u202a-\u202e\u2060-\u2064\u2066-\u2069\ufeff]/g;
+
+function normalizeText(value: string): string {
+    // Invisible characters vanish (a consumer could strip them), controls and
+    // whitespace become token breaks.
+    return value
+        .normalize("NFKC")
+        .replace(/[\u200b-\u200d\u2060\ufeff]/g, "")
+        .replace(UNSAFE_CHARS_GLOBAL_RE, " ")
+        .trim();
+}
+
+// Lexical match: a token with a `kanal` path segment, or storage/turns.
+export function mentionsQuarantine(value: string): boolean {
+    const tokens = normalizeText(value).split(/[\s"'`<>()[\]{},;|=]+/);
+    for (const token of tokens) {
+        if (!/[\\/]/.test(token)) continue;
+        const norm = path.posix.normalize(token.replace(/\\/g, "/"));
+        const segments = norm.toLowerCase().split("/");
+        if (segments.includes("kanal")) return true;
+        const turns = segments.indexOf("turns");
+        if (turns > 0 && segments[turns - 1] === "storage") return true;
+    }
+    return false;
+}
+
+interface Collected {
+    at: string;
+    key: string;
+    value: string;
+}
+
+class ArgumentShapeError extends Error {}
+
+function collectStrings(value: unknown, at: string, key: string, out: Collected[], depth = 0): void {
+    if (depth > MAX_DEPTH) {
+        throw new ArgumentShapeError(`Argumente zu tief verschachtelt (mehr als ${MAX_DEPTH} Ebenen) — refused for background runs (channel quarantine).`);
+    }
     if (typeof value === "string") {
-        if (value.length > 0 && value.length <= MAX_PATH_LENGTH && !/[\r\n\0]/.test(value)) {
-            out.push({ at, value });
+        if (out.length >= MAX_STRINGS) {
+            throw new ArgumentShapeError(`Zu viele Argumente (mehr als ${MAX_STRINGS} Zeichenketten) — refused for background runs (channel quarantine).`);
         }
+        out.push({ at, key, value });
         return;
     }
     if (Array.isArray(value)) {
-        value.forEach((item, index) => collectStrings(item, `${at}[${index}]`, out, depth + 1));
+        // Array elements inherit the array's name (files[], paths[]).
+        value.forEach((item, index) => collectStrings(item, `${at}[${index}]`, key, out, depth + 1));
         return;
     }
     if (value && typeof value === "object") {
-        for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
-            collectStrings(item, at ? `${at}.${key}` : key, out, depth + 1);
+        for (const [childKey, item] of Object.entries(value as Record<string, unknown>)) {
+            collectStrings(item, at ? `${at}.${childKey}` : childKey, childKey, out, depth + 1);
         }
     }
 }
@@ -113,24 +177,43 @@ export function createQuarantineChecker(deps: QuarantineDeps = {}): QuarantineCh
         if (toolName === "executeCommand" && typeof args.command === "string" && SHELL_QUARANTINE_RE.test(args.command)) {
             return `Commands touching ${QUARANTINE_REL} or storage/turns/ are not allowed in background runs (channel quarantine).`;
         }
+        const strings: Collected[] = [];
+        try {
+            collectStrings(args, "", "", strings);
+        } catch (error) {
+            if (error instanceof ArgumentShapeError) return error.message;
+            throw error;
+        }
         const root = await workspaceRoot();
-        const strings: Array<{ at: string; value: string }> = [];
-        collectStrings(args, "", strings);
+        const quarantineMessage = (value: string, at: string) =>
+            `"${value.slice(0, 200)}" (${at}) points into the channel quarantine ${QUARANTINE_REL} or storage/turns/; only the desktop chat may open it.`;
         const seen = new Set<string>();
-        for (const { at, value } of strings) {
-            if (seen.has(value)) continue;
-            seen.add(value);
-            let resolved: string;
-            try {
-                resolved = await resolvePath(value);
-            } catch {
-                continue; // not resolvable as a path
+        for (const { at, key, value } of strings) {
+            const pathArg = isPathKey(key);
+            if (pathArg && (UNSAFE_CHARS_RE.test(value) || value.length > MAX_PATH_LENGTH)) {
+                return `Path argument ${at} contains control characters or is longer than ${MAX_PATH_LENGTH} characters — refused for background runs (channel quarantine).`;
             }
-            if (quarantined(root, resolved)) {
-                return `"${value}" (${at}) is in the channel quarantine ${QUARANTINE_REL}; only the desktop chat may open it.`;
+            if (mentionsQuarantine(value)) {
+                return quarantineMessage(value, at);
             }
-            if (transcript(root, resolved)) {
-                return `"${value}" (${at}) is in storage/turns/ (chat transcripts, including channel runs); background runs may not read transcripts.`;
+            // Resolve path arguments always; other strings only when they
+            // could be a path at all (single line, bounded).
+            if (!pathArg && (value.length > MAX_PATH_LENGTH || UNSAFE_CHARS_RE.test(value))) continue;
+            for (const candidate of new Set([value, value.trim(), normalizeText(value)])) {
+                if (!candidate || seen.has(candidate)) continue;
+                seen.add(candidate);
+                let resolved: string;
+                try {
+                    resolved = await resolvePath(candidate);
+                } catch {
+                    continue; // not resolvable as a path
+                }
+                if (quarantined(root, resolved)) {
+                    return `"${candidate}" (${at}) is in the channel quarantine ${QUARANTINE_REL}; only the desktop chat may open it.`;
+                }
+                if (transcript(root, resolved)) {
+                    return `"${candidate}" (${at}) is in storage/turns/ (chat transcripts, including channel runs); background runs may not read transcripts.`;
+                }
             }
         }
         return null;

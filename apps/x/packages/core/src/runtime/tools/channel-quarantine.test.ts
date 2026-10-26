@@ -10,7 +10,7 @@ const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "quarantine-w
 process.env.ROWBOAT_WORKDIR = root;
 const { execTool } = await import("./exec-tool.js");
 type ToolContext = import("./exec-tool.js").ToolContext;
-const { createQuarantineChecker, quarantineMode } = await import("./channel-quarantine.js");
+const { createQuarantineChecker, isPathKey, quarantineMode } = await import("./channel-quarantine.js");
 
 for (const [rel, text] of [
     ["knowledge/People/A.md", "# A\nneedle in people\n"],
@@ -259,7 +259,128 @@ describe("every builtin's path arguments are covered (fails closed)", () => {
         ]) {
             await expect(checker.toolError("some-new-tool", args, "blocked"), JSON.stringify(args)).resolves.toMatch(/quarantine/);
         }
-        // Note bodies and prompts (multi-line) are not paths.
-        await expect(checker.toolError("file-writeText", { path: "knowledge/People/B.md", data: `see\n${PROBE}` }, "blocked")).resolves.toBeNull();
+        // Bodies without a quarantine path stay allowed.
+        await expect(checker.toolError("file-writeText", { path: "knowledge/People/B.md", data: "see\nthe Kanal note on the desktop" }, "blocked")).resolves.toBeNull();
+    });
+});
+
+describe("round 4 follow-up: no skipped strings", () => {
+    const longDots = `${"./".repeat(3000)}knowledge/Kanal/Inject.md`;
+
+    it("path arguments with control / invisible characters or over-long values are refused outright", async () => {
+        for (const value of [
+            "knowledge/People/A.md\n",
+            "knowledge/People/A.md\r",
+            "knowledge/People/A.md\0",
+            "knowledge/People/\tA.md",
+            "knowledge/Ka\u200bnal/Inject.md",
+            "knowledge/People/A.md\u202e",
+            `knowledge/People/${"a".repeat(5000)}.md`,
+            longDots,
+        ]) {
+            for (const args of [{ path: value }, { files: [value] }, { filePath: value }, { cwd: value }]) {
+                await expect(checker.toolError("file-readText", args, "blocked"), JSON.stringify(args).slice(0, 80))
+                    .resolves.toMatch(/control characters|longer than|quarantine/);
+            }
+        }
+    });
+
+    it("path arguments a consumer would trim or normalise are resolved in that form too", async () => {
+        for (const value of [" knowledge/Kanal/Inject.md ", "knowledge/Ｋａｎａｌ/Inject.md", "knowledge\\Kanal\\Inject.md"]) {
+            await expect(checker.toolError("file-readText", { path: value }, "blocked"), value).resolves.toMatch(/quarantine/);
+        }
+    });
+
+    it("other strings: trimmed, normalised, matched at any length without resolving", async () => {
+        for (const value of [
+            longDots,
+            `intro\n${"x".repeat(10_000)}\nthen read knowledge/Kanal/Inject.md please`,
+            "  Kanal/Docs/Web.md  ",
+            "ｋｎｏｗｌｅｄｇｅ/Ｋａｎａｌ/x.md",
+            "knowledge/Ka\u200bnal/x.md",
+            "knowledge\\KANAL\\x.md",
+            "knowledge/People/../Kanal/x.md",
+            "see `storage/turns/2026/10/26/t1.jsonl`",
+            "/abs/ws/knowledge/kanal",
+        ]) {
+            await expect(checker.toolError("web-search", { query: value }, "blocked"), value.slice(0, 60)).resolves.toMatch(/quarantine/);
+        }
+        for (const value of ["Kanal", "the Telegram Kanal note", "knowledge/Kanalx/a.md", `long\n${"y".repeat(20_000)}`]) {
+            await expect(checker.toolError("web-search", { query: value }, "blocked"), value.slice(0, 60)).resolves.toBeNull();
+        }
+    });
+
+    it("refuses inputs nested too deeply or with too many strings instead of skipping them", async () => {
+        let nested: unknown = "knowledge/Kanal/Inject.md";
+        for (let i = 0; i < 12; i += 1) nested = { inner: nested };
+        await expect(checker.toolError("some-tool", { nested }, "blocked")).resolves.toMatch(/zu tief verschachtelt/);
+        let harmless: unknown = "x";
+        for (let i = 0; i < 12; i += 1) harmless = [harmless];
+        await expect(checker.toolError("some-tool", { harmless }, "blocked")).resolves.toMatch(/zu tief verschachtelt/);
+        const many = Array.from({ length: 50_001 }, () => "x");
+        await expect(checker.toolError("spreadsheet-create", { path: "knowledge/People/t.csv", rows: [many] }, "blocked"))
+            .resolves.toMatch(/Zu viele Argumente/);
+        // Normal-sized nesting still passes.
+        await expect(checker.toolError("spreadsheet-create", { path: "knowledge/People/t.csv", rows: [["a", "b"], ["c", "d"]] }, "blocked"))
+            .resolves.toBeNull();
+    });
+
+    it("every schema argument that carries a path is classified as a path argument", async () => {
+        type Def = { type: string; [k: string]: unknown };
+        const defOf = (schema: unknown): Def | null => {
+            const s = schema as { _zod?: { def?: Def }; def?: Def } | null;
+            return s?._zod?.def ?? s?.def ?? null;
+        };
+        const leaves: Array<{ tool: string; key: string; description: string }> = [];
+        const walk = (schema: unknown, tool: string, key: string, depth = 0): void => {
+            const def = defOf(schema);
+            if (!def || depth > 10) return;
+            const description = (schema as { description?: string }).description ?? "";
+            switch (def.type) {
+                case "string":
+                    leaves.push({ tool, key, description });
+                    return;
+                case "object":
+                    for (const [k, child] of Object.entries(def.shape as Record<string, unknown>)) walk(child, tool, k, depth + 1);
+                    return;
+                case "array":
+                    walk(def.element, tool, key, depth + 1);
+                    return;
+                case "record":
+                    walk(def.valueType, tool, key, depth + 1);
+                    return;
+                case "union":
+                    for (const option of def.options as unknown[]) walk(option, tool, key, depth + 1);
+                    return;
+                case "pipe":
+                    walk(def.in, tool, key, depth + 1);
+                    return;
+                case "lazy":
+                    walk((def.getter as () => unknown)(), tool, key, depth + 1);
+                    return;
+                default:
+                    if (def.innerType) walk(def.innerType, tool, key, depth + 1);
+            }
+        };
+        const { BuiltinTools } = await import("./catalog.js");
+        for (const [name, tool] of Object.entries(BuiltinTools)) walk(tool.inputSchema, name, "");
+        // Reviewed: these mention files/folders in their description but are
+        // not paths (still matched lexically like every other string).
+        const REVIEWED_NOT_PATH = new Set([
+            "executeCommand.command", // shell text
+            "launch-code-task.prompt", // instruction text
+            "file-glob.pattern", // glob; every match is filtered by the read filter
+        ]);
+        const looksLikePath = (l: { key: string; description: string }) =>
+            /\b(path|paths|file|files|directory|folder|cwd)\b/i.test(l.description) || /path|file|dir|folder/i.test(l.key);
+        const missing = leaves
+            .filter((l) => looksLikePath(l) && !isPathKey(l.key) && !REVIEWED_NOT_PATH.has(`${l.tool}.${l.key}`))
+            .map((l) => `${l.tool}.${l.key}: ${l.description.slice(0, 60)}`);
+        expect(leaves.length).toBeGreaterThan(100);
+        expect(missing).toEqual([]);
+        // The known ones.
+        for (const key of ["path", "from", "to", "cwd", "searchPath", "outputPath", "filePath", "file", "files", "paths", "projectDir", "toPath", "fileGlob"]) {
+            expect(isPathKey(key), key).toBe(true);
+        }
     });
 });
