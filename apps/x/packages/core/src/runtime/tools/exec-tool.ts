@@ -1,10 +1,11 @@
-// Modified for VibeMind (Flissel/rowboat vibemind): ToolContext.channel (Teil E).
+// Modified for VibeMind (Flissel/rowboat vibemind): ToolContext.channel / autorunContentForbidden / headlessSandbox (Teil E).
 import { ToolAttachment } from "@x/shared/dist/agent.js";
 import { RunEvent } from "@x/shared/dist/runs.js";
 import { z } from "zod";
 import { BuiltinTools } from "./catalog.js";
 import { executeTool } from "../../mcp/mcp.js";
 import { IAbortRegistry } from "../turns/abort-registry.js";
+import { sandboxChecker, type HeadlessSandbox } from "./headless-sandbox.js";
 
 /**
  * Context passed to every tool execution, providing abort signal and run metadata.
@@ -40,6 +41,9 @@ export interface ToolContext {
     // to introduce autorun content (live / live_note frontmatter, task
     // fences) — see knowledge/autorun-write-check.ts.
     autorunContentForbidden?: boolean;
+    // Set for runs no user is watching (headless, legacy engine, channel):
+    // file builtins are confined to the sandbox (headless-sandbox.ts).
+    headlessSandbox?: HeadlessSandbox;
 }
 
 async function execMcpTool(agentTool: z.infer<typeof ToolAttachment> & { type: "mcp" }, input: Record<string, unknown>): Promise<unknown> {
@@ -59,6 +63,10 @@ export async function execTool(agentTool: z.infer<typeof ToolAttachment>, input:
             const builtinTool = BuiltinTools[agentTool.name];
             if (!builtinTool || !builtinTool.execute) {
                 throw new Error(`Unsupported builtin tool: ${agentTool.name}`);
+            }
+            if (ctx?.headlessSandbox) {
+                const refused = await sandboxChecker().toolError(agentTool.name, input, ctx.headlessSandbox);
+                if (refused) return { error: refused };
             }
             return builtinTool.execute(input, ctx);
         }

@@ -3602,6 +3602,35 @@ describe("channel runs (VibeMind Teil E)", () => {
         expect(contexts.map((c) => c.autorunContentForbidden === true)).toEqual([false, true, true, true]);
     });
 
+    it("round 3: sandboxes headless and channel runs, not desktop turns or children of desktop chats", async () => {
+        const contexts: ToolExecutionContext[] = [];
+        const run = async (overrides: Partial<Parameters<TurnRuntime["createTurn"]>[0]>) => {
+            const { runtime, repo } = makeRuntime({
+                agent: channelAgent,
+                tools: recordingTools([], contexts),
+                models: [
+                    respond(completedResp(assistantCalls(toolCallPart("G", "fetch-url", { url: "https://x" })))),
+                    respond(completedResp(assistantText("done"))),
+                ],
+            });
+            const turnId = await newTurn(runtime, overrides);
+            await advanceAndSettle(runtime, turnId);
+            return (await persisted(repo, turnId))[0] as Extract<TEvent, { type: "turn_created" }>;
+        };
+        const own = { ownFiles: ["knowledge/Live.md"], ownDirs: [], readDirs: [] };
+        await run({ sessionId: "s1", config: { humanAvailable: true } });
+        await run({ sessionId: "s1", config: { humanAvailable: true, autoPermission: true, channel } });
+        const headless = await run({ sessionId: null, config: { humanAvailable: false, autoPermission: true, sandbox: own } });
+        await run({ sessionId: null, config: { humanAvailable: false, autoPermission: true, sandbox: { exempt: true } } });
+        expect(headless.config.sandbox).toEqual(own);
+        expect(contexts[0]).not.toHaveProperty("headlessSandbox");
+        expect(contexts[1].headlessSandbox).toEqual({ ownFiles: [], ownDirs: [], readDirs: [] });
+        expect(contexts[2].headlessSandbox).toEqual(own);
+        expect(contexts[3]).not.toHaveProperty("headlessSandbox");
+        // A child spawned from a desktop chat is treated like the chat.
+        expect(contexts[3]).not.toHaveProperty("autorunContentForbidden");
+    });
+
     function resultFor(log: TEvent[], toolCallId: string) {
         return log.find(
             (e): e is Extract<TEvent, { type: "tool_result" }> =>

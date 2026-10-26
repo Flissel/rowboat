@@ -33,7 +33,17 @@ export interface CreateTurnInput {
         // mobile-channel bridge only. Restricts the turn to tools without
         // external effect (see channel-run-guard.ts); omitted = desktop turn.
         channel?: { readOnlyMcpTools: string[] };
+        // VibeMind Teil E round 3: scope of the headless-run sandbox (see
+        // shared turns.ts config.sandbox).
+        sandbox?: TurnSandboxScope;
     };
+}
+
+export interface TurnSandboxScope {
+    exempt?: boolean;
+    ownFiles?: string[];
+    ownDirs?: string[];
+    readDirs?: string[];
 }
 
 // Steering: a caller-supplied drain the advance polls at each model-call

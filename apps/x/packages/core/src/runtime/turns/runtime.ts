@@ -206,6 +206,9 @@ export class TurnRuntime implements ITurnRuntime {
                               readOnlyMcpTools: [...channel.readOnlyMcpTools],
                           },
                       }),
+                ...(input.config.sandbox === undefined
+                    ? {}
+                    : { sandbox: input.config.sandbox }),
             },
         });
         await this.turnRepo.create(event);
@@ -1095,12 +1098,20 @@ class TurnAdvance {
         let settled: z.infer<typeof ToolResultData>;
         try {
             const channel = this.definition.config.channel;
+            const scope = this.definition.config.sandbox;
+            // A child spawned from a desktop user chat is treated like it.
+            const desktopChild =
+                !channel && this.definition.sessionId === null && scope?.exempt === true;
             // Only a desktop user chat (a session, copilot_chat, not from a
             // channel) may create notes that start background agents.
             const desktopUserTurn =
-                !channel &&
-                this.definition.sessionId !== null &&
-                (this.definition.analytics?.useCase ?? "copilot_chat") === "copilot_chat";
+                desktopChild ||
+                (!channel &&
+                    this.definition.sessionId !== null &&
+                    (this.definition.analytics?.useCase ?? "copilot_chat") === "copilot_chat");
+            // Runs no user watches are confined to the file sandbox.
+            const sandboxed =
+                !!channel || (this.definition.sessionId === null && !desktopChild);
             const result = await syncTool.execute(tc.input, {
                 turnId: this.turnId,
                 sessionId: this.definition.sessionId,
@@ -1108,6 +1119,15 @@ class TurnAdvance {
                 signal: this.signal,
                 ...(channel ? { channel } : {}),
                 ...(desktopUserTurn ? {} : { autorunContentForbidden: true }),
+                ...(sandboxed
+                    ? {
+                          headlessSandbox: {
+                              ownFiles: scope?.ownFiles ?? [],
+                              ownDirs: scope?.ownDirs ?? [],
+                              readDirs: scope?.readDirs ?? [],
+                          },
+                      }
+                    : {}),
                 reportProgress: async (progress) => {
                     await this.append({
                         type: "tool_progress",

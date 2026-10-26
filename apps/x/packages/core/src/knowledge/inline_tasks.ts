@@ -437,6 +437,8 @@ async function processInlineTasks(): Promise<void> {
                     message,
                     useCase: 'knowledge_sync',
                     subUseCase: 'inline_task_run',
+                    // Headless sandbox (Teil E): its own target note only.
+                    sandbox: { ownFiles: [path.relative(WorkDir, filePath).split(path.sep).join('/')] },
                     ...asRunModelOptions(await getKgModel()),
                 });
                 if (result) {

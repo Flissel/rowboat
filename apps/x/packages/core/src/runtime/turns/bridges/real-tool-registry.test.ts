@@ -183,6 +183,16 @@ describe("RealToolRegistry", () => {
         expect(calls[1].ctx).not.toHaveProperty("autorunContentForbidden");
     });
 
+    it("passes headlessSandbox into the ToolContext only when set", async () => {
+        const { registry, calls } = makeRegistry(async () => ({ ok: 1 }));
+        const tool = (await registry.resolve(descriptor())) as SyncRuntimeTool;
+        const sandbox = { ownFiles: ["knowledge/a.md"], ownDirs: [], readDirs: [] };
+        await tool.execute({}, makeCtx({ headlessSandbox: sandbox }));
+        await tool.execute({}, makeCtx());
+        expect(calls[0].ctx.headlessSandbox).toEqual(sandbox);
+        expect(calls[1].ctx).not.toHaveProperty("headlessSandbox");
+    });
+
     it("re-keys registry calls a tool makes with ctx.runId to the call scope", async () => {
         // Builtins address the abort registry with ctx.runId (the turn id).
         // The scoped wrapper must pin those to the per-call key, or a

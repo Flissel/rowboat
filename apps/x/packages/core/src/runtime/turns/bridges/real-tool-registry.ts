@@ -183,6 +183,9 @@ export class RealToolRegistry implements IToolRegistry {
                             ...(ctx.autorunContentForbidden
                                 ? { autorunContentForbidden: true }
                                 : {}),
+                            ...(ctx.headlessSandbox
+                                ? { headlessSandbox: ctx.headlessSandbox }
+                                : {}),
                             publish: async (event) => {
                                 if (event.type === "tool-output-stream") {
                                     await ctx.reportProgress({

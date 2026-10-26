@@ -10,6 +10,22 @@ import { BuiltinToolsSchema } from "../types.js";
 import type { ToolContext } from "../exec-tool.js";
 import { ChannelRunGuard } from "../../turns/channel-run-guard.js";
 import { autorunIntroductionError } from "../../../knowledge/autorun-write-check.js";
+import { sandboxChecker } from "../headless-sandbox.js";
+
+// Per-match read filter for grep / glob: channel runs and sandboxed (headless)
+// runs each add their rule; desktop turns get none.
+function matchFilter(ctx?: ToolContext): ((absPath: string) => Promise<boolean>) | undefined {
+    const filters: Array<(absPath: string) => Promise<boolean>> = [];
+    if (ctx?.channel) filters.push(new ChannelRunGuard().readFilter());
+    if (ctx?.headlessSandbox) filters.push(sandboxChecker().readFilter(ctx.headlessSandbox));
+    if (filters.length === 0) return undefined;
+    return async (absPath) => {
+        for (const filter of filters) {
+            if (!(await filter(absPath))) return false;
+        }
+        return true;
+    };
+}
 
 
 export const fileTools: z.infer<typeof BuiltinToolsSchema> = {
@@ -295,7 +311,7 @@ export const fileTools: z.infer<typeof BuiltinToolsSchema> = {
         }),
         execute: async ({ pattern, cwd }: { pattern: string; cwd?: string }, ctx?: ToolContext) => {
             try {
-                return await files.glob(pattern, cwd, ctx?.channel ? new ChannelRunGuard().readFilter() : undefined);
+                return await files.glob(pattern, cwd, matchFilter(ctx));
             } catch (error) {
                 return { error: error instanceof Error ? error.message : 'Unknown error' };
             }
@@ -329,7 +345,7 @@ export const fileTools: z.infer<typeof BuiltinToolsSchema> = {
                 return await files.grep({
                     pattern, searchPath, fileGlob, contextLines, maxResults,
                     // Channel runs: every match must pass the read filter.
-                    ...(ctx?.channel ? { pathFilter: new ChannelRunGuard().readFilter() } : {}),
+                    ...(matchFilter(ctx) ? { pathFilter: matchFilter(ctx) } : {}),
                 });
             } catch (error) {
                 return { error: error instanceof Error ? error.message : 'Unknown error' };

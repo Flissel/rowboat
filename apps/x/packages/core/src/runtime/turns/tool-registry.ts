@@ -22,6 +22,9 @@ export interface ToolExecutionContext {
     // True unless the turn is a desktop user chat: write tools then refuse
     // to introduce autorun content (knowledge/autorun-write-check.ts).
     autorunContentForbidden?: boolean;
+    // Set for headless and channel runs: file builtins are confined to this
+    // sandbox (runtime/tools/headless-sandbox.ts).
+    headlessSandbox?: { ownFiles: string[]; ownDirs: string[]; readDirs: string[] };
 }
 
 export interface SyncRuntimeTool {
