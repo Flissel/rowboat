@@ -33,10 +33,33 @@ export function quarantineMode(ctx?: {
     return null;
 }
 
-// Arguments of any builtin that name a file or directory (file-*, parseFile,
-// LLMParse, spreadsheet-*, deck-*, transcribe-audio, text-to-speech,
-// executeCommand's cwd, ...).
-const PATH_ARGS = ["path", "from", "to", "cwd", "searchPath", "outputPath"];
+// Blocked runs fail closed: EVERY string anywhere in a builtin's input
+// (top-level, nested objects, arrays — path, from, to, cwd, searchPath,
+// outputPath, filePath, files[], paths[], attachments, ...) is resolved as a
+// path; one that lands in the quarantine or the transcripts refuses the call.
+// Multi-line or very long strings (note bodies, prompts) cannot be a path and
+// are skipped. A guard test enumerates every builtin schema to keep it so.
+const MAX_PATH_LENGTH = 4096;
+const MAX_DEPTH = 8;
+
+function collectStrings(value: unknown, at: string, out: Array<{ at: string; value: string }>, depth = 0): void {
+    if (depth > MAX_DEPTH) return;
+    if (typeof value === "string") {
+        if (value.length > 0 && value.length <= MAX_PATH_LENGTH && !/[\r\n\0]/.test(value)) {
+            out.push({ at, value });
+        }
+        return;
+    }
+    if (Array.isArray(value)) {
+        value.forEach((item, index) => collectStrings(item, `${at}[${index}]`, out, depth + 1));
+        return;
+    }
+    if (value && typeof value === "object") {
+        for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
+            collectStrings(item, at ? `${at}.${key}` : key, out, depth + 1);
+        }
+    }
+}
 
 // Channel runs: the arguments a write builtin modifies.
 const CHANNEL_WRITE_ARGS: Record<string, string[]> = {
@@ -91,15 +114,23 @@ export function createQuarantineChecker(deps: QuarantineDeps = {}): QuarantineCh
             return `Commands touching ${QUARANTINE_REL} or storage/turns/ are not allowed in background runs (channel quarantine).`;
         }
         const root = await workspaceRoot();
-        for (const key of PATH_ARGS) {
-            const value = args[key];
-            if (typeof value !== "string" || value.length === 0) continue;
-            const resolved = await resolvePath(value);
+        const strings: Array<{ at: string; value: string }> = [];
+        collectStrings(args, "", strings);
+        const seen = new Set<string>();
+        for (const { at, value } of strings) {
+            if (seen.has(value)) continue;
+            seen.add(value);
+            let resolved: string;
+            try {
+                resolved = await resolvePath(value);
+            } catch {
+                continue; // not resolvable as a path
+            }
             if (quarantined(root, resolved)) {
-                return `"${value}" is in the channel quarantine ${QUARANTINE_REL}; only the desktop chat may open it.`;
+                return `"${value}" (${at}) is in the channel quarantine ${QUARANTINE_REL}; only the desktop chat may open it.`;
             }
             if (transcript(root, resolved)) {
-                return `"${value}" is in storage/turns/ (chat transcripts, including channel runs); background runs may not read transcripts.`;
+                return `"${value}" (${at}) is in storage/turns/ (chat transcripts, including channel runs); background runs may not read transcripts.`;
             }
         }
         return null;

@@ -181,3 +181,85 @@ describe("execTool enforces the quarantine", () => {
         expect(fs.readFileSync(path.join(root, "knowledge", "Kanal", "Neu.md"), "utf8")).toBe("# neu\n");
     });
 });
+
+describe("every builtin's path arguments are covered (fails closed)", () => {
+    type Def = { type: string; [k: string]: unknown };
+    const defOf = (schema: unknown): Def | null => {
+        const s = schema as { _zod?: { def?: Def }; def?: Def } | null;
+        return s?._zod?.def ?? s?.def ?? null;
+    };
+    const PROBE = "knowledge/Kanal/Inject.md";
+
+    // One sample input per string leaf in the schema, with that leaf set to
+    // a quarantine path (everything else left out).
+    function samples(schema: unknown, depth = 0): unknown[] {
+        const def = defOf(schema);
+        if (!def || depth > 8) return [];
+        switch (def.type) {
+            case "string":
+            case "any":
+            case "unknown":
+            case "custom":
+                return [PROBE];
+            case "object": {
+                const shape = def.shape as Record<string, unknown>;
+                return Object.entries(shape).flatMap(([key, child]) =>
+                    samples(child, depth + 1).map((value) => ({ [key]: value })),
+                );
+            }
+            case "array":
+                return samples(def.element, depth + 1).map((value) => [value]);
+            case "tuple":
+                return (def.items as unknown[]).flatMap((item) => samples(item, depth + 1).map((value) => [value]));
+            case "record":
+                return samples(def.valueType, depth + 1).map((value) => ({ k: value }));
+            case "union":
+                return (def.options as unknown[]).flatMap((option) => samples(option, depth + 1));
+            case "optional":
+            case "nullable":
+            case "default":
+            case "prefault":
+            case "readonly":
+            case "catch":
+            case "nonoptional":
+                return samples(def.innerType, depth + 1);
+            case "pipe":
+                return samples(def.in, depth + 1);
+            case "lazy":
+                return samples((def.getter as () => unknown)(), depth + 1);
+            default:
+                return [];
+        }
+    }
+
+    it("refuses a quarantine path in any string argument of any builtin for blocked runs", async () => {
+        const { BuiltinTools } = await import("./catalog.js");
+        let probed = 0;
+        const uncovered: string[] = [];
+        for (const [name, tool] of Object.entries(BuiltinTools)) {
+            for (const input of samples(tool.inputSchema)) {
+                probed += 1;
+                const args = (input && typeof input === "object" && !Array.isArray(input) ? input : { value: input }) as Record<string, unknown>;
+                const error = await checker.toolError(name, args, "blocked");
+                if (!error || !/quarantine/.test(error)) uncovered.push(`${name} ${JSON.stringify(args)}`);
+            }
+        }
+        expect(probed).toBeGreaterThan(50);
+        expect(uncovered).toEqual([]);
+    });
+
+    it("covers argument names a fixed list would miss", async () => {
+        for (const args of [
+            { filePath: PROBE },
+            { file: PROBE },
+            { files: ["knowledge/People/A.md", PROBE] },
+            { paths: [PROBE] },
+            { attachments: [{ path: PROBE }] },
+            { nested: { deeper: { target: path.join(root, "knowledge", "kanal", "x.md") } } },
+        ]) {
+            await expect(checker.toolError("some-new-tool", args, "blocked"), JSON.stringify(args)).resolves.toMatch(/quarantine/);
+        }
+        // Note bodies and prompts (multi-line) are not paths.
+        await expect(checker.toolError("file-writeText", { path: "knowledge/People/B.md", data: `see\n${PROBE}` }, "blocked")).resolves.toBeNull();
+    });
+});
