@@ -1,3 +1,4 @@
+// Modified for VibeMind (Flissel/rowboat vibemind): ToolContext.channel (Teil E).
 import { ToolAttachment } from "@x/shared/dist/agent.js";
 import { RunEvent } from "@x/shared/dist/runs.js";
 import { z } from "zod";
@@ -28,6 +29,11 @@ export interface ToolContext {
     // global approval policy.
     codeCwd?: string | null;
     codePolicy?: 'ask' | 'auto-approve-reads' | 'yolo' | null;
+    // Modified for VibeMind (Flissel/rowboat vibemind): set for turns started
+    // from a mobile channel (turn_created.config.channel). Builtins apply
+    // their execution-time channel restrictions when present (file-grep /
+    // file-glob read filter, fetch-url host + redirect checks).
+    channel?: { readOnlyMcpTools: string[] };
 }
 
 async function execMcpTool(agentTool: z.infer<typeof ToolAttachment> & { type: "mcp" }, input: Record<string, unknown>): Promise<unknown> {
