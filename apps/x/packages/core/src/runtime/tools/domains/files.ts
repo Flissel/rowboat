@@ -1,4 +1,4 @@
-// Modified for VibeMind (Flissel/rowboat vibemind): channel read filter for file-grep / file-glob, autorun-content check for write tools (Teil E).
+// Modified for VibeMind (Flissel/rowboat vibemind): channel read filter for file-grep / file-glob / file-list, autorun-content check for write tools, channel quarantine (Teil E).
 // Builtin tools: files domain. Entries moved VERBATIM from the historical
 // monolith — the merge order in ../builtin-tools.ts preserves the original
 // catalog key order (provider-payload bytes; see the key-order test there).
@@ -11,6 +11,7 @@ import type { ToolContext } from "../exec-tool.js";
 import { ChannelRunGuard } from "../../turns/channel-run-guard.js";
 import { autorunIntroductionError } from "../../../knowledge/autorun-write-check.js";
 import { sandboxChecker } from "../headless-sandbox.js";
+import { quarantineChecker, quarantineMode } from "../channel-quarantine.js";
 
 // Per-match read filter for grep / glob: channel runs and sandboxed (headless)
 // runs each add their rule; desktop turns get none.
@@ -18,6 +19,8 @@ function matchFilter(ctx?: ToolContext): ((absPath: string) => Promise<boolean>)
     const filters: Array<(absPath: string) => Promise<boolean>> = [];
     if (ctx?.channel) filters.push(new ChannelRunGuard().readFilter());
     if (ctx?.headlessSandbox) filters.push(sandboxChecker().readFilter(ctx.headlessSandbox));
+    // Non-desktop runs never see the channel quarantine knowledge/Kanal/.
+    if (quarantineMode(ctx) === "blocked") filters.push(quarantineChecker().readFilter());
     if (filters.length === 0) return undefined;
     return async (absPath) => {
         for (const filter of filters) {
@@ -100,14 +103,22 @@ export const fileTools: z.infer<typeof BuiltinToolsSchema> = {
             includeStats?: boolean;
             includeHidden?: boolean;
             allowedExtensions?: string[];
-        }) => {
+        }, ctx?: ToolContext) => {
             try {
-                return await files.list(filePath || '.', {
+                const entries = await files.list(filePath || '.', {
                     recursive,
                     includeStats,
                     includeHidden,
                     allowedExtensions,
                 });
+                // VibeMind Teil E: same per-entry filter as grep / glob.
+                const filter = matchFilter(ctx);
+                if (!filter) return entries;
+                const visible: typeof entries = [];
+                for (const entry of entries) {
+                    if (await filter(entry.resolvedPath)) visible.push(entry);
+                }
+                return visible;
             } catch (error) {
                 return {
                     error: error instanceof Error ? error.message : 'Unknown error',

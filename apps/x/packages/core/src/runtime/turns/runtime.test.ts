@@ -36,6 +36,7 @@ import type {
 import { composeModelRequest } from "./compose-model-request.js";
 import { TurnRuntime } from "./runtime.js";
 import type { IChannelRunGuard } from "./channel-run-guard.js";
+import { quarantineMode } from "../tools/channel-quarantine.js";
 import { getCurrentUseCase } from "../../analytics/use_case.js";
 import type {
     IToolRegistry,
@@ -3629,6 +3630,47 @@ describe("channel runs (VibeMind Teil E)", () => {
         expect(contexts[3]).not.toHaveProperty("headlessSandbox");
         // A child spawned from a desktop chat is treated like the chat.
         expect(contexts[3]).not.toHaveProperty("autorunContentForbidden");
+    });
+
+    it("round 4: todo and code sessions count as autonomous (quarantine closed), the desktop chat does not", async () => {
+        const contexts: ToolExecutionContext[] = [];
+        const run = async (overrides: Partial<Parameters<TurnRuntime["createTurn"]>[0]>) => {
+            const { runtime } = makeRuntime({
+                agent: channelAgent,
+                tools: recordingTools([], contexts),
+                models: [
+                    respond(completedResp(assistantCalls(toolCallPart("G", "fetch-url", { url: "https://x" })))),
+                    respond(completedResp(assistantText("done"))),
+                ],
+            });
+            const turnId = await newTurn(runtime, overrides);
+            await advanceAndSettle(runtime, turnId);
+        };
+        await run({ sessionId: "s1", analytics: { useCase: "copilot_chat" }, config: { humanAvailable: true } });
+        await run({ sessionId: "s1", analytics: { useCase: "todo_item_agent" }, config: { humanAvailable: false, autoPermission: true } });
+        await run({ sessionId: "s1", analytics: { useCase: "code_session" }, config: { humanAvailable: false, autoPermission: true } });
+        expect(contexts.map((c) => c.autorunContentForbidden === true)).toEqual([false, true, true]);
+        expect(contexts.map((c) => quarantineMode(c))).toEqual([null, "blocked", "blocked"]);
+    });
+
+    it("round 4: a channel turn's system prompt points at knowledge/Kanal/, a desktop turn's does not", async () => {
+        const prompts: string[] = [];
+        for (const config of [
+            { humanAvailable: true, autoPermission: true, channel },
+            { humanAvailable: true },
+        ]) {
+            const { runtime, models } = makeRuntime({
+                agent: channelAgent,
+                tools: recordingTools([]),
+                models: [respond(completedResp(assistantText("done")))],
+            });
+            const turnId = await newTurn(runtime, { config });
+            await advanceAndSettle(runtime, turnId);
+            prompts.push(models.requests[0].systemPrompt);
+        }
+        expect(prompts[0]).toContain("knowledge/Kanal/");
+        expect(prompts[0].startsWith(channelAgent.systemPrompt)).toBe(true);
+        expect(prompts[1]).toBe(channelAgent.systemPrompt);
     });
 
     function resultFor(log: TEvent[], toolCallId: string) {

@@ -1,4 +1,4 @@
-// Modified for VibeMind (Flissel/rowboat vibemind): ToolContext.channel / autorunContentForbidden / headlessSandbox (Teil E).
+// Modified for VibeMind (Flissel/rowboat vibemind): ToolContext.channel / autorunContentForbidden / headlessSandbox, channel quarantine (Teil E).
 import { ToolAttachment } from "@x/shared/dist/agent.js";
 import { RunEvent } from "@x/shared/dist/runs.js";
 import { z } from "zod";
@@ -6,6 +6,7 @@ import { BuiltinTools } from "./catalog.js";
 import { executeTool } from "../../mcp/mcp.js";
 import { IAbortRegistry } from "../turns/abort-registry.js";
 import { sandboxChecker, type HeadlessSandbox } from "./headless-sandbox.js";
+import { quarantineChecker, quarantineMode } from "./channel-quarantine.js";
 
 /**
  * Context passed to every tool execution, providing abort signal and run metadata.
@@ -66,6 +67,13 @@ export async function execTool(agentTool: z.infer<typeof ToolAttachment>, input:
             }
             if (ctx?.headlessSandbox) {
                 const refused = await sandboxChecker().toolError(agentTool.name, input, ctx.headlessSandbox);
+                if (refused) return { error: refused };
+            }
+            // Channel quarantine knowledge/Kanal/ (fix round 4): channel runs
+            // write only there, other non-desktop runs never touch it.
+            const mode = quarantineMode(ctx);
+            if (mode) {
+                const refused = await quarantineChecker().toolError(agentTool.name, input, mode);
                 if (refused) return { error: refused };
             }
             return builtinTool.execute(input, ctx);

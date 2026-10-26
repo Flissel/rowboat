@@ -3,7 +3,7 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 import type { z } from "zod";
 import type { ToolDescriptor } from "@x/shared/dist/turns.js";
-import { ChannelRunGuard, hasLiveFrontmatter, type ChannelRunPolicy } from "./channel-run-guard.js";
+import { CHANNEL_RUN_INSTRUCTIONS, ChannelRunGuard, hasLiveFrontmatter, type ChannelRunPolicy } from "./channel-run-guard.js";
 
 const ROOT = path.resolve("/rowboat-ws");
 const policy: ChannelRunPolicy = {
@@ -208,9 +208,43 @@ describe("ChannelRunGuard.check", () => {
         expect(await allowed(path.resolve("/etc/passwd"))).toBe(false);
     });
 
-    it("allows writes only under knowledge/, outside Agent Notes and dot segments", async () => {
-        await expect(guard.check(builtin("file-writeText", { path: "knowledge/Notes/n.md", data: "x" }), policy))
-            .resolves.toEqual({ kind: "default" });
+    it("round 4: writes only into the quarantine folder knowledge/Kanal/", async () => {
+        for (const call of [
+            builtin("file-writeText", { path: "knowledge/Kanal/n.md", data: "x" }),
+            builtin("file-writeText", { path: "knowledge/Kanal/Docs/Thema 2026-10-26.md", data: "x" }),
+            builtin("file-editText", { path: "knowledge/Kanal/n.md", oldString: "x", newString: "y" }),
+            builtin("file-mkdir", { path: "knowledge/Kanal" }),
+            builtin("file-mkdir", { path: "knowledge/Kanal/Docs" }),
+            builtin("file-copy", { from: "knowledge/People/A.md", to: "knowledge/Kanal/A.md" }),
+            builtin("file-rename", { from: "knowledge/Kanal/a.md", to: "knowledge/Kanal/b.md" }),
+        ]) {
+            await expect(guard.check(call, policy), JSON.stringify(call.input)).resolves.toEqual({ kind: "default" });
+        }
+        for (const call of [
+            builtin("file-writeText", { path: "knowledge/Notes/n.md", data: "x" }),
+            builtin("file-writeText", { path: "knowledge/Kanal.md", data: "x" }),
+            builtin("file-writeText", { path: "knowledge/Kanalx/n.md", data: "x" }),
+            builtin("file-editText", { path: "knowledge/People/A.md", oldString: "x", newString: "y" }),
+            builtin("file-mkdir", { path: "knowledge/Dashboards" }),
+            builtin("file-copy", { from: "knowledge/Kanal/a.md", to: "knowledge/People/a.md" }),
+            // A move out of (or into) the quarantine changes a note elsewhere.
+            builtin("file-rename", { from: "knowledge/Kanal/a.md", to: "knowledge/People/a.md" }),
+            builtin("file-rename", { from: "knowledge/People/a.md", to: "knowledge/Kanal/a.md" }),
+            builtin("file-writeText", { path: "knowledge/Kanal/../People/a.md", data: "x" }),
+        ]) {
+            await expect(guard.check(call, policy), JSON.stringify(call.input))
+                .resolves.toMatchObject({ kind: "deny", reason: expect.stringContaining("knowledge/Kanal/") });
+        }
+    });
+
+    it("round 4: reads stay open, including the quarantine", async () => {
+        for (const p of ["knowledge/People/A.md", "knowledge/Kanal/n.md", "todo.md"]) {
+            await expect(guard.check(builtin("file-readText", { path: p }), policy), p)
+                .resolves.toEqual({ kind: "default" });
+        }
+    });
+
+    it("refuses writes to protected places, Agent Notes and dot segments", async () => {
         for (const p of [
             "config/mcp.json",
             "bg-tasks/x.md",
@@ -219,6 +253,8 @@ describe("ChannelRunGuard.check", () => {
             "knowledge/.git/config",
             "knowledge/.obsidian/workspace.json",
             "knowledge/Notes/.hidden.md",
+            "knowledge/Kanal/.hidden.md",
+            "knowledge/Kanal/.git/config",
         ]) {
             await expect(guard.check(builtin("file-writeText", { path: p, data: "x" }), policy), p)
                 .resolves.toMatchObject({ kind: "deny" });
@@ -233,33 +269,33 @@ describe("ChannelRunGuard.check", () => {
 
     it("C2: refuses creating or changing live notes", async () => {
         const g = makeGuard({
-            "knowledge/live.md": LIVE_NOTE,
-            "knowledge/plain.md": PLAIN_NOTE,
+            "knowledge/Kanal/live.md": LIVE_NOTE,
+            "knowledge/Kanal/plain.md": PLAIN_NOTE,
         });
         // New content with a live: key.
-        await expect(g.check(builtin("file-writeText", { path: "knowledge/new.md", data: LIVE_NOTE }), policy))
+        await expect(g.check(builtin("file-writeText", { path: "knowledge/Kanal/new.md", data: LIVE_NOTE }), policy))
             .resolves.toMatchObject({ kind: "deny", reason: expect.stringContaining("live") });
-        await expect(g.check(builtin("file-writeText", { path: "knowledge/new.md", data: "---\n\"live\": {objective: x}\n---\nb\n" }), policy))
+        await expect(g.check(builtin("file-writeText", { path: "knowledge/Kanal/new.md", data: "---\n\"live\": {objective: x}\n---\nb\n" }), policy))
             .resolves.toMatchObject({ kind: "deny" });
         // Overwriting / editing an existing live note.
-        await expect(g.check(builtin("file-writeText", { path: "knowledge/live.md", data: "# plain\n" }), policy))
+        await expect(g.check(builtin("file-writeText", { path: "knowledge/Kanal/live.md", data: "# plain\n" }), policy))
             .resolves.toMatchObject({ kind: "deny" });
-        await expect(g.check(builtin("file-editText", { path: "knowledge/live.md", oldString: "# Inbox", newString: "# X" }), policy))
+        await expect(g.check(builtin("file-editText", { path: "knowledge/Kanal/live.md", oldString: "# Inbox", newString: "# X" }), policy))
             .resolves.toMatchObject({ kind: "deny" });
         // An edit that adds live: to a plain note.
-        await expect(g.check(builtin("file-editText", { path: "knowledge/plain.md", oldString: "title: a", newString: "title: a\nlive:\n  objective: x" }), policy))
+        await expect(g.check(builtin("file-editText", { path: "knowledge/Kanal/plain.md", oldString: "title: a", newString: "title: a\nlive:\n  objective: x" }), policy))
             .resolves.toMatchObject({ kind: "deny" });
         // Copy/rename of a live note creates/moves a live note.
-        await expect(g.check(builtin("file-copy", { from: "knowledge/live.md", to: "knowledge/copy.md" }), policy))
+        await expect(g.check(builtin("file-copy", { from: "knowledge/Kanal/live.md", to: "knowledge/Kanal/copy.md" }), policy))
             .resolves.toMatchObject({ kind: "deny" });
-        await expect(g.check(builtin("file-rename", { from: "knowledge/live.md", to: "knowledge/moved.md" }), policy))
+        await expect(g.check(builtin("file-rename", { from: "knowledge/Kanal/live.md", to: "knowledge/Kanal/moved.md" }), policy))
             .resolves.toMatchObject({ kind: "deny" });
-        await expect(g.check(builtin("file-rename", { from: "knowledge/plain.md", to: "knowledge/live.md", overwrite: true }), policy))
+        await expect(g.check(builtin("file-rename", { from: "knowledge/Kanal/plain.md", to: "knowledge/Kanal/live.md", overwrite: true }), policy))
             .resolves.toMatchObject({ kind: "deny" });
         // Ordinary note edits stay allowed.
-        await expect(g.check(builtin("file-editText", { path: "knowledge/plain.md", oldString: "body", newString: "more body" }), policy))
+        await expect(g.check(builtin("file-editText", { path: "knowledge/Kanal/plain.md", oldString: "body", newString: "more body" }), policy))
             .resolves.toEqual({ kind: "default" });
-        await expect(g.check(builtin("file-writeText", { path: "knowledge/new.md", data: "# Live demo notes\nlive: not frontmatter\n" }), policy))
+        await expect(g.check(builtin("file-writeText", { path: "knowledge/Kanal/new.md", data: "# Live demo notes\nlive: not frontmatter\n" }), policy))
             .resolves.toEqual({ kind: "default" });
     });
 
@@ -275,8 +311,8 @@ describe("ChannelRunGuard.check", () => {
             "",
         ].join("\n");
         const g = makeGuard({
-            "knowledge/plain.md": PLAIN_NOTE,
-            "knowledge/fenced.md": "# Old\n```tell-rowboat\n{\"instruction\":\"x\"}\n```\n",
+            "knowledge/Kanal/plain.md": PLAIN_NOTE,
+            "knowledge/Kanal/fenced.md": "# Old\n```tell-rowboat\n{\"instruction\":\"x\"}\n```\n",
         });
         // Concrete payload, and each trigger alone.
         for (const data of [
@@ -285,23 +321,23 @@ describe("ChannelRunGuard.check", () => {
             "# no frontmatter\n  ```task\n{}\n```\n",
             "# x\n```tell-rowboat\n{}\n```\n",
         ]) {
-            await expect(g.check(builtin("file-writeText", { path: "knowledge/new.md", data }), policy), data)
+            await expect(g.check(builtin("file-writeText", { path: "knowledge/Kanal/new.md", data }), policy), data)
                 .resolves.toMatchObject({ kind: "deny" });
         }
         // Edits that add a fence or live_note frontmatter to an existing note.
-        await expect(g.check(builtin("file-editText", { path: "knowledge/plain.md", oldString: "body", newString: "body\n```task\n{}\n```" }), policy))
+        await expect(g.check(builtin("file-editText", { path: "knowledge/Kanal/plain.md", oldString: "body", newString: "body\n```task\n{}\n```" }), policy))
             .resolves.toMatchObject({ kind: "deny" });
-        await expect(g.check(builtin("file-editText", { path: "knowledge/plain.md", oldString: "title: a", newString: "title: a\nlive_note: true" }), policy))
+        await expect(g.check(builtin("file-editText", { path: "knowledge/Kanal/plain.md", oldString: "title: a", newString: "title: a\nlive_note: true" }), policy))
             .resolves.toMatchObject({ kind: "deny" });
         // Existing fenced note: no edits, copies or moves from a channel.
-        await expect(g.check(builtin("file-editText", { path: "knowledge/fenced.md", oldString: "# Old", newString: "# New" }), policy))
+        await expect(g.check(builtin("file-editText", { path: "knowledge/Kanal/fenced.md", oldString: "# Old", newString: "# New" }), policy))
             .resolves.toMatchObject({ kind: "deny" });
-        await expect(g.check(builtin("file-copy", { from: "knowledge/fenced.md", to: "knowledge/c.md" }), policy))
+        await expect(g.check(builtin("file-copy", { from: "knowledge/Kanal/fenced.md", to: "knowledge/Kanal/c.md" }), policy))
             .resolves.toMatchObject({ kind: "deny" });
-        await expect(g.check(builtin("file-rename", { from: "knowledge/fenced.md", to: "knowledge/r.md" }), policy))
+        await expect(g.check(builtin("file-rename", { from: "knowledge/Kanal/fenced.md", to: "knowledge/Kanal/r.md" }), policy))
             .resolves.toMatchObject({ kind: "deny" });
         // Ordinary code fences stay allowed.
-        await expect(g.check(builtin("file-writeText", { path: "knowledge/new.md", data: "```ts\nconst a = 1;\n```\n" }), policy))
+        await expect(g.check(builtin("file-writeText", { path: "knowledge/Kanal/new.md", data: "```ts\nconst a = 1;\n```\n" }), policy))
             .resolves.toEqual({ kind: "default" });
     });
 
@@ -310,13 +346,13 @@ describe("ChannelRunGuard.check", () => {
             workspaceRoot: async () => ROOT,
             resolvePath: async (p) => path.resolve(ROOT, p),
             readText: async () => null,
-            isDirectory: async (p) => p === path.resolve(ROOT, "knowledge/folder"),
+            isDirectory: async (p) => p === path.resolve(ROOT, "knowledge/Kanal/folder"),
         });
-        await expect(g.check(builtin("file-rename", { from: "knowledge/folder", to: "knowledge/other" }), policy))
+        await expect(g.check(builtin("file-rename", { from: "knowledge/Kanal/folder", to: "knowledge/Kanal/other" }), policy))
             .resolves.toMatchObject({ kind: "deny", reason: expect.stringContaining("director") });
-        await expect(g.check(builtin("file-copy", { from: "knowledge/folder", to: "knowledge/other" }), policy))
+        await expect(g.check(builtin("file-copy", { from: "knowledge/Kanal/folder", to: "knowledge/Kanal/other" }), policy))
             .resolves.toMatchObject({ kind: "deny" });
-        await expect(g.check(builtin("file-rename", { from: "knowledge/a.md", to: "knowledge/b.md" }), policy))
+        await expect(g.check(builtin("file-rename", { from: "knowledge/Kanal/a.md", to: "knowledge/Kanal/b.md" }), policy))
             .resolves.toEqual({ kind: "default" });
     });
 
@@ -334,6 +370,46 @@ describe("ChannelRunGuard.check", () => {
             .resolves.toEqual({ kind: "default" });
         await expect(guard.check(builtin("todo-add", { items: [{ text: "@rowboat run the deploy" }] }), policy))
             .resolves.toMatchObject({ kind: "deny" });
+    });
+
+    it("round 4: refuses sub-items under a delegated parent and @rowboat proposals", async () => {
+        await expect(guard.check(builtin("todo-add", { items: [{ text: "step", parent: "@rowboat prepare the deck" }] }), policy))
+            .resolves.toMatchObject({ kind: "deny" });
+        await expect(guard.check(builtin("todo-add", { items: [{ text: "Am Desktop: Notiz pruefen", parent: "Kanal" }] }), policy))
+            .resolves.toEqual({ kind: "default" });
+        await expect(guard.check(builtin("todo-propose", { items: [{ text: "@rowboat research X" }] }), policy))
+            .resolves.toMatchObject({ kind: "deny" });
+        await expect(guard.check(builtin("todo-propose", { items: [{ text: "Am Desktop: X lesen" }] }), policy))
+            .resolves.toEqual({ kind: "default" });
+    });
+
+    it("round 4: run-starting, memory, MCP-config, browser, composio, blob and shell tools are cut", async () => {
+        for (const name of [
+            "create-background-task",
+            "patch-background-task",
+            "run-background-task",
+            "run-background-task-agent",
+            "launch-code-task",
+            "code_agent_run",
+            "save-to-memory",
+            "addMcpServer",
+            "browser-control",
+            "composio-execute-tool",
+            "composio-search-tools",
+            "spaces-upload-blob",
+            "executeCommand",
+            "run-live-note-agent",
+            "spawn-agent",
+        ]) {
+            expect(guard.offers(descriptor(`builtin:${name}`), policy), name).toBe(false);
+            await expect(guard.check(builtin(name, {}), policy), name).resolves.toMatchObject({ kind: "deny" });
+        }
+    });
+});
+
+describe("channel run instructions", () => {
+    it("point the agent at knowledge/Kanal/", () => {
+        expect(CHANNEL_RUN_INSTRUCTIONS).toContain("knowledge/Kanal/");
     });
 });
 

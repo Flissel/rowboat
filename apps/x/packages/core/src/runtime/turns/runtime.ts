@@ -63,7 +63,7 @@ import type { IPermissionChecker, IPermissionClassifier } from "./permission.js"
 import type { ITurnRepo } from "./repo.js";
 import { HotStream } from "./stream.js";
 import type { IToolRegistry, RuntimeTool, SyncRuntimeTool } from "./tool-registry.js";
-import { ChannelRunGuard, type IChannelRunGuard } from "./channel-run-guard.js";
+import { CHANNEL_RUN_INSTRUCTIONS, ChannelRunGuard, type IChannelRunGuard } from "./channel-run-guard.js";
 
 type TEvent = z.infer<typeof TurnEvent>;
 
@@ -144,6 +144,8 @@ export class TurnRuntime implements ITurnRuntime {
             // provider payload rebuilt from it) is the restricted set.
             resolved = {
                 ...resolved,
+                // Round 4: tell the agent where its notes go (quarantine).
+                systemPrompt: `${resolved.systemPrompt}\n\n${CHANNEL_RUN_INSTRUCTIONS}`,
                 tools: resolved.tools.filter((tool) =>
                     this.channelRunGuard.offers(tool, channel),
                 ),
@@ -1103,7 +1105,9 @@ class TurnAdvance {
             const desktopChild =
                 !channel && this.definition.sessionId === null && scope?.exempt === true;
             // Only a desktop user chat (a session, copilot_chat, not from a
-            // channel) may create notes that start background agents.
+            // channel) may create notes that start background agents. The
+            // same flag closes the channel quarantine knowledge/Kanal/ for
+            // every other non-channel run (channel-quarantine.ts).
             const desktopUserTurn =
                 desktopChild ||
                 (!channel &&

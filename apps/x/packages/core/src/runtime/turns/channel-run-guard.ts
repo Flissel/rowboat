@@ -3,7 +3,8 @@
 //
 // Operator rule: a turn started from a mobile channel gets NO tool with
 // external effect. It may read the workspace (knowledge, todo, notes) and
-// write notes / to-dos, nothing else. The bridge marks such turns with
+// write notes only into the quarantine knowledge/Kanal/ plus plain to-dos,
+// nothing else. The bridge marks such turns with
 // turn_created.config.channel; the runtime consults this guard
 //   1. at createTurn, to drop every tool the run may not use from the
 //      persisted snapshot (and from loadSkill tool additions), so the model
@@ -26,6 +27,7 @@ import { WorkDir } from "../../config/config.js";
 import { isPathInside, resolveFilePathForPermission } from "../../filesystem/files.js";
 import { hasAutorunTrigger, hasLiveFrontmatter } from "../../knowledge/autorun-triggers.js";
 import { resultingWriteContent } from "../../knowledge/autorun-write-check.js";
+import { isQuarantineFolderName, QUARANTINE_REL } from "../../knowledge/quarantine.js";
 
 export { hasLiveFrontmatter };
 
@@ -107,9 +109,18 @@ const SENSITIVE_ENTRIES = [
     ".trash",
 ];
 
-// The only workspace subtree a channel run may modify (notes). To-dos are
-// written through todo-add / todo-propose, never with file tools.
+// The only workspace subtree a channel run may modify is the quarantine
+// knowledge/Kanal/ (fix round 4): nothing autonomous reads it, so a note a
+// prompt-injected channel run writes cannot steer a background agent. To-dos
+// are written through todo-add / todo-propose, never with file tools.
 const WRITE_ROOT = "knowledge";
+
+// Appended to the system prompt of every channel turn (runtime createTurn).
+export const CHANNEL_RUN_INSTRUCTIONS = [
+    "# Mobile channel run",
+    `This turn came from a mobile channel. Save every note you create under ${QUARANTINE_REL} (e.g. ${QUARANTINE_REL}Docs/<Topic> <YYYY-MM-DD>.md or ${QUARANTINE_REL}Dashboards/…) — writes anywhere else, including edits to existing notes, are refused.`,
+    "Notes there are not read by background agents; the user reviews and moves them on the desktop. For work that needs the desktop, add a plain to-do (\"Am Desktop: …\") without @rowboat.",
+].join("\n");
 // Loaded into every desktop system prompt — never writable from a channel.
 const AGENT_NOTES = "agent notes";
 
@@ -300,14 +311,21 @@ export class ChannelRunGuard implements IChannelRunGuard {
                     ? { kind: "allow" }
                     : deny(`MCP server "${server ?? "?"}" has no read-only tools for channel runs.`);
             }
-            case "todo-add": {
+            case "todo-add":
+            case "todo-propose": {
+                // An @rowboat item starts (or, once accepted, offers) a
+                // background run; a sub-item under a delegated parent becomes
+                // a step of that parent's run.
                 const items = Array.isArray(args.items) ? args.items : [];
                 const delegated = items.some((item) => {
-                    const text = asRecord(item).text;
-                    return typeof text === "string" && ROWBOAT_MENTION_RE.test(text);
+                    const { text, parent } = asRecord(item);
+                    return (
+                        (typeof text === "string" && ROWBOAT_MENTION_RE.test(text)) ||
+                        (typeof parent === "string" && ROWBOAT_MENTION_RE.test(parent))
+                    );
                 });
                 return delegated
-                    ? deny("To-dos with @rowboat start a background run and cannot be added from a mobile channel. Add the item without @rowboat.")
+                    ? deny("To-dos with @rowboat (or under an @rowboat item) start a background run and cannot be added from a mobile channel. Add a plain item without @rowboat, e.g. \"Am Desktop: …\".")
                     : { kind: "default" };
             }
             default:
@@ -384,11 +402,14 @@ export class ChannelRunGuard implements IChannelRunGuard {
             }
             if (target.op === "write") {
                 const writeRoot = path.join(root, WRITE_ROOT);
-                if (!isPathInside(writeRoot, resolved)) {
-                    return deny(`Channel runs may only write notes under knowledge/ (to-dos via todo-add); "${target.path}" is outside.`);
-                }
                 const inner = path.relative(writeRoot, resolved);
                 const innerSegments = inner === "" ? [] : inner.split(path.sep);
+                if (
+                    !isPathInside(writeRoot, resolved) ||
+                    !isQuarantineFolderName(innerSegments[0] ?? "")
+                ) {
+                    return deny(`Channel runs may only write notes under ${QUARANTINE_REL} (to-dos via todo-add); "${target.path}" is outside.`);
+                }
                 if (innerSegments[0]?.toLowerCase() === AGENT_NOTES) {
                     return deny("knowledge/Agent Notes is loaded into the desktop agent's instructions and cannot be written from a mobile channel.");
                 }
