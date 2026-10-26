@@ -3575,6 +3575,33 @@ describe("channel runs (VibeMind Teil E)", () => {
         expect(contexts[1]).not.toHaveProperty("channel");
     });
 
+    it("forbids autorun content for every turn except a desktop user chat", async () => {
+        const contexts: ToolExecutionContext[] = [];
+        const run = async (overrides: Partial<Parameters<TurnRuntime["createTurn"]>[0]>) => {
+            const { runtime } = makeRuntime({
+                agent: channelAgent,
+                tools: recordingTools([], contexts),
+                models: [
+                    respond(completedResp(assistantCalls(toolCallPart("G", "fetch-url", { url: "https://x" })))),
+                    respond(completedResp(assistantText("done"))),
+                ],
+            });
+            const turnId = await newTurn(runtime, overrides);
+            await advanceAndSettle(runtime, turnId);
+        };
+        // Desktop user chat: a session, copilot_chat, no channel.
+        await run({ sessionId: "s1", config: { humanAvailable: true } });
+        // Channel run, headless turn, background agent in a session.
+        await run({ sessionId: "s1", config: { humanAvailable: true, autoPermission: true, channel } });
+        await run({ sessionId: null, config: { humanAvailable: false, autoPermission: true } });
+        await run({
+            sessionId: "s1",
+            analytics: { useCase: "knowledge_sync", subUseCase: "tag_notes" },
+            config: { humanAvailable: false, autoPermission: true },
+        });
+        expect(contexts.map((c) => c.autorunContentForbidden === true)).toEqual([false, true, true, true]);
+    });
+
     function resultFor(log: TEvent[], toolCallId: string) {
         return log.find(
             (e): e is Extract<TEvent, { type: "tool_result" }> =>

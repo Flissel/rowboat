@@ -174,6 +174,15 @@ describe("RealToolRegistry", () => {
         expect(calls[1].ctx).not.toHaveProperty("channel");
     });
 
+    it("passes autorunContentForbidden into the ToolContext only when set", async () => {
+        const { registry, calls } = makeRegistry(async () => ({ ok: 1 }));
+        const tool = (await registry.resolve(descriptor())) as SyncRuntimeTool;
+        await tool.execute({}, makeCtx({ autorunContentForbidden: true }));
+        await tool.execute({}, makeCtx());
+        expect(calls[0].ctx.autorunContentForbidden).toBe(true);
+        expect(calls[1].ctx).not.toHaveProperty("autorunContentForbidden");
+    });
+
     it("re-keys registry calls a tool makes with ctx.runId to the call scope", async () => {
         // Builtins address the abort registry with ctx.runId (the turn id).
         // The scoped wrapper must pin those to the per-call key, or a

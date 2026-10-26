@@ -1,3 +1,4 @@
+// Modified for VibeMind (Flissel/rowboat vibemind): legacy tool calls forbid autorun content (Teil E).
 import { jsonSchema } from "ai";
 import { Agent, ToolAttachment } from "@x/shared/dist/agent.js";
 import { AssistantContentPart, AssistantMessage, MessageList, ProviderOptions, ToolCallPart, ToolMessage, UserMessageContext } from "@x/shared/dist/message.js";
@@ -789,6 +790,10 @@ export async function* streamAgent({
                     codeMode,
                     codeCwd,
                     codePolicy,
+                    // Modified for VibeMind (Flissel/rowboat vibemind): legacy
+                    // runs (apps, server API) are not desktop user chats — no
+                    // autorun content (Teil E).
+                    autorunContentForbidden: true,
                 });
             }
             } catch (error) {

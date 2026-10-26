@@ -34,6 +34,12 @@ export interface ToolContext {
     // their execution-time channel restrictions when present (file-grep /
     // file-glob read filter, fetch-url host + redirect checks).
     channel?: { readOnlyMcpTools: string[] };
+    // Modified for VibeMind (Flissel/rowboat vibemind): true for channel
+    // runs and every turn that is not a desktop user chat (background agents
+    // such as note tagging / curation). The file write builtins then refuse
+    // to introduce autorun content (live / live_note frontmatter, task
+    // fences) — see knowledge/autorun-write-check.ts.
+    autorunContentForbidden?: boolean;
 }
 
 async function execMcpTool(agentTool: z.infer<typeof ToolAttachment> & { type: "mcp" }, input: Record<string, unknown>): Promise<unknown> {

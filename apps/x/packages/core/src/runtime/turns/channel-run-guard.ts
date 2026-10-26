@@ -24,7 +24,10 @@ import type { z } from "zod";
 import type { ToolDescriptor } from "@x/shared/dist/turns.js";
 import { WorkDir } from "../../config/config.js";
 import { isPathInside, resolveFilePathForPermission } from "../../filesystem/files.js";
-import { splitFrontmatter } from "../../application/lib/parse-frontmatter.js";
+import { hasAutorunTrigger, hasLiveFrontmatter } from "../../knowledge/autorun-triggers.js";
+import { resultingWriteContent } from "../../knowledge/autorun-write-check.js";
+
+export { hasLiveFrontmatter };
 
 export interface ChannelRunPolicy {
     // MCP tools ("server:tool") treated as read-only: auto-approved in
@@ -122,34 +125,18 @@ function isSensitiveSegment(segment: string): boolean {
 
 // A glob that could leave its cwd or that glob v13 would expand into other
 // directories: braces (brace expansion), "..", absolute / UNC / drive paths,
-// home expansion. Channel runs reject all of them outright.
+// home expansion, backslashes, character classes and extglobs ([, ().
+// Channel runs reject all of them outright (the read filter is the second
+// layer).
 export function isUnsafeChannelGlob(pattern: string | undefined): boolean {
     if (!pattern) return false;
     return (
-        /[{}]/.test(pattern) ||
+        /[{}\\[(]/.test(pattern) ||
         pattern.includes("..") ||
         /^[\\/]/.test(pattern) ||
         pattern.startsWith("~") ||
         /^[a-zA-Z]:/.test(pattern)
     );
-}
-
-// True when the content's frontmatter carries a `live:` key — the live-note
-// scheduler would run a near-full-tool background agent on such a note.
-// Checked both the way the scheduler parses (splitFrontmatter) and with a
-// textual scan of the leading frontmatter block, so YAML tricks that the
-// parser would accept differently still count.
-export function hasLiveFrontmatter(content: string): boolean {
-    try {
-        if (Object.prototype.hasOwnProperty.call(splitFrontmatter(content).frontmatter, "live")) {
-            return true;
-        }
-    } catch {
-        // fall through to the textual scan
-    }
-    const block = /^﻿?[ \t]*---[^\n]*\n([\s\S]*?)(?:\r?\n[ \t]*---|$)/.exec(content);
-    if (!block) return false;
-    return /(^|[\s{,?])["']?live["']?\s*:/m.test(block[1]);
 }
 
 type FileOp = "read" | "list" | "search" | "write";
@@ -213,6 +200,16 @@ export interface ChannelRunGuardDeps {
     resolvePath?: (inputPath: string) => Promise<string>;
     // Current text of a canonical path; null when missing/unreadable.
     readText?: (absPath: string) => Promise<string | null>;
+    // True when the canonical path is an existing directory.
+    isDirectory?: (absPath: string) => Promise<boolean>;
+}
+
+async function defaultIsDirectory(absPath: string): Promise<boolean> {
+    try {
+        return (await fs.stat(absPath)).isDirectory();
+    } catch {
+        return false;
+    }
 }
 
 async function defaultWorkspaceRoot(): Promise<string> {
@@ -239,11 +236,13 @@ export class ChannelRunGuard implements IChannelRunGuard {
     private readonly workspaceRoot: () => Promise<string>;
     private readonly resolvePath: (inputPath: string) => Promise<string>;
     private readonly readText: (absPath: string) => Promise<string | null>;
+    private readonly isDirectory: (absPath: string) => Promise<boolean>;
 
     constructor(deps: ChannelRunGuardDeps = {}) {
         this.workspaceRoot = deps.workspaceRoot ?? defaultWorkspaceRoot;
         this.resolvePath = deps.resolvePath ?? defaultResolvePath;
         this.readText = deps.readText ?? defaultReadText;
+        this.isDirectory = deps.isDirectory ?? defaultIsDirectory;
     }
 
     offers(descriptor: z.infer<typeof ToolDescriptor>, policy: ChannelRunPolicy): boolean {
@@ -397,13 +396,22 @@ export class ChannelRunGuard implements IChannelRunGuard {
                     return deny(`Hidden files and folders ("${target.path}") cannot be written from a mobile channel.`);
                 }
             }
-            // Live notes: the scheduler runs a background agent on any note
-            // whose frontmatter has `live:` — never create, change, copy or
-            // move one from a channel.
+            // Directories: a copy/move would carry notes we have not looked at.
+            if (
+                (name === "file-rename" || name === "file-copy") &&
+                target === targets[0] &&
+                (await this.isDirectory(resolved))
+            ) {
+                return deny(`"${target.path}" is a directory; channel runs may only copy or move single notes.`);
+            }
+            // Autorun notes: the live-note scheduler (`live:`) and the inline
+            // task runner (`live_note`, task / tell-rowboat fences) start a
+            // background agent with (nearly) every tool — never create,
+            // change, copy or move one from a channel.
             if (target.op === "write" || (name === "file-copy" && target.op === "read")) {
                 const current = await this.readText(resolved);
-                if (current !== null && hasLiveFrontmatter(current)) {
-                    return deny(`"${target.path}" is a live note; live notes cannot be changed, copied or moved from a mobile channel.`);
+                if (current !== null && hasAutorunTrigger(current)) {
+                    return deny(`"${target.path}" is a live note or contains a task block; such notes cannot be changed, copied or moved from a mobile channel.`);
                 }
             }
         }
@@ -416,24 +424,15 @@ export class ChannelRunGuard implements IChannelRunGuard {
         args: Record<string, unknown>,
         targets: FileTarget[],
     ): Promise<ChannelGuardDecision | null> {
-        let next: string | null = null;
-        if (name === "file-writeText") {
-            next = typeof args.data === "string" ? args.data : null;
-        } else if (name === "file-editText") {
-            const current = await this.readText(await this.resolvePath(targets[0].path));
-            const oldString = typeof args.oldString === "string" ? args.oldString : "";
-            const newString = typeof args.newString === "string" ? args.newString : "";
-            if (current !== null && oldString) {
-                next = args.replaceAll === true
-                    ? current.split(oldString).join(newString)
-                    : current.replace(oldString, () => newString);
-            } else {
-                // Unknown result: judge the inserted text on its own.
-                next = `---\n${newString}\n---\n`;
-            }
+        if (name !== "file-writeText" && name !== "file-editText") {
+            return null;
         }
-        if (next !== null && hasLiveFrontmatter(next)) {
-            return deny("Notes with a `live:` frontmatter key start a background agent and cannot be created from a mobile channel.");
+        const current = name === "file-editText"
+            ? await this.readText(await this.resolvePath(targets[0].path))
+            : null;
+        const next = resultingWriteContent(name, args, current);
+        if (next !== null && hasAutorunTrigger(next)) {
+            return deny("Notes with `live:` / `live_note` frontmatter or task / tell-rowboat blocks start a background agent and cannot be written from a mobile channel.");
         }
         return null;
     }

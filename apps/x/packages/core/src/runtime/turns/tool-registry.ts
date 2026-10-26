@@ -19,6 +19,9 @@ export interface ToolExecutionContext {
     // Modified for VibeMind (Flissel/rowboat vibemind): the turn's
     // config.channel for channel-origin turns (Teil E); absent otherwise.
     channel?: { readOnlyMcpTools: string[] };
+    // True unless the turn is a desktop user chat: write tools then refuse
+    // to introduce autorun content (knowledge/autorun-write-check.ts).
+    autorunContentForbidden?: boolean;
 }
 
 export interface SyncRuntimeTool {

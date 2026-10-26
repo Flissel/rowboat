@@ -180,6 +180,9 @@ export class RealToolRegistry implements IToolRegistry {
                             abortRegistry,
                             // VibeMind Teil E: execution-time channel layers.
                             ...(ctx.channel ? { channel: ctx.channel } : {}),
+                            ...(ctx.autorunContentForbidden
+                                ? { autorunContentForbidden: true }
+                                : {}),
                             publish: async (event) => {
                                 if (event.type === "tool-output-stream") {
                                     await ctx.reportProgress({

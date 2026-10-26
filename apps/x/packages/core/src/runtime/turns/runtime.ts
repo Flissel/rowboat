@@ -1095,12 +1095,19 @@ class TurnAdvance {
         let settled: z.infer<typeof ToolResultData>;
         try {
             const channel = this.definition.config.channel;
+            // Only a desktop user chat (a session, copilot_chat, not from a
+            // channel) may create notes that start background agents.
+            const desktopUserTurn =
+                !channel &&
+                this.definition.sessionId !== null &&
+                (this.definition.analytics?.useCase ?? "copilot_chat") === "copilot_chat";
             const result = await syncTool.execute(tc.input, {
                 turnId: this.turnId,
                 sessionId: this.definition.sessionId,
                 toolCallId: tc.toolCallId,
                 signal: this.signal,
                 ...(channel ? { channel } : {}),
+                ...(desktopUserTurn ? {} : { autorunContentForbidden: true }),
                 reportProgress: async (progress) => {
                     await this.append({
                         type: "tool_progress",

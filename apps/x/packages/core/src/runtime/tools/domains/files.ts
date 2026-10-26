@@ -1,4 +1,4 @@
-// Modified for VibeMind (Flissel/rowboat vibemind): channel read filter for file-grep / file-glob (Teil E).
+// Modified for VibeMind (Flissel/rowboat vibemind): channel read filter for file-grep / file-glob, autorun-content check for write tools (Teil E).
 // Builtin tools: files domain. Entries moved VERBATIM from the historical
 // monolith — the merge order in ../builtin-tools.ts preserves the original
 // catalog key order (provider-payload bytes; see the key-order test there).
@@ -9,6 +9,7 @@ import { WorkDir } from "../../../config/config.js";
 import { BuiltinToolsSchema } from "../types.js";
 import type { ToolContext } from "../exec-tool.js";
 import { ChannelRunGuard } from "../../turns/channel-run-guard.js";
+import { autorunIntroductionError } from "../../../knowledge/autorun-write-check.js";
 
 
 export const fileTools: z.infer<typeof BuiltinToolsSchema> = {
@@ -148,7 +149,11 @@ export const fileTools: z.infer<typeof BuiltinToolsSchema> = {
             atomic?: boolean;
             mkdirp?: boolean;
             expectedEtag?: string;
-        }) => {
+        }, ctx?: ToolContext) => {
+            const autorunError = ctx?.autorunContentForbidden
+                ? await autorunIntroductionError('file-writeText', { path: filePath, data })
+                : null;
+            if (autorunError) return { error: autorunError };
             try {
                 return await files.writeText(filePath, data, {
                     atomic,
@@ -182,7 +187,11 @@ export const fileTools: z.infer<typeof BuiltinToolsSchema> = {
             oldString: string;
             newString: string;
             replaceAll?: boolean;
-        }) => {
+        }, ctx?: ToolContext) => {
+            const autorunError = ctx?.autorunContentForbidden
+                ? await autorunIntroductionError('file-editText', { path: filePath, oldString, newString, replaceAll })
+                : null;
+            if (autorunError) return { error: autorunError };
             try {
                 return await files.editText(filePath, oldString, newString, replaceAll);
             } catch (error) {
@@ -217,7 +226,11 @@ export const fileTools: z.infer<typeof BuiltinToolsSchema> = {
             to: z.string().min(1).describe('Destination path'),
             overwrite: z.boolean().optional().describe('Overwrite destination if it exists (default: false)'),
         }),
-        execute: async ({ from, to, overwrite = false }: { from: string; to: string; overwrite?: boolean }) => {
+        execute: async ({ from, to, overwrite = false }: { from: string; to: string; overwrite?: boolean }, ctx?: ToolContext) => {
+            const autorunError = ctx?.autorunContentForbidden
+                ? await autorunIntroductionError('file-rename', { from, to })
+                : null;
+            if (autorunError) return { error: autorunError };
             try {
                 return await files.rename(from, to, overwrite);
             } catch (error) {
@@ -236,7 +249,11 @@ export const fileTools: z.infer<typeof BuiltinToolsSchema> = {
             to: z.string().min(1).describe('Destination file path'),
             overwrite: z.boolean().optional().describe('Overwrite destination if it exists (default: false)'),
         }),
-        execute: async ({ from, to, overwrite = false }: { from: string; to: string; overwrite?: boolean }) => {
+        execute: async ({ from, to, overwrite = false }: { from: string; to: string; overwrite?: boolean }, ctx?: ToolContext) => {
+            const autorunError = ctx?.autorunContentForbidden
+                ? await autorunIntroductionError('file-copy', { from, to })
+                : null;
+            if (autorunError) return { error: autorunError };
             try {
                 return await files.copy(from, to, overwrite);
             } catch (error) {
