@@ -97,4 +97,28 @@ describe('todo channels for the Freigabe messenger', () => {
     expect(bad.json.success).toBe(false);
     expect(busEvents).toEqual([]);
   });
+  it('wrote no planner signal at all; the ledger read works (positive control)', async () => {
+    // After add / withdraw / setChecked above: the ledger must be empty.
+    const empty = await call('todo:plannerSignals', null);
+    expect(empty.json.signals).toEqual([]);
+
+    // Control: a real acceptance records exactly one 'kept' signal.
+    await call('todo:addSuggestions', { texts: ['Kontrollfall annehmen'] });
+    expect((await call('todo:acceptSuggestion', { text: 'Kontrollfall annehmen' })).json).toEqual({ success: true });
+    const got = await call('todo:get', null);
+    const accepted = got.json.list.blocks
+      .filter((b: { kind: string }) => b.kind === 'item')
+      .map((b: { item: { key: string; text: string } }) => b.item)
+      .find((i: { text: string }) => i.text.includes('Kontrollfall annehmen'));
+    expect(accepted).toBeTruthy();
+    // The signal is recorded fire-and-forget; wait for it.
+    let signals: Array<{ kind: string; key: string }> = [];
+    for (let n = 0; n < 50 && signals.length === 0; n++) {
+      signals = (await call('todo:plannerSignals', null)).json.signals;
+      if (signals.length === 0) await new Promise((r) => setTimeout(r, 50));
+    }
+    expect(signals).toHaveLength(1);
+    expect(signals[0].kind).toBe('kept');
+    expect(signals[0].key).toBe(accepted.key);
+  });
 });
