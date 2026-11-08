@@ -12,5 +12,6 @@ export const SPACES_ENABLED: boolean = window.featureFlags?.spaces === true;
 export const LOCAL_RUNTIME: boolean = window.featureFlags?.localRuntime !== false;
 
 // VibeMind fork: mail is handled by sales-claw, so Rowboat's own Gmail tab is
-// off — no nav entry, no gmail IPC calls, no email view reachable.
+// off: no nav entry, no inbox/preview loading (gmail:getImportant), no email
+// view reachable. The footer account-name lookup (gmail:getAccountName) remains.
 export const EMAIL_ENABLED: boolean = false;

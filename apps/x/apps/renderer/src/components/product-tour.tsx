@@ -136,7 +136,7 @@ const ALL_TOUR_STEPS: TourStep[] = [
 ]
 
 // VibeMind fork: the email stop is dropped while the Email tab is off.
-const TOUR_STEPS: TourStep[] = ALL_TOUR_STEPS.filter((s) => EMAIL_ENABLED || s.id !== 'email')
+export const TOUR_STEPS: TourStep[] = ALL_TOUR_STEPS.filter((s) => EMAIL_ENABLED || s.id !== 'email')
 
 // Pre-recorded narration bundled with the app (no TTS API call, works
 // offline/signed-out). Regenerate with scripts/generate-tour-audio.mjs after
