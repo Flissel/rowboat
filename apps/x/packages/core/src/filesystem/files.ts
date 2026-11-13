@@ -448,7 +448,7 @@ export async function writeText(inputPath: string, data: string, opts?: WriteTex
 }
 
 // Binary sibling of writeText. No knowledge-commit hook: knowledge/*.md files
-// are never written through this path.
+// and HTML concepts are never written through this path.
 export async function writeBuffer(inputPath: string, data: Buffer, opts?: WriteTextOptions) {
   const resolved = resolveFilePath(inputPath);
   const atomic = opts?.atomic !== false;

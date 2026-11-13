@@ -6,9 +6,13 @@ import { WorkDir } from '../config/config.js';
 
 const KNOWLEDGE_DIR = path.join(WorkDir, 'knowledge');
 
-/** Notes (.md) and HTML concepts are versioned; everything else in knowledge/ is not. */
-function isVersionedFile(name: string): boolean {
-    return name.endsWith('.md') || konzept.isHtmlPath(name);
+/**
+ * Notes (.md, case-sensitive as before) and HTML concepts (.html/.htm/.xhtml, up to
+ * KONZEPT_HTML_MAX_BYTES) are versioned; everything else in knowledge/ is not.
+ */
+function isVersionedFile(name: string, size: number): boolean {
+    if (name.endsWith('.md')) return true;
+    return konzept.isHtmlPath(name) && size <= konzept.KONZEPT_HTML_MAX_BYTES;
 }
 
 // Simple promise-based mutex to serialize commits
@@ -28,7 +32,7 @@ export function onCommit(listener: CommitListener): () => void {
 
 /**
  * Initialize a git repo in the knowledge directory if one doesn't exist.
- * Stages all existing .md files and makes an initial commit.
+ * Stages all existing versioned files (.md and HTML concepts) and makes an initial commit.
  */
 export async function initRepo(): Promise<void> {
     const gitDir = path.join(KNOWLEDGE_DIR, '.git');
@@ -43,7 +47,7 @@ export async function initRepo(): Promise<void> {
 
     await git.init({ fs, dir: KNOWLEDGE_DIR });
 
-    // Stage all existing .md files
+    // Stage all existing versioned files
     const files = getAllMdFiles(KNOWLEDGE_DIR, '');
     for (const file of files) {
         await git.add({ fs, dir: KNOWLEDGE_DIR, filepath: file });
@@ -60,7 +64,8 @@ export async function initRepo(): Promise<void> {
 }
 
 /**
- * Recursively find all .md files relative to the knowledge dir.
+ * Recursively find all versioned files (notes and HTML concepts) relative to the knowledge dir.
+ * (Name kept from when only .md was versioned.)
  */
 function getAllMdFiles(baseDir: string, relDir: string): string[] {
     const results: string[] = [];
@@ -78,7 +83,7 @@ function getAllMdFiles(baseDir: string, relDir: string): string[] {
         const stat = fs.statSync(fullPath);
         if (stat.isDirectory()) {
             results.push(...getAllMdFiles(baseDir, relPath));
-        } else if (isVersionedFile(entry)) {
+        } else if (isVersionedFile(entry, stat.size)) {
             results.push(relPath);
         }
     }
@@ -86,7 +91,7 @@ function getAllMdFiles(baseDir: string, relDir: string): string[] {
 }
 
 /**
- * Stage all changes to .md files and commit. No-op if nothing changed.
+ * Stage all changes to versioned files (.md and HTML concepts) and commit. No-op if nothing changed.
  * Serialized via a promise lock to prevent concurrent git index corruption.
  */
 export async function commitAll(message: string, authorName: string): Promise<void> {
@@ -107,12 +112,17 @@ async function commitAllInner(message: string, authorName: string): Promise<void
 
     let hasChanges = false;
     for (const [filepath, head, workdir, stage] of matrix) {
-        // Skip files that are neither notes nor HTML concepts
-        if (!isVersionedFile(filepath)) continue;
-
         // [filepath, HEAD, WORKDIR, STAGE]
         // Unchanged: [f, 1, 1, 1]
         if (head === 1 && workdir === 1 && stage === 1) continue;
+
+        // Skip files that are neither notes nor HTML concepts. Deleted files are always
+        // processed; an HTML file that outgrew the cap is left as committed.
+        let size = 0;
+        if (workdir !== 0 && konzept.isHtmlPath(filepath)) {
+            try { size = fs.statSync(path.join(KNOWLEDGE_DIR, filepath)).size; } catch { continue; }
+        }
+        if (!isVersionedFile(filepath, size)) continue;
 
         hasChanges = true;
 

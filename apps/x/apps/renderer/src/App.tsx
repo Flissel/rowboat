@@ -92,7 +92,7 @@ import { BillingErrorDialog } from "@/components/billing-error-dialog"
 import { CreditCelebration } from "@/components/credit-celebration"
 import { matchBillingError, type BillingErrorMatch } from "@/lib/billing-error"
 import { dispatchCreditExhausted, dispatchCreditReplenished } from "@/lib/credit-status"
-import { rewriteWikiLinksForRenamedFileInMarkdown, renamedFileName } from '@/lib/wiki-rename'
+import { rewriteOpenDocumentForRename, rewriteWikiLinksForRenamedFileInMarkdown, renamedFileName } from '@/lib/wiki-rename'
 import { ensureMarkdownExtension, normalizeWikiPath, splitWikiFragment, stripKnowledgePrefix, toKnowledgePath, wikiLabel } from '@/lib/wiki-links'
 import { buildHierarchyGraph, graphFileData, parseVaultMap, vaultMapNodeId, type NodeInfo } from '@/lib/graph-hierarchy'
 import { canCreateWikiTarget, graphHtmlNode, graphNodeLabel, knowledgeHtmlFiles, resolveWikiTarget } from '@/lib/graph-html'
@@ -6445,7 +6445,7 @@ function App() {
         await window.ipc.invoke('workspace:rename', { from: oldPath, to: newPath })
         untitledRenameReadyPathsRef.current.delete(oldPath)
         const rewriteForRename = (content: string) =>
-          isDir ? content : rewriteWikiLinksForRenamedFileInMarkdown(content, oldPath, newPath)
+          rewriteOpenDocumentForRename(content, oldPath, newPath, isDir)
         if (editorPathRef.current === oldPath) {
           editorPathRef.current = newPath
         }

@@ -283,7 +283,7 @@ export async function writeFile(
   });
 
   // Schedule a debounced version history commit for knowledge files
-  if (isKnowledgeMarkdownRelPath(relPath)) {
+  if (relPath.startsWith('knowledge/') && (relPath.endsWith('.md') || konzept.isKnowledgeHtmlPath(relPath))) {
     scheduleKnowledgeCommit(path.basename(relPath));
   }
 

@@ -1,7 +1,7 @@
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { rewriteWikiLinksForRenamedKnowledgeFile } from './wiki-link-rewrite.js';
 
 let root: string;
@@ -12,6 +12,12 @@ async function write(rel: string, content: string) {
   await fs.writeFile(abs, content, 'utf8');
 }
 const read = (rel: string) => fs.readFile(path.join(root, ...rel.split('/')), 'utf8');
+const readBytes = (rel: string) => fs.readFile(path.join(root, ...rel.split('/')));
+const writeBytes = async (rel: string, data: Buffer) => {
+  const abs = path.join(root, ...rel.split('/'));
+  await fs.mkdir(path.dirname(abs), { recursive: true });
+  await fs.writeFile(abs, data);
+};
 const konzept = (bezuege: string, rest = '') =>
   `<html><body>${rest}<script type="application/json" id="rowboat-konzept">{"art":"konzept","bezuege":${bezuege}}</script></body></html>`;
 
@@ -97,5 +103,63 @@ describe('rewriteWikiLinksForRenamedKnowledgeFile mit HTML-Konzepten', () => {
     expect(await read('knowledge/x.txt')).toBe('[[b]]');
     expect(await read('other/y.html')).toBe('<p>[[b]]</p>');
     expect(await read('knowledge/a.md')).toBe('[[c]]');
+  });
+  it('Verweise in der Datei zu Notiz und Konzept: Doppelter Stamm (.htm neben .html) bekommt die Endung', async () => {
+    await write('knowledge/Konzepte/neu.html', konzept('[]'));
+    await write('knowledge/Konzepte/neu.htm', konzept('[]'));
+    await write('knowledge/Notiz.md', '[[Konzepte/k]] [[Konzepte/k.html]]');
+    await rewriteWikiLinksForRenamedKnowledgeFile(root, 'knowledge/Konzepte/k.html', 'knowledge/Konzepte/neu.html');
+    expect(await read('knowledge/Notiz.md')).toBe('[[Konzepte/neu.html]] [[Konzepte/neu.html]]');
+  });
+
+  it('ein Verweis ohne Endung, der wegen eines zweiten HTML-Geschwisters nie auf das Konzept zeigte, bleibt', async () => {
+    await write('knowledge/Konzepte/k.htm', konzept('[]'));
+    await write('knowledge/Konzepte/neu.html', konzept('[]'));
+    await write('knowledge/Notiz.md', '[[Konzepte/k]]');
+    await rewriteWikiLinksForRenamedKnowledgeFile(root, 'knowledge/Konzepte/k.html', 'knowledge/Konzepte/neu.html');
+    expect(await read('knowledge/Notiz.md')).toBe('[[Konzepte/k]]');
+  });
+
+  it('latin-1-Datei bleibt byte-identisch, auch mit passendem Verweis', async () => {
+    const bytes = Buffer.from('<p>Grüße [[Marke/Marke]]</p>', 'latin1');
+    await writeBytes('knowledge/alt.html', bytes);
+    await writeBytes('knowledge/alt.md', bytes);
+    await rewriteWikiLinksForRenamedKnowledgeFile(root, 'knowledge/Marke/Marke.md', 'knowledge/Marke/Leitbild.md');
+    expect((await readBytes('knowledge/alt.html')).equals(bytes)).toBe(true);
+    expect((await readBytes('knowledge/alt.md')).equals(bytes)).toBe(true);
+  });
+
+  it('BOM und CRLF bleiben erhalten, nur der Verweis ändert sich', async () => {
+    const bom = Buffer.from([0xef, 0xbb, 0xbf]);
+    const vorher = Buffer.concat([bom, Buffer.from('<p>[[Marke/Marke]]</p>\r\n<p>Ä</p>\r\n', 'utf8')]);
+    const nachher = Buffer.concat([bom, Buffer.from('<p>[[Marke/Leitbild]]</p>\r\n<p>Ä</p>\r\n', 'utf8')]);
+    await writeBytes('knowledge/k.html', vorher);
+    await writeBytes('knowledge/n.md', vorher);
+    await rewriteWikiLinksForRenamedKnowledgeFile(root, 'knowledge/Marke/Marke.md', 'knowledge/Marke/Leitbild.md');
+    expect((await readBytes('knowledge/k.html')).equals(nachher)).toBe(true);
+    expect((await readBytes('knowledge/n.md')).equals(nachher)).toBe(true);
+  });
+
+  it('HTML über 5 MB wird nicht geöffnet und nicht verändert', async () => {
+    const gross = `<p>${'x'.repeat(5 * 1024 * 1024)}</p><p>[[Marke/Marke]]</p>`;
+    await write('knowledge/gross.html', gross);
+    await write('knowledge/klein.html', '<p>[[Marke/Marke]]</p>');
+    const spy = vi.spyOn(fs, 'readFile');
+    try {
+      await rewriteWikiLinksForRenamedKnowledgeFile(root, 'knowledge/Marke/Marke.md', 'knowledge/Marke/Leitbild.md');
+      const geoeffnet = spy.mock.calls.map((c) => String(c[0]));
+      expect(geoeffnet.some((p) => p.endsWith('gross.html'))).toBe(false);
+      expect(geoeffnet.some((p) => p.endsWith('klein.html'))).toBe(true);
+    } finally {
+      spy.mockRestore();
+    }
+    expect(await read('knowledge/gross.html')).toBe(gross);
+    expect(await read('knowledge/klein.html')).toBe('<p>[[Marke/Leitbild]]</p>');
+  });
+
+  it('Umbenennen, das nur die Gross-/Kleinschreibung ändert, schreibt nichts', async () => {
+    await write('knowledge/n.md', '[[a]]');
+    expect(await rewriteWikiLinksForRenamedKnowledgeFile(root, 'knowledge/a.md', 'knowledge/A.md')).toBe(0);
+    expect(await read('knowledge/n.md')).toBe('[[a]]');
   });
 });

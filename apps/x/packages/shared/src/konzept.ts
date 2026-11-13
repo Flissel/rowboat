@@ -6,6 +6,8 @@ export const WORKSPACE_HTML_CSP =
 export const KONZEPT_BLOCK_ID = 'rowboat-konzept'
 export const KONZEPT_MAX_BYTES = 1_048_576
 export const KONZEPT_LESE_MAX = 1_048_576
+/** Größte HTML-Datei, die Ansicht, Umbenennen (Verweise nachziehen) und Versionsverlauf noch anfassen. */
+export const KONZEPT_HTML_MAX_BYTES = 5 * 1024 * 1024
 const BLOCK_MAX_ZEICHEN = 20_000
 
 export const BILDARTEN = ['slide', 'avatar_slide', 'avatar_gross', 'clip'] as const
@@ -72,10 +74,11 @@ function begrenzt(html: string): string {
   return html.length > KONZEPT_LESE_MAX ? html.slice(0, KONZEPT_LESE_MAX) : html
 }
 
+/** `s`/`e`: Offsets von Text bzw. Rohinhalt (script/style) im Eingabestring. */
 type Token =
-  | { k: 'text'; v: string }
+  | { k: 'text'; v: string; s: number; e: number }
   | { k: 'open' | 'close'; name: string; attrs: Record<string, string> }
-  | { k: 'raw'; name: string; attrs: Record<string, string>; body: string }
+  | { k: 'raw'; name: string; attrs: Record<string, string>; body: string; s: number; e: number }
 
 const WS = /\s/
 
@@ -127,15 +130,16 @@ function parseTag(
 /**
  * Ein linearer Durchlauf über höchstens KONZEPT_LESE_MAX Zeichen. Kommentare entfallen,
  * script/style kommen als `raw`-Token mit Inhalt. Nicht abgeschlossene Konstrukte beenden den Lauf.
+ * `ohneDeckel` liest die ganze Datei (Umschreiben von Verweisen), sonst höchstens KONZEPT_LESE_MAX Zeichen.
  */
-function scan(html: string): Token[] {
-  const h = begrenzt(html)
+function scan(html: string, ohneDeckel = false): Token[] {
+  const h = ohneDeckel ? html : begrenzt(html)
   const n = h.length
   const out: Token[] = []
   let textStart = 0
   let i = 0
   const flush = (end: number) => {
-    if (end > textStart) out.push({ k: 'text', v: h.slice(textStart, end) })
+    if (end > textStart) out.push({ k: 'text', v: h.slice(textStart, end), s: textStart, e: end })
   }
   while (i < n) {
     const lt = h.indexOf('<', i)
@@ -163,10 +167,10 @@ function scan(html: string): Token[] {
         re.lastIndex = t.end
         const m = re.exec(h)
         if (m === null) {
-          out.push({ k: 'raw', name: t.name, attrs: t.attrs, body: h.slice(t.end) })
+          out.push({ k: 'raw', name: t.name, attrs: t.attrs, body: h.slice(t.end), s: t.end, e: n })
           return out
         }
-        out.push({ k: 'raw', name: t.name, attrs: t.attrs, body: h.slice(t.end, m.index) })
+        out.push({ k: 'raw', name: t.name, attrs: t.attrs, body: h.slice(t.end, m.index), s: t.end, e: m.index })
         const e = h.indexOf('>', m.index)
         if (e === -1) return out
         i = textStart = e + 1
@@ -175,68 +179,6 @@ function scan(html: string): Token[] {
       }
     } else {
       i = lt + 1 // einzelnes `<` ist Text
-    }
-  }
-  flush(n)
-  return out
-}
-
-export type UmschreibBereich = { start: number; end: number; art: 'json' | 'text' }
-
-/**
- * Bereiche einer HTML-Datei, in denen `[[...]]` als Verweis gilt: der Inhalt des ersten Datenblocks
- * (`art: 'json'`) und Text außerhalb von Tags, script, style und Kommentaren (`art: 'text'`).
- * Liest die ganze Datei (kein 1-MB-Deckel), ein Durchlauf. Nicht abgeschlossene Konstrukte beenden ihn.
- */
-export function htmlUmschreibBereiche(html: string): UmschreibBereich[] {
-  const n = html.length
-  const out: UmschreibBereich[] = []
-  let blockGefunden = false
-  let textStart = 0
-  let i = 0
-  const flush = (end: number) => {
-    if (end > textStart) out.push({ start: textStart, end, art: 'text' })
-  }
-  while (i < n) {
-    const lt = html.indexOf('<', i)
-    if (lt === -1) break
-    const c = html[lt + 1]
-    if (html.startsWith('<!--', lt)) {
-      flush(lt)
-      const e = html.indexOf('-->', lt + 4)
-      if (e === -1) return out
-      i = textStart = e + 3
-    } else if (c === '!' || c === '?') {
-      flush(lt)
-      const e = html.indexOf('>', lt + 2)
-      if (e === -1) return out
-      i = textStart = e + 1
-    } else if (c !== undefined && (c === '/' || /[A-Za-z]/.test(c))) {
-      flush(lt)
-      const t = parseTag(html, lt)
-      if (t === null) return out
-      i = textStart = t.end
-      if (!t.closing && (t.name === 'script' || t.name === 'style')) {
-        const re = new RegExp(`</${t.name}(?=[\\s/>])`, 'gi')
-        re.lastIndex = t.end
-        const m = re.exec(html)
-        const bodyEnd = m === null ? n : m.index
-        if (
-          t.name === 'script' &&
-          !blockGefunden &&
-          t.attrs.id === KONZEPT_BLOCK_ID &&
-          (t.attrs.type ?? '').split(';')[0].trim().toLowerCase() === 'application/json'
-        ) {
-          blockGefunden = true
-          if (bodyEnd > t.end) out.push({ start: t.end, end: bodyEnd, art: 'json' })
-        }
-        if (m === null) return out
-        const e = html.indexOf('>', m.index)
-        if (e === -1) return out
-        i = textStart = e + 1
-      }
-    } else {
-      i = lt + 1
     }
   }
   flush(n)
@@ -272,13 +214,34 @@ function isRecord(v: unknown): v is Record<string, unknown> {
 }
 
 /** Rohtext des ersten Blocks (`<script type="application/json" id="rowboat-konzept">`) in Dokumentreihenfolge. */
+function istDatenblock(t: Token): t is Extract<Token, { k: 'raw' }> {
+  if (t.k !== 'raw' || t.name !== 'script' || t.attrs.id !== KONZEPT_BLOCK_ID) return false
+  return (t.attrs.type ?? '').split(';')[0].trim().toLowerCase() === 'application/json'
+}
+
 function findBlock(html: string): string | null {
-  for (const t of scan(html)) {
-    if (t.k !== 'raw' || t.name !== 'script' || t.attrs.id !== KONZEPT_BLOCK_ID) continue
-    const typ = (t.attrs.type ?? '').split(';')[0].trim().toLowerCase()
-    if (typ === 'application/json') return t.body
-  }
+  for (const t of scan(html)) if (istDatenblock(t)) return t.body
   return null
+}
+
+export type UmschreibBereich = { start: number; end: number; art: 'json' | 'text' }
+
+/**
+ * Bereiche einer HTML-Datei, in denen `[[...]]` als Verweis gilt: der Inhalt des ersten Datenblocks
+ * (`art: 'json'`) und Text außerhalb von Tags, script, style und Kommentaren (`art: 'text'`).
+ * Gleicher Scanner wie die Leser (`readKonzept`, `htmlVisibleText`), aber ohne 1-MB-Deckel.
+ */
+export function htmlUmschreibBereiche(html: string): UmschreibBereich[] {
+  const out: UmschreibBereich[] = []
+  let blockGefunden = false
+  for (const t of scan(html, true)) {
+    if (t.k === 'text') out.push({ start: t.s, end: t.e, art: 'text' })
+    else if (!blockGefunden && istDatenblock(t)) {
+      blockGefunden = true
+      if (t.e > t.s) out.push({ start: t.s, end: t.e, art: 'json' })
+    }
+  }
+  return out
 }
 
 /**

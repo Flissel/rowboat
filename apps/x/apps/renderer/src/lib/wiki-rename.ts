@@ -18,6 +18,15 @@ export function rewriteWikiLinksForRenamedFileInMarkdown(markdown: string, fromR
   })
 }
 
+/**
+ * Geöffnete Dokumente (Editor-Zwischenspeicher) beim Umbenennen im Baum. Ordner und HTML-Konzepte lassen sie unberührt:
+ * HTML liegt nie im Editor, ein Zwischenspeicher gehört dann zur zuletzt geöffneten Notiz und darf nicht umgeschrieben werden.
+ */
+export function rewriteOpenDocumentForRename(content: string, oldPath: string, newPath: string, isDir: boolean): string {
+  if (isDir || konzept.isHtmlPath(oldPath)) return content
+  return rewriteWikiLinksForRenamedFileInMarkdown(content, oldPath, newPath)
+}
+
 /** Neuer Dateiname beim Umbenennen im Baum: Notizen enden auf `.md`, HTML-Konzepte behalten ihre Endung. */
 export function renamedFileName(oldPath: string, newName: string, isDir: boolean): string {
   if (isDir) return newName

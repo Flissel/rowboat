@@ -12,6 +12,11 @@ export type RewriteOptions = {
   allowBareSelfNameMatch?: boolean
   /** Gibt es unter knowledge/ eine Notiz mit diesem Pfad (klein geschrieben, ohne Präfix und ohne `.md`)? Standard: nein. */
   mdExists?: (wikiStemLower: string) => boolean
+  /**
+   * Wie viele HTML-Dateien (`.html`/`.htm`/`.xhtml`) tragen nach dem Umbenennen diesen Stamm (klein, ohne Präfix und Endung)?
+   * Ein Verweis ohne Endung löst nur bei genau einer auf. Standard: nur die umbenannte Datei.
+   */
+  htmlStemCount?: (wikiStemLower: string) => number
 }
 
 function normalizeRelPath(relPath: string): string {
@@ -40,6 +45,11 @@ function stripAnyExtension(wikiPath: string): string {
   return isHtmlPath(wikiPath) ? wikiPath.replace(HTML_EXTENSION_REGEX, '') : stripMarkdownExtension(wikiPath)
 }
 
+/** Stamm einer Datei unter knowledge/ (ohne Präfix und Endung, klein): Schlüssel für `mdExists`/`htmlStemCount`. */
+export function wikiStemLower(relPath: string): string {
+  return stripAnyExtension(stripKnowledgePrefix(relPath)).toLowerCase()
+}
+
 function lastSegment(p: string): string {
   return p.split('/').pop() ?? p
 }
@@ -55,7 +65,7 @@ type Codec = { decode: (s: string) => string | null; encode: (s: string) => stri
 
 const IDENTITY: Codec = { decode: (s) => s, encode: (s) => s }
 
-/** Im Datenblock stehen Namen als JSON-Zeichenketten: `"` und `\` müssen maskiert bleiben. */
+/** Im Datenblock stehen Namen als JSON-Zeichenketten: `"` und `\` bleiben maskiert, `<`, `>`, `&` sind auch in (X)HTML sicher. */
 const JSON_CODEC: Codec = {
   decode: (s) => {
     try {
@@ -65,13 +75,20 @@ const JSON_CODEC: Codec = {
       return null
     }
   },
-  encode: (s) => JSON.stringify(s).slice(1, -1).replace(/</g, '\\u003c'),
+  encode: (s) =>
+    JSON.stringify(s)
+      .slice(1, -1)
+      .replace(/</g, '\\u003c')
+      .replace(/>/g, '\\u003e')
+      .replace(/&/g, '\\u0026'),
 }
 
 const TEXT_CODEC: Codec = {
   decode: (s) => decodeEntities(s),
   encode: (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'),
 }
+
+const JSON_STRING_REGEX = /"(?:[^"\\]|\\.)*"/g
 
 function makeRewriter(fromWikiPath: string, toWikiPath: string, opts: RewriteOptions | undefined) {
   const mdExists = opts?.mdExists ?? (() => false)
@@ -80,14 +97,16 @@ function makeRewriter(fromWikiPath: string, toWikiPath: string, opts: RewriteOpt
   const fromStem = stripAnyExtension(fromLower)
   const fromBaseLower = lastSegment(fromLower)
   const fromBaseStem = lastSegment(fromStem)
-  const fromHasNote = mdExists(fromStem)
 
   const toIsHtml = isHtmlPath(toWikiPath)
   const toStem = stripAnyExtension(toWikiPath)
   const toBase = lastSegment(toWikiPath)
   const toBaseStem = lastSegment(toStem)
-  // Ohne Endung nur, wenn der Verweis dann noch auf diese Datei zeigt (kein gleichnamiges .md daneben).
-  const toStemResolves = !toIsHtml || !mdExists(toStem.toLowerCase())
+  const htmlStemCount = opts?.htmlStemCount ?? ((stem: string) => (toIsHtml && stem === toStem.toLowerCase() ? 1 : 0))
+  // Nach dem Umbenennen gibt es unter dem alten Stamm keine HTML-Datei mehr und keine Notiz: nur dann meinte der Verweis das Konzept.
+  const fromHasNoSibling = !mdExists(fromStem) && htmlStemCount(fromStem) === 0
+  // Ohne Endung nur, wenn der Verweis dann noch auf diese Datei zeigt (keine gleichnamige Notiz, keine zweite HTML-Datei).
+  const toStemResolves = !toIsHtml || (!mdExists(toStem.toLowerCase()) && htmlStemCount(toStem.toLowerCase()) === 1)
 
   const matches = (pathWithoutPrefix: string, bare: boolean): boolean => {
     const lower = pathWithoutPrefix.toLowerCase()
@@ -99,19 +118,11 @@ function makeRewriter(fromWikiPath: string, toWikiPath: string, opts: RewriteOpt
     }
     if (explicitHtml) return lower === (bare ? fromBaseLower : fromLower)
     if (explicitMd) return false
-    // Ohne Endung zeigt der Verweis nur dann auf das Konzept, wenn es keine gleichnamige Notiz gibt.
-    return lower === (bare ? fromBaseStem : fromStem) && !fromHasNote
+    return lower === (bare ? fromBaseStem : fromStem) && fromHasNoSibling
   }
 
-  return (inner: string): string | null => {
-    const pipeIndex = inner.indexOf('|')
-    const pathAndAnchor = pipeIndex >= 0 ? inner.slice(0, pipeIndex) : inner
-    const aliasSuffix = pipeIndex >= 0 ? inner.slice(pipeIndex) : ''
-
-    const hashIndex = pathAndAnchor.indexOf('#')
-    const pathPart = hashIndex >= 0 ? pathAndAnchor.slice(0, hashIndex) : pathAndAnchor
-    const anchorSuffix = hashIndex >= 0 ? pathAndAnchor.slice(hashIndex) : ''
-
+  /** `pathPart`: der Pfadteil eines Verweises (vor Anker und Alias), entschlüsselt. Null: nichts zu tun. */
+  return (pathPart: string): string | null => {
     const leadingWhitespace = pathPart.match(/^\s*/)?.[0] ?? ''
     const trailingWhitespace = pathPart.match(/\s*$/)?.[0] ?? ''
     const rawPath = pathPart.trim()
@@ -132,16 +143,20 @@ function makeRewriter(fromWikiPath: string, toWikiPath: string, opts: RewriteOpt
     const rewrittenPath = explicitExtension || !toStemResolves ? withExtension : withoutExtension
     const finalPath = hadKnowledgePrefix ? `${KNOWLEDGE_PREFIX}${rewrittenPath}` : rewrittenPath
 
-    return `${leadingWhitespace}${finalPath}${trailingWhitespace}${anchorSuffix}${aliasSuffix}`
+    return `${leadingWhitespace}${finalPath}${trailingWhitespace}`
   }
 }
 
-function rewriteLinks(text: string, rewriteInner: (inner: string) => string | null, codec: Codec): string {
+/** Nur der Pfadteil eines Verweises wird entschlüsselt und neu geschrieben; Anker und Alias bleiben Byte für Byte. */
+function rewriteLinks(text: string, rewritePath: (pathPart: string) => string | null, codec: Codec): string {
   return text.replace(WIKI_LINK_REGEX, (fullMatch, innerRaw: string) => {
-    const inner = codec.decode(innerRaw)
-    if (inner === null) return fullMatch
-    const rewritten = rewriteInner(inner)
-    return rewritten === null ? fullMatch : `[[${codec.encode(rewritten)}]]`
+    const cut = innerRaw.search(/[|#]/)
+    const pathRaw = cut >= 0 ? innerRaw.slice(0, cut) : innerRaw
+    const rest = cut >= 0 ? innerRaw.slice(cut) : ''
+    const pathPart = codec.decode(pathRaw)
+    if (pathPart === null) return fullMatch
+    const rewritten = rewritePath(pathPart)
+    return rewritten === null ? fullMatch : `[[${codec.encode(rewritten)}${rest}]]`
   })
 }
 
@@ -156,8 +171,9 @@ export function rewriteWikiLinksInMarkdown(
 }
 
 /**
- * Verweise in einer HTML-Datei: im Datenblock (JSON-sicher maskiert) und im sichtbaren Text.
- * Tags, andere script-Blöcke, style und Kommentare bleiben unberührt (`a[[0]]` im Skript ist Code).
+ * Verweise in einer HTML-Datei: im Datenblock (nur innerhalb von JSON-Zeichenketten, JSON-sicher maskiert) und im
+ * sichtbaren Text. Tags, andere script-Blöcke, style und Kommentare bleiben unberührt (`a[[0]]` im Skript ist Code,
+ * `[[0]]` als JSON-Array im Block auch).
  */
 export function rewriteWikiLinksInHtml(
   html: string,
@@ -166,12 +182,16 @@ export function rewriteWikiLinksInHtml(
   opts?: RewriteOptions,
 ): string {
   if (!html.includes('[[')) return html
-  const rewriteInner = makeRewriter(fromWikiPath, toWikiPath, opts)
+  const rewritePath = makeRewriter(fromWikiPath, toWikiPath, opts)
   let out = ''
   let pos = 0
   for (const b of htmlUmschreibBereiche(html)) {
     out += html.slice(pos, b.start)
-    out += rewriteLinks(html.slice(b.start, b.end), rewriteInner, b.art === 'json' ? JSON_CODEC : TEXT_CODEC)
+    const teil = html.slice(b.start, b.end)
+    out +=
+      b.art === 'json'
+        ? teil.replace(JSON_STRING_REGEX, (literal) => rewriteLinks(literal, rewritePath, JSON_CODEC))
+        : rewriteLinks(teil, rewritePath, TEXT_CODEC)
     pos = b.end
   }
   return out + html.slice(pos)

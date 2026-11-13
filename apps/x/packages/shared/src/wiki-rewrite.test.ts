@@ -96,6 +96,77 @@ describe('rewriteWikiLinksInHtml', () => {
   })
 })
 
+describe('rewriteWikiLinksInHtml: Datenblock nur in JSON-Zeichenketten', () => {
+  it('verschachtelte Arrays wie [[null]] und [[0]] sind kein Verweis', () => {
+    const html = `<script type="application/json" id="rowboat-konzept">{"art":"konzept","x":[[null]],"y":[[0],[1,2]],"bezuege":["[[null]]"]}</script>`
+    const neu = rewriteWikiLinksInHtml(html, 'null.md', 'neu.md')
+    expect(neu).toBe(html.replace('"bezuege":["[[null]]"]', '"bezuege":["[[neu]]"]'))
+    expect(() => JSON.parse(/>([\s\S]*)<\/script>/.exec(neu)![1])).not.toThrow()
+  })
+  it('<, > und & im neuen Namen werden als Unicode-Escapes geschrieben, unberührte Teile bleiben', () => {
+    const html = `<script type="application/json" id="rowboat-konzept">{"art":"konzept","bezuege":["[[Marke/Marke|A & B <x>]]","a & <b>"]}</script>`
+    const neu = rewriteWikiLinksInHtml(html, 'Marke/Marke.md', 'Marke/A & B <neu>.md')
+    expect(neu).toContain('"[[Marke/A \\u0026 B \\u003cneu\\u003e|A & B <x>]]"')
+    expect(neu).toContain('"a & <b>"')
+    expect(JSON.parse(/>([\s\S]*)<\/script>/.exec(neu)![1]).bezuege[0]).toBe('[[Marke/A & B <neu>|A & B <x>]]')
+  })
+})
+
+describe('rewriteWikiLinksInHtml: sichtbarer Text', () => {
+  it('nur das Ziel wird entschlüsselt, Alias und Anker bleiben Byte für Byte', () => {
+    const html = '<p>[[a#h&nbsp;1|x&nbsp;y &amp; &#228;]]</p>'
+    expect(rewriteWikiLinksInHtml(html, 'a.md', 'b.md')).toBe('<p>[[b#h&nbsp;1|x&nbsp;y &amp; &#228;]]</p>')
+  })
+})
+
+describe('Verweis ohne Endung neben gleichnamigen HTML-Dateien', () => {
+  it('schreibt die Endung, wenn nach dem Umbenennen eine zweite HTML-Datei denselben Stamm trägt', () => {
+    const htmlStemCount = (stem: string) => (stem === 'k/neu' ? 2 : 0)
+    expect(rewriteWikiLinksInMarkdown('[[k/alt]]', 'k/alt.html', 'k/neu.html', { htmlStemCount })).toBe('[[k/neu.html]]')
+  })
+  it('lässt einen Verweis ohne Endung in Ruhe, der schon vorher zwischen mehreren HTML-Dateien mehrdeutig war', () => {
+    const htmlStemCount = (stem: string) => (stem === 'k/alt' ? 1 : stem === 'k/neu' ? 1 : 0)
+    expect(rewriteWikiLinksInMarkdown('[[k/alt]]', 'k/alt.html', 'k/neu.html', { htmlStemCount })).toBe('[[k/alt]]')
+  })
+})
+
+describe('rewriteWikiLinksInMarkdown: Verhalten für Notizen (Charakterisierung)', () => {
+  const r = (md: string, from: string, to: string, opts?: Parameters<typeof rewriteWikiLinksInMarkdown>[3]) =>
+    rewriteWikiLinksInMarkdown(md, from, to, opts)
+  it('Alias, Anker und beides', () => {
+    expect(r('[[a|b]] [[a#h]] [[a#h|b]]', 'a.md', 'c.md')).toBe('[[c|b]] [[c#h]] [[c#h|b]]')
+  })
+  it('Leerraum in den Klammern bleibt', () => {
+    expect(r('[[ a | b ]] [[ a ]]', 'a.md', 'c.md')).toBe('[[ c | b ]] [[ c ]]')
+  })
+  it('knowledge/-Präfix und explizites .md bleiben, ohne Endung bleibt ohne Endung', () => {
+    expect(r('[[knowledge/a]] [[knowledge/a.md]] [[a.md]] [[a]]', 'a.md', 'c.md')).toBe('[[knowledge/c]] [[knowledge/c.md]] [[c.md]] [[c]]')
+  })
+  it('Verweis nur mit dem Namen: nur in der umbenannten Datei selbst', () => {
+    expect(r('[[a]] [[x/a]]', 'x/a.md', 'x/c.md')).toBe('[[a]] [[x/c]]')
+    expect(r('[[a]] [[x/a]]', 'x/a.md', 'x/c.md', { allowBareSelfNameMatch: true })).toBe('[[c]] [[x/c]]')
+  })
+  it('Gross/Klein egal, auch bei explizitem .MD', () => {
+    expect(r('[[X/A]] [[x/a.MD]]', 'x/a.md', 'x/c.md')).toBe('[[x/c]] [[x/c.md]]')
+  })
+  it('nur der Ordner ändert sich', () => {
+    expect(r('[[a/n]] [[a/n.md|N]]', 'a/n.md', 'b/n.md')).toBe('[[b/n]] [[b/n.md|N]]')
+  })
+  it('nur Gross/Klein ändert sich (Kern tut dann nichts, die Funktion schreibt den neuen Namen)', () => {
+    expect(r('[[a]]', 'a.md', 'A.md')).toBe('[[A]]')
+  })
+  it('Namen mit Zeichen, die in regulären Ausdrücken Sonderbedeutung haben', () => {
+    expect(r('[[a+b (1).md]] [[aXb]] [[a.b]]', 'a+b (1).md', 'c.md')).toBe('[[c.md]] [[aXb]] [[a.b]]')
+    expect(r('[[aXb]] [[a.b]]', 'a.b.md', 'c.md')).toBe('[[aXb]] [[c]]')
+  })
+  it('bekannte Abweichung 1: Datei aus der Wurzel in einen Ordner, Verweis auf sich bekommt den Ordner', () => {
+    expect(r('[[a]] [[a.md]]', 'a.md', 'Ordner/b.md', { allowBareSelfNameMatch: true })).toBe('[[Ordner/b]] [[Ordner/b.md]]')
+  })
+  it('bekannte Abweichung 2: Notiz k.html.md, [[k.html]] meint jetzt die HTML-Datei, [[k.html.md]] wird umgeschrieben', () => {
+    expect(r('[[k.html]] [[k.html.md]]', 'k.html.md', 'n.md')).toBe('[[k.html]] [[n.md]]')
+  })
+})
+
 describe('isRewritableKnowledgePath', () => {
   it('Notiz oder HTML unter knowledge/', () => {
     expect(isRewritableKnowledgePath('knowledge/a.md')).toBe(true)

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { renamedFileName, rewriteWikiLinksForRenamedFileInMarkdown } from './wiki-rename'
+import { renamedFileName, rewriteOpenDocumentForRename, rewriteWikiLinksForRenamedFileInMarkdown } from './wiki-rename'
 
 describe('rewriteWikiLinksForRenamedFileInMarkdown', () => {
   it('Notiz: Verweise auf sich selbst ziehen mit, wie bisher', () => {
@@ -31,5 +31,17 @@ describe('renamedFileName', () => {
     expect(renamedFileName('knowledge/K/a.html', 'neu', false)).toBe('neu.html')
     expect(renamedFileName('knowledge/K/a.htm', 'neu', false)).toBe('neu.htm')
     expect(renamedFileName('knowledge/K/a.html', 'neu.html', false)).toBe('neu.html')
+  })
+})
+
+describe('rewriteOpenDocumentForRename', () => {
+  it('Notiz: Zwischenspeicher wird umgeschrieben', () => {
+    expect(rewriteOpenDocumentForRename('[[a]]', 'knowledge/a.md', 'knowledge/b.md', false)).toBe('[[b]]')
+  })
+  it('HTML-Konzept oder Ordner: Zwischenspeicher bleibt unberührt (gehört zur zuletzt geöffneten Notiz)', () => {
+    expect(rewriteOpenDocumentForRename('[[Konzepte/k.html]] [[a]]', 'knowledge/Konzepte/k.html', 'knowledge/Konzepte/n.html', false)).toBe(
+      '[[Konzepte/k.html]] [[a]]',
+    )
+    expect(rewriteOpenDocumentForRename('[[a]]', 'knowledge/a', 'knowledge/b', true)).toBe('[[a]]')
   })
 })
