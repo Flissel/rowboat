@@ -164,14 +164,15 @@ describe('konzept', () => {
       expect(isKnowledgeFrameUrl(u), u).toBe(false)
     }
   })
-  it('PDFs unter knowledge/ bleiben frei (R49), Umgehungen über den Namen nicht', () => {
-    for (const p of ['knowledge/a.pdf', 'knowledge/K/Bericht.PDF', 'knowledge/a.pdf?v=2', 'knowledge/a.pdf#page=3',
-      'knowledge/a%2Epdf', 'knowledge/a.pdf.', 'Knowledge/x%20y.pdf', 'knowledge%2Fa.pdf']) {
+  it('PDFs unter knowledge/ bleiben frei (R49/R51), Umgehungen über den Namen nicht', () => {
+    for (const p of ['knowledge/a.pdf', 'knowledge/A.PDF', 'knowledge/K/Bericht.PDF', 'knowledge/a.pdf?v=2',
+      'knowledge/a.pdf#page=3', 'knowledge/a%2Epdf', 'Knowledge/x%20y.pdf', 'knowledge%2Fa.pdf']) {
       expect(isKnowledgeFrameUrl(`app://workspace/${p}`), p).toBe(false)
       expect(frameNavigationDecision(`app://workspace/${p}`), p).toBe('allow')
     }
     for (const p of ['knowledge/a.pdf/x.html', 'knowledge/a.pdf.html', 'knowledge/a.pdf%3Fx.html', 'knowledge/a.pdf/..',
-      'knowledge/a.pdf%2F..', 'knowledge/a%2Epdf%00', 'knowledge/%ZZ.pdf', 'knowledge/a.pdfx']) {
+      'knowledge/a.pdf%2F..', 'knowledge/a%2Epdf%00', 'knowledge/%ZZ.pdf', 'knowledge/a.pdfx', 'knowledge/a.pdf.',
+      'knowledge/a.pdf%20', 'knowledge/a.pdf%00.html', 'knowledge/a%00.pdf', 'knowledge/a.pdf/', 'knowledge/a.pdf%2F']) {
       expect(isKnowledgeFrameUrl(`app://workspace/${p}`), p).toBe(true)
     }
     // ausgeliefert als Wissens-HTML (Content-Type text/html) oder laut Zustand eingesperrt: gesperrt trotz Namen
