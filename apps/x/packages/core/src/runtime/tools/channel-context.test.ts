@@ -81,7 +81,7 @@ describe("builtins under a channel context", () => {
         const load = BuiltinTools.loadSkill.execute;
         const refused = (await load({ skillName: "konzept" }, ctx(channel))) as { success: boolean; message?: string };
         expect(refused.success).toBe(false);
-        expect(refused.message).toContain("not available in channel runs");
+        expect(refused.message).toBe("Konzepte lassen sich nur in der App anlegen, nicht aus einem Kanal.");
         const byPath = (await load({ skillName: "src/runtime/assembly/skills/konzept/skill.ts" }, ctx(channel))) as { success: boolean };
         expect(byPath.success).toBe(false);
         const desktop = (await load({ skillName: "konzept" }, ctx())) as { success: boolean; attachedTools?: string[] };

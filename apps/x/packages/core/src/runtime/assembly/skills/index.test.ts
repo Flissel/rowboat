@@ -518,8 +518,9 @@ describe("konzept skill", () => {
     // The template is embedded from the constant, not pasted by hand.
     const { VIDEOKONZEPT_VORLAGE } = await import("./konzept/vorlage.js");
     expect(body).toContain(VIDEOKONZEPT_VORLAGE);
-    // Template backticks/escapes survive: the data-block escapes read back literally.
-    expect(body).toContain("<\/script");
+    // The escape the skill teaches is present as a literal backslash form.
+    expect(body).toContain("<" + String.fromCharCode(92) + "/script");
+    expect(body).toContain(String.fromCharCode(92) + "u003c");
     const catalog = skills.buildSkillCatalog();
     expect(catalog).toContain("## Konzepte (HTML-Seiten)");
     expect(catalog).toContain("Videokonzept");

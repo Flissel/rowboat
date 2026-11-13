@@ -55,13 +55,14 @@ Write the skeleton yourself, in the order above: \`<title>\`, data block with \`
 
 ## Video concepts
 
-A video concept has \`"art": "videokonzept"\` and a \`video\` object. **Use the template below and change ONLY the data block** (and the title text). Its script draws the whole page from the data block — stages as collapsible sections, scenes as cards, summary, warnings, references.
+A video concept has \`"art": "videokonzept"\` and a \`video\` object. **Use the template below and change ONLY the data block** and the title text. The title appears twice, in \`<title>\` and in the page heading \`<h1>\`; change both and keep them identical. Its script draws the whole page from the data block — stages as collapsible sections, scenes as cards, summary, warnings, references.
 
 Limits (the app checks them):
-- \`thema\` 3–300 characters; \`zielgruppe\`; \`minuten\` 3–5 (a number); \`hook\`; \`kernaussage\`; \`abschluss\`; \`auftrag\` always \`null\`; optional \`firma\`.
+- \`thema\` 3–300 characters; \`zielgruppe\`; \`minuten\` 3–5 (a number); \`hook\`; \`kernaussage\`; \`abschluss\`; \`auftrag\` always \`null\`.
 - \`stufen\`: at most 8, each \`{ "name", "szenen": [...] }\`. Scenes **8 to 15 in total** across all stages.
-- Scene: \`kurz\` (at most 300 characters), \`bildart\` one of \`slide\`, \`avatar_slide\`, \`avatar_gross\`, \`clip\`, optional \`notiz\`.
-- A scene is about 15 seconds; the page shows the estimate against \`minuten\`.
+- Scene: \`kurz\` (at most 300 characters), \`bildart\` one of \`slide\`, \`avatar_slide\`, \`avatar_gross\`, \`clip\`, optional \`notiz\` (free text shown under the scene — NOT a reference; a \`[[…]]\` in it stays plain text, so put notes that should be clickable into \`bezuege\`).
+- A scene carries 35–110 spoken words (about 15–45 seconds). Plan roughly two scenes per minute: 3 min ≈ 8 scenes, 4 min ≈ 8–10, 5 min ≈ 10–12, never outside 8–15. The page shows the possible range against \`minuten\` and warns when the target is outside it.
+- If the user wants more (over 15 scenes, over 8 stages, or longer than 5 minutes), stay inside the limits — merge scenes or stages — and name in your one sentence what you cut.
 
 How to write it:
 - **Hook:** the result or the surprise first — one or two sentences, no "Hallo und willkommen".

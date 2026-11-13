@@ -67,7 +67,7 @@ export const BuiltinTools: z.infer<typeof BuiltinToolsSchema> = {
             if (ctx?.channel && isSkillDeniedInChannel(resolved.id)) {
                 return {
                     success: false,
-                    message: `Skill '${resolved.id}' is not available in channel runs.`,
+                    message: "Konzepte lassen sich nur in der App anlegen, nicht aus einem Kanal.",
                 };
             }
 
