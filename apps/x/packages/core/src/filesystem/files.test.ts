@@ -283,4 +283,17 @@ describe("filesystem files", () => {
       }),
     ]);
   });
+  it("rename of a knowledge HTML concept rewrites links in notes and in concepts", async () => {
+    const files = await loadFiles();
+    const k = path.join(workspaceDir, "knowledge");
+    await fs.mkdir(path.join(k, "Konzepte"), { recursive: true });
+    await fs.writeFile(path.join(k, "Konzepte", "k.html"), "<p>x</p>", "utf8");
+    await fs.writeFile(path.join(k, "Notiz.md"), "[[Konzepte/k.html|Konzept]]", "utf8");
+    await fs.writeFile(path.join(k, "Anderes.html"), "<p>[[Konzepte/k.html]]</p>", "utf8");
+
+    await files.rename("knowledge/Konzepte/k.html", "knowledge/Konzepte/neu.html");
+
+    expect(await fs.readFile(path.join(k, "Notiz.md"), "utf8")).toBe("[[Konzepte/neu.html|Konzept]]");
+    expect(await fs.readFile(path.join(k, "Anderes.html"), "utf8")).toBe("<p>[[Konzepte/neu.html]]</p>");
+  });
 });

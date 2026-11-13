@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { createInterface } from 'node:readline';
 import { glob as globFiles } from 'glob';
+import { konzept } from '@x/shared';
 import { WorkDir } from '../config/config.js';
 import { withFileLock } from '../knowledge/file-lock.js';
 import { commitAll } from '../knowledge/version_history.js';
@@ -182,10 +183,11 @@ function scheduleKnowledgeCommit(filename: string): void {
   }, 3 * 60 * 1000);
 }
 
+/** Notiz oder HTML-Konzept unter knowledge/ (Versionsverlauf, Umbenennen). */
 function isKnowledgeMarkdownPath(resolved: ResolvedFilePath): boolean {
   return !!resolved.workspaceRelPath
     && resolved.workspaceRelPath.startsWith('knowledge/')
-    && resolved.workspaceRelPath.endsWith('.md');
+    && (resolved.workspaceRelPath.endsWith('.md') || konzept.isKnowledgeHtmlPath(resolved.workspaceRelPath));
 }
 
 function scheduleKnowledgeCommitIfNeeded(resolved: ResolvedFilePath): void {

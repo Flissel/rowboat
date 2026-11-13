@@ -92,6 +92,7 @@ import { BillingErrorDialog } from "@/components/billing-error-dialog"
 import { CreditCelebration } from "@/components/credit-celebration"
 import { matchBillingError, type BillingErrorMatch } from "@/lib/billing-error"
 import { dispatchCreditExhausted, dispatchCreditReplenished } from "@/lib/credit-status"
+import { rewriteWikiLinksForRenamedFileInMarkdown, renamedFileName } from '@/lib/wiki-rename'
 import { ensureMarkdownExtension, normalizeWikiPath, splitWikiFragment, stripKnowledgePrefix, toKnowledgePath, wikiLabel } from '@/lib/wiki-links'
 import { buildHierarchyGraph, graphFileData, parseVaultMap, vaultMapNodeId, type NodeInfo } from '@/lib/graph-hierarchy'
 import { canCreateWikiTarget, graphHtmlNode, graphNodeLabel, knowledgeHtmlFiles, resolveWikiTarget } from '@/lib/graph-html'
@@ -263,22 +264,6 @@ const getBaseName = (path: string) => {
   return file.replace(/\.md$/i, '')
 }
 
-const WIKI_LINK_TOKEN_REGEX = /\[\[([^[\]]+)\]\]/g
-const KNOWLEDGE_PREFIX = 'knowledge/'
-
-const normalizeRelPathForWiki = (relPath: string) =>
-  relPath.replace(/\\/g, '/').replace(/^\/+/, '')
-
-const stripKnowledgePrefixForWiki = (relPath: string) => {
-  const normalized = normalizeRelPathForWiki(relPath)
-  return normalized.toLowerCase().startsWith(KNOWLEDGE_PREFIX)
-    ? normalized.slice(KNOWLEDGE_PREFIX.length)
-    : normalized
-}
-
-const stripMarkdownExtensionForWiki = (wikiPath: string) =>
-  wikiPath.toLowerCase().endsWith('.md') ? wikiPath.slice(0, -3) : wikiPath
-
 type LinkedGoogleDocMeta = {
   id: string
   title: string
@@ -314,70 +299,6 @@ const parseLinkedGoogleDocFrontmatter = (raw: string | null | undefined): Linked
     doc[key] = value
   }
   return doc.id && doc.title ? doc as LinkedGoogleDocMeta : null
-}
-
-const wikiPathCompareKey = (wikiPath: string) =>
-  stripMarkdownExtensionForWiki(wikiPath).toLowerCase()
-
-const splitWikiPathPrefix = (rawPath: string) => {
-  let normalized = rawPath.trim().replace(/^\/+/, '').replace(/^\.\//, '')
-  const hadKnowledgePrefix = /^knowledge\//i.test(normalized)
-  if (hadKnowledgePrefix) {
-    normalized = normalized.slice(KNOWLEDGE_PREFIX.length)
-  }
-  return { pathWithoutPrefix: normalized, hadKnowledgePrefix }
-}
-
-const rewriteWikiLinksForRenamedFileInMarkdown = (
-  markdown: string,
-  fromRelPath: string,
-  toRelPath: string
-) => {
-  const normalizedFrom = normalizeRelPathForWiki(fromRelPath)
-  const normalizedTo = normalizeRelPathForWiki(toRelPath)
-  const lowerFrom = normalizedFrom.toLowerCase()
-  const lowerTo = normalizedTo.toLowerCase()
-  if (!lowerFrom.startsWith(KNOWLEDGE_PREFIX) || !lowerFrom.endsWith('.md')) return markdown
-  if (!lowerTo.startsWith(KNOWLEDGE_PREFIX) || !lowerTo.endsWith('.md')) return markdown
-
-  const fromWikiPath = stripKnowledgePrefixForWiki(normalizedFrom)
-  const toWikiPath = stripKnowledgePrefixForWiki(normalizedTo)
-  const fromCompareKey = wikiPathCompareKey(fromWikiPath)
-  const fromBaseName = stripMarkdownExtensionForWiki(fromWikiPath).split('/').pop()?.toLowerCase() ?? null
-  const toWikiPathWithoutExtension = stripMarkdownExtensionForWiki(toWikiPath)
-  const toBaseName = toWikiPathWithoutExtension.split('/').pop() ?? toWikiPathWithoutExtension
-
-  return markdown.replace(WIKI_LINK_TOKEN_REGEX, (fullMatch, innerRaw: string) => {
-    const pipeIndex = innerRaw.indexOf('|')
-    const pathAndAnchor = pipeIndex >= 0 ? innerRaw.slice(0, pipeIndex) : innerRaw
-    const aliasSuffix = pipeIndex >= 0 ? innerRaw.slice(pipeIndex) : ''
-
-    const hashIndex = pathAndAnchor.indexOf('#')
-    const pathPart = hashIndex >= 0 ? pathAndAnchor.slice(0, hashIndex) : pathAndAnchor
-    const anchorSuffix = hashIndex >= 0 ? pathAndAnchor.slice(hashIndex) : ''
-
-    const leadingWhitespace = pathPart.match(/^\s*/)?.[0] ?? ''
-    const trailingWhitespace = pathPart.match(/\s*$/)?.[0] ?? ''
-    const rawPath = pathPart.trim()
-    if (!rawPath) return fullMatch
-
-    const { pathWithoutPrefix, hadKnowledgePrefix } = splitWikiPathPrefix(rawPath)
-    if (!pathWithoutPrefix) return fullMatch
-
-    const matchesFullPath = wikiPathCompareKey(pathWithoutPrefix) === fromCompareKey
-    const isBareTarget = !pathWithoutPrefix.includes('/')
-    const targetBaseName = stripMarkdownExtensionForWiki(pathWithoutPrefix).toLowerCase()
-    const matchesBareSelfName = Boolean(fromBaseName && isBareTarget && targetBaseName === fromBaseName)
-    if (!matchesFullPath && !matchesBareSelfName) return fullMatch
-
-    const preserveMarkdownExtension = rawPath.toLowerCase().endsWith('.md')
-    const rewrittenTarget = matchesBareSelfName
-      ? (preserveMarkdownExtension ? `${toBaseName}.md` : toBaseName)
-      : (preserveMarkdownExtension ? toWikiPath : toWikiPathWithoutExtension)
-    const finalPath = hadKnowledgePrefix ? `${KNOWLEDGE_PREFIX}${rewrittenTarget}` : rewrittenTarget
-
-    return `[[${leadingWhitespace}${finalPath}${trailingWhitespace}${anchorSuffix}${aliasSuffix}]]`
-  })
 }
 
 const getAncestorDirectoryPaths = (path: string): string[] => {
@@ -6517,8 +6438,8 @@ function App() {
     rename: async (oldPath: string, newName: string, isDir: boolean) => {
       try {
         const parts = oldPath.split('/')
-        // For files, ensure .md extension
-        const finalName = isDir ? newName : (newName.endsWith('.md') ? newName : `${newName}.md`)
+        // For files, ensure the extension (.md for notes; HTML concepts keep theirs)
+        const finalName = renamedFileName(oldPath, newName, isDir)
         parts[parts.length - 1] = finalName
         const newPath = parts.join('/')
         await window.ipc.invoke('workspace:rename', { from: oldPath, to: newPath })

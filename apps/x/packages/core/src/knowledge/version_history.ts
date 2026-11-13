@@ -1,9 +1,15 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import git from 'isomorphic-git';
+import { konzept } from '@x/shared';
 import { WorkDir } from '../config/config.js';
 
 const KNOWLEDGE_DIR = path.join(WorkDir, 'knowledge');
+
+/** Notes (.md) and HTML concepts are versioned; everything else in knowledge/ is not. */
+function isVersionedFile(name: string): boolean {
+    return name.endsWith('.md') || konzept.isHtmlPath(name);
+}
 
 // Simple promise-based mutex to serialize commits
 let commitLock: Promise<void> = Promise.resolve();
@@ -72,7 +78,7 @@ function getAllMdFiles(baseDir: string, relDir: string): string[] {
         const stat = fs.statSync(fullPath);
         if (stat.isDirectory()) {
             results.push(...getAllMdFiles(baseDir, relPath));
-        } else if (entry.endsWith('.md')) {
+        } else if (isVersionedFile(entry)) {
             results.push(relPath);
         }
     }
@@ -101,8 +107,8 @@ async function commitAllInner(message: string, authorName: string): Promise<void
 
     let hasChanges = false;
     for (const [filepath, head, workdir, stage] of matrix) {
-        // Skip non-md files
-        if (!filepath.endsWith('.md')) continue;
+        // Skip files that are neither notes nor HTML concepts
+        if (!isVersionedFile(filepath)) continue;
 
         // [filepath, HEAD, WORKDIR, STAGE]
         // Unchanged: [f, 1, 1, 1]

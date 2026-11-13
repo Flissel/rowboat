@@ -56,7 +56,7 @@ function codepoint(n: number, roh: string): string {
   return n >= 1 && n <= 0x10ffff && !(n >= 0xd800 && n <= 0xdfff) ? String.fromCodePoint(n) : roh
 }
 
-function decodeEntities(s: string): string {
+export function decodeEntities(s: string): string {
   return s
     .replace(/&#(\d{1,7});/g, (m, d: string) => codepoint(parseInt(d, 10), m))
     .replace(/&#x([0-9a-f]{1,6});/gi, (m, h: string) => codepoint(parseInt(h, 16), m))
@@ -175,6 +175,68 @@ function scan(html: string): Token[] {
       }
     } else {
       i = lt + 1 // einzelnes `<` ist Text
+    }
+  }
+  flush(n)
+  return out
+}
+
+export type UmschreibBereich = { start: number; end: number; art: 'json' | 'text' }
+
+/**
+ * Bereiche einer HTML-Datei, in denen `[[...]]` als Verweis gilt: der Inhalt des ersten Datenblocks
+ * (`art: 'json'`) und Text außerhalb von Tags, script, style und Kommentaren (`art: 'text'`).
+ * Liest die ganze Datei (kein 1-MB-Deckel), ein Durchlauf. Nicht abgeschlossene Konstrukte beenden ihn.
+ */
+export function htmlUmschreibBereiche(html: string): UmschreibBereich[] {
+  const n = html.length
+  const out: UmschreibBereich[] = []
+  let blockGefunden = false
+  let textStart = 0
+  let i = 0
+  const flush = (end: number) => {
+    if (end > textStart) out.push({ start: textStart, end, art: 'text' })
+  }
+  while (i < n) {
+    const lt = html.indexOf('<', i)
+    if (lt === -1) break
+    const c = html[lt + 1]
+    if (html.startsWith('<!--', lt)) {
+      flush(lt)
+      const e = html.indexOf('-->', lt + 4)
+      if (e === -1) return out
+      i = textStart = e + 3
+    } else if (c === '!' || c === '?') {
+      flush(lt)
+      const e = html.indexOf('>', lt + 2)
+      if (e === -1) return out
+      i = textStart = e + 1
+    } else if (c !== undefined && (c === '/' || /[A-Za-z]/.test(c))) {
+      flush(lt)
+      const t = parseTag(html, lt)
+      if (t === null) return out
+      i = textStart = t.end
+      if (!t.closing && (t.name === 'script' || t.name === 'style')) {
+        const re = new RegExp(`</${t.name}(?=[\\s/>])`, 'gi')
+        re.lastIndex = t.end
+        const m = re.exec(html)
+        const bodyEnd = m === null ? n : m.index
+        if (
+          t.name === 'script' &&
+          !blockGefunden &&
+          t.attrs.id === KONZEPT_BLOCK_ID &&
+          (t.attrs.type ?? '').split(';')[0].trim().toLowerCase() === 'application/json'
+        ) {
+          blockGefunden = true
+          if (bodyEnd > t.end) out.push({ start: t.end, end: bodyEnd, art: 'json' })
+        }
+        if (m === null) return out
+        const e = html.indexOf('>', m.index)
+        if (e === -1) return out
+        i = textStart = e + 1
+      }
+    } else {
+      i = lt + 1
     }
   }
   flush(n)
