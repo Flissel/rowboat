@@ -40,4 +40,5 @@ export * as autoRoute from './auto-route.js';
 export * as find from './find.js';
 export * as integrations from './integrations.js';
 export * as embedChannels from './embed-channels.js';
+export * as konzept from './konzept.js';
 export { PrefixLogger };
