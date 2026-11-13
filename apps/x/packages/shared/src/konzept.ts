@@ -8,7 +8,8 @@ export const KONZEPT_MAX_BYTES = 1_048_576
 export const KONZEPT_LESE_MAX = 1_048_576
 /** Größte HTML-Datei, die Ansicht, Umbenennen (Verweise nachziehen) und Versionsverlauf noch anfassen. */
 export const KONZEPT_HTML_MAX_BYTES = 5 * 1024 * 1024
-const BLOCK_MAX_ZEICHEN = 20_000
+/** Längster Datenblock (Zeichen), den Leser und Umschreiben noch beachten. */
+export const KONZEPT_BLOCK_MAX = 20_000
 
 export const BILDARTEN = ['slide', 'avatar_slide', 'avatar_gross', 'clip'] as const
 
@@ -254,8 +255,8 @@ export function readKonzept(html: string): { daten: KonzeptDaten | null; fehler:
   const roh = findBlock(html)
   if (roh === null) return { daten: null, fehler: [] }
   const fehler = (satz: string) => ({ daten: null, fehler: [satz] })
-  if (roh.length > BLOCK_MAX_ZEICHEN) {
-    return fehler(`Der Datenblock ist länger als ${BLOCK_MAX_ZEICHEN} Zeichen und wird ignoriert.`)
+  if (roh.length > KONZEPT_BLOCK_MAX) {
+    return fehler(`Der Datenblock ist länger als ${KONZEPT_BLOCK_MAX} Zeichen und wird ignoriert.`)
   }
   let parsed: unknown
   try {

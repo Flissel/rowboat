@@ -119,6 +119,36 @@ describe('rewriteWikiLinksInHtml: sichtbarer Text', () => {
   })
 })
 
+describe('rewriteWikiLinksInHtml: Entitäten, Schlüssel, Laufzeit', () => {
+  it('Ziele mit numerischen Entitäten (&#x27;, &#252;) werden gefunden, Alias bleibt Byte für Byte', () => {
+    expect(rewriteWikiLinksInHtml("<p>[[Felix&#x27;s Plan]] [[Gr&#252;&#223;e|x&#228;]] [[a#h&#228;]]</p>", "Felix's Plan.md", 'Neu.md')).toBe(
+      "<p>[[Neu]] [[Gr&#252;&#223;e|x&#228;]] [[a#h&#228;]]</p>",
+    )
+    expect(rewriteWikiLinksInHtml('<p>[[Gr&#252;&#223;e|x&#228;]] [[Gr&#252;&#223;e#h]]</p>', 'Grüße.md', 'Neu.md')).toBe(
+      '<p>[[Neu|x&#228;]] [[Neu#h]]</p>',
+    )
+  })
+  it('Objektschlüssel im Datenblock bleiben, Werte (auch verschachtelt) werden umgeschrieben', () => {
+    const html = '<script type="application/json" id="rowboat-konzept">{"[[x]]" : 1, "art":"konzept","bezuege":["[[x]]"],"video":{"thema":"[[x]]","[[x]]":"[[x]]"}}</script>'
+    const neu = rewriteWikiLinksInHtml(html, 'x.md', 'y.md')
+    expect(neu).toBe(html.replace('"bezuege":["[[x]]"]', '"bezuege":["[[y]]"]').replace('"thema":"[[x]]"', '"thema":"[[y]]"').replace('"[[x]]":"[[x]]"', '"[[x]]":"[[y]]"'))
+    expect(() => JSON.parse(/>([\s\S]*)<\/script>/.exec(neu)![1])).not.toThrow()
+  })
+  it('Block über 20 000 Zeichen wird nicht angefasst', () => {
+    const html = `<script type="application/json" id="rowboat-konzept">{"a":"${'x'.repeat(20_000)}","bezuege":["[[x]]"]}</script>`
+    expect(rewriteWikiLinksInHtml(html, 'x.md', 'y.md')).toBe(html)
+  })
+  it('kaputter Block bleibt linear: offene Anführungszeichen, viele maskierte Anführungszeichen', () => {
+    for (const block of [`{"a":"${'\\"'.repeat(80_000)}`, '"'.repeat(200_000), `"[[x]]" "${'\\"'.repeat(8_000)}`]) {
+      const html = `<script type="application/json" id="rowboat-konzept">${block}</script><p>[[x]]</p>`
+      const t = Date.now()
+      const neu = rewriteWikiLinksInHtml(html, 'x.md', 'y.md')
+      expect(Date.now() - t).toBeLessThan(1000)
+      expect(neu).toContain('<p>[[y]]</p>')
+    }
+  })
+})
+
 describe('Verweis ohne Endung neben gleichnamigen HTML-Dateien', () => {
   it('schreibt die Endung, wenn nach dem Umbenennen eine zweite HTML-Datei denselben Stamm trägt', () => {
     const htmlStemCount = (stem: string) => (stem === 'k/neu' ? 2 : 0)

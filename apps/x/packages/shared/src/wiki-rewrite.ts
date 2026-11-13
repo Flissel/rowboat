@@ -1,6 +1,6 @@
 // [[…]]-Verweise nachziehen, wenn eine Notiz (.md) oder ein HTML-Konzept unter knowledge/ umbenannt wird.
 // Reine Funktionen; Kern und Renderer benutzen dieselbe Logik.
-import { decodeEntities, htmlUmschreibBereiche, isHtmlPath, isKnowledgeHtmlPath } from './konzept.js'
+import { KONZEPT_BLOCK_MAX, decodeEntities, htmlUmschreibBereiche, isHtmlPath, isKnowledgeHtmlPath } from './konzept.js'
 
 const WIKI_LINK_REGEX = /\[\[([^[\]]+)\]\]/g
 const KNOWLEDGE_PREFIX = 'knowledge/'
@@ -61,12 +61,14 @@ function splitWikiPathPrefix(rawPath: string): { pathWithoutPrefix: string; hadK
   return { pathWithoutPrefix: normalized, hadKnowledgePrefix }
 }
 
-type Codec = { decode: (s: string) => string | null; encode: (s: string) => string }
+/** `sep`: trennt Pfad von Anker/Alias im ROHEN Text. Im sichtbaren Text gehört `#` hinter `&` zu einer Entität (`&#x27;`). */
+type Codec = { decode: (s: string) => string | null; encode: (s: string) => string; sep: RegExp }
 
-const IDENTITY: Codec = { decode: (s) => s, encode: (s) => s }
+const IDENTITY: Codec = { decode: (s) => s, encode: (s) => s, sep: /[|#]/ }
 
 /** Im Datenblock stehen Namen als JSON-Zeichenketten: `"` und `\` bleiben maskiert, `<`, `>`, `&` sind auch in (X)HTML sicher. */
 const JSON_CODEC: Codec = {
+  sep: /[|#]/,
   decode: (s) => {
     try {
       const v: unknown = JSON.parse(`"${s}"`)
@@ -84,11 +86,38 @@ const JSON_CODEC: Codec = {
 }
 
 const TEXT_CODEC: Codec = {
+  sep: /\||(?<!&)#/,
   decode: (s) => decodeEntities(s),
   encode: (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'),
 }
 
-const JSON_STRING_REGEX = /"(?:[^"\\]|\\.)*"/g
+/**
+ * Wendet `fn` auf jede JSON-Zeichenkette an, die ein WERT ist (kein Objektschlüssel: dahinter folgt kein `:`).
+ * Ein Durchlauf, linear. Die erste nicht abgeschlossene Zeichenkette beendet ihn (Rest unverändert).
+ * Blöcke über KONZEPT_BLOCK_MAX Zeichen werden nicht angefasst.
+ */
+function mapJsonStringValues(block: string, fn: (literal: string) => string): string {
+  const n = block.length
+  if (n > KONZEPT_BLOCK_MAX) return block
+  let out = ''
+  let pos = 0
+  let i = 0
+  while (i < n) {
+    const q = block.indexOf('"', i)
+    if (q === -1) break
+    let j = q + 1
+    while (j < n && block[j] !== '"') j += block[j] === '\\' ? 2 : 1
+    if (j >= n) break
+    let k = j + 1
+    while (k < n && /\s/.test(block[k])) k++
+    if (block[k] !== ':') {
+      out += block.slice(pos, q) + fn(block.slice(q, j + 1))
+      pos = j + 1
+    }
+    i = j + 1
+  }
+  return out + block.slice(pos)
+}
 
 function makeRewriter(fromWikiPath: string, toWikiPath: string, opts: RewriteOptions | undefined) {
   const mdExists = opts?.mdExists ?? (() => false)
@@ -150,7 +179,7 @@ function makeRewriter(fromWikiPath: string, toWikiPath: string, opts: RewriteOpt
 /** Nur der Pfadteil eines Verweises wird entschlüsselt und neu geschrieben; Anker und Alias bleiben Byte für Byte. */
 function rewriteLinks(text: string, rewritePath: (pathPart: string) => string | null, codec: Codec): string {
   return text.replace(WIKI_LINK_REGEX, (fullMatch, innerRaw: string) => {
-    const cut = innerRaw.search(/[|#]/)
+    const cut = innerRaw.search(codec.sep)
     const pathRaw = cut >= 0 ? innerRaw.slice(0, cut) : innerRaw
     const rest = cut >= 0 ? innerRaw.slice(cut) : ''
     const pathPart = codec.decode(pathRaw)
@@ -190,7 +219,7 @@ export function rewriteWikiLinksInHtml(
     const teil = html.slice(b.start, b.end)
     out +=
       b.art === 'json'
-        ? teil.replace(JSON_STRING_REGEX, (literal) => rewriteLinks(literal, rewritePath, JSON_CODEC))
+        ? mapJsonStringValues(teil, (literal) => rewriteLinks(literal, rewritePath, JSON_CODEC))
         : rewriteLinks(teil, rewritePath, TEXT_CODEC)
     pos = b.end
   }

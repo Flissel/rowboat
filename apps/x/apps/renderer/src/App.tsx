@@ -92,7 +92,7 @@ import { BillingErrorDialog } from "@/components/billing-error-dialog"
 import { CreditCelebration } from "@/components/credit-celebration"
 import { matchBillingError, type BillingErrorMatch } from "@/lib/billing-error"
 import { dispatchCreditExhausted, dispatchCreditReplenished } from "@/lib/credit-status"
-import { rewriteOpenDocumentForRename, rewriteWikiLinksForRenamedFileInMarkdown, renamedFileName } from '@/lib/wiki-rename'
+import { rewriteOpenDocumentForRename, renamedFileName } from '@/lib/wiki-rename'
 import { ensureMarkdownExtension, normalizeWikiPath, splitWikiFragment, stripKnowledgePrefix, toKnowledgePath, wikiLabel } from '@/lib/wiki-links'
 import { buildHierarchyGraph, graphFileData, parseVaultMap, vaultMapNodeId, type NodeInfo } from '@/lib/graph-hierarchy'
 import { canCreateWikiTarget, graphHtmlNode, graphNodeLabel, knowledgeHtmlFiles, resolveWikiTarget } from '@/lib/graph-html'
@@ -3427,11 +3427,7 @@ function App() {
                 renameInProgressRef.current = true
                 await window.ipc.invoke('workspace:rename', { from: pathAtStart, to: targetPath })
                 pathToSave = targetPath
-                const rewrittenBody = rewriteWikiLinksForRenamedFileInMarkdown(
-                  debouncedContent,
-                  pathAtStart,
-                  targetPath
-                )
+                const rewrittenBody = rewriteOpenDocumentForRename(debouncedContent, pathAtStart, targetPath, false)
                 contentToSave = joinFrontmatter(frontmatterByPathRef.current.get(pathAtStart) ?? null, rewrittenBody)
                 renamedFrom = pathAtStart
                 renamedTo = targetPath
@@ -3444,11 +3440,7 @@ function App() {
                 deleteInitialContentForPath(pathAtStart)
                 const cachedContent = editorContentByPathRef.current.get(pathAtStart)
                 if (cachedContent !== undefined) {
-                  const rewrittenCachedContent = rewriteWikiLinksForRenamedFileInMarkdown(
-                    cachedContent,
-                    pathAtStart,
-                    targetPath
-                  )
+                  const rewrittenCachedContent = rewriteOpenDocumentForRename(cachedContent, pathAtStart, targetPath, false)
                   editorContentByPathRef.current.delete(pathAtStart)
                   editorContentByPathRef.current.set(targetPath, rewrittenCachedContent)
                   setEditorContentByPath((prev) => {
@@ -3456,11 +3448,7 @@ function App() {
                     if (oldContent === undefined) return prev
                     const next = { ...prev }
                     delete next[pathAtStart]
-                    next[targetPath] = rewriteWikiLinksForRenamedFileInMarkdown(
-                      oldContent,
-                      pathAtStart,
-                      targetPath
-                    )
+                    next[targetPath] = rewriteOpenDocumentForRename(oldContent, pathAtStart, targetPath, false)
                     return next
                   })
                 }
