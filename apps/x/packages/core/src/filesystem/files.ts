@@ -444,6 +444,7 @@ export async function writeText(inputPath: string, data: string, opts?: WriteTex
     isInsideWorkspace: resolved.isInsideWorkspace,
     stat: result.stat,
     etag: result.etag,
+    ...(resolved.workspaceRelPath ? { workspaceRelPath: resolved.workspaceRelPath } : {}),
   };
 }
 
@@ -507,6 +508,7 @@ export async function editText(inputPath: string, oldString: string, newString: 
     resolvedPath: resolved.resolvedPath,
     isInsideWorkspace: resolved.isInsideWorkspace,
     replacements: replaceAll ? occurrences : 1,
+    ...(resolved.workspaceRelPath ? { workspaceRelPath: resolved.workspaceRelPath } : {}),
   };
 }
 

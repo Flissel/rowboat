@@ -145,6 +145,7 @@ import * as analytics from '@/lib/analytics'
 import { playAckCue, playAlertCue, playPopCue } from '@/lib/call-sounds'
 import { useTheme } from '@/contexts/theme-context'
 import { isMac } from '@/lib/shortcut'
+import { konzeptPathFromTool, shouldAutoOpen } from '@/lib/konzept-flaeche'
 
 type DirEntry = z.infer<typeof workspace.DirEntry>
 type RunEventType = z.infer<typeof RunEvent>
@@ -6078,6 +6079,59 @@ function App() {
       }
     }
   }, [sessionChat.chatState?.conversation, runId, navigateToView])
+
+  // Flaeche: when the assistant writes an HTML concept under knowledge/ (not Kanal), open it next to
+  // the chat on the FIRST write of that path in this run -- and only if it is not already shown, so
+  // a user who has moved on is not pulled back. Every write also tells an open viewer to reload.
+  // Same seeding semantics as the deck effect above.
+  const processedKonzeptToolsRef = useRef<{ key: string | null; ids: Set<string>; openedThisRun: Set<string> }>({ key: null, ids: new Set(), openedThisRun: new Set() })
+  useEffect(() => {
+    const conversation = sessionChat.chatState?.conversation
+    if (!conversation) return
+    const completed = conversation.filter(
+      (item): item is ToolCall =>
+        isToolCall(item) && (item.name === 'file-writeText' || item.name === 'file-editText') && item.status === 'completed'
+    )
+    if (processedKonzeptToolsRef.current.key !== runId) {
+      processedKonzeptToolsRef.current = { key: runId, ids: new Set(completed.map((t) => t.id)), openedThisRun: new Set() }
+      return
+    }
+    for (const tool of completed) {
+      if (processedKonzeptToolsRef.current.ids.has(tool.id)) continue
+      processedKonzeptToolsRef.current.ids.add(tool.id)
+      const konzeptPath = konzeptPathFromTool(tool)
+      if (!konzeptPath) continue
+      const view = currentViewStateRef.current
+      const openIt = shouldAutoOpen({
+        path: konzeptPath,
+        openedThisRun: processedKonzeptToolsRef.current.openedThisRun,
+        currentPath: view.type === 'file' ? view.path : null,
+      })
+      processedKonzeptToolsRef.current.openedThisRun.add(konzeptPath)
+      if (openIt) {
+        if (isFullScreenChat && assistantLayout.assistant) moveAssistantChat(assistantLayout.assistant, 'sidebar')
+        void navigateToView({ type: 'file', path: konzeptPath })
+      }
+      window.dispatchEvent(new CustomEvent('rowboat:html-touched', { detail: { path: konzeptPath } }))
+    }
+  }, [sessionChat.chatState?.conversation, runId, navigateToView, isFullScreenChat, assistantLayout.assistant, moveAssistantChat])
+
+  // Requests from the Flaeche header / a concept page (already checked by the viewer: right frame,
+  // real click, valid path): open a note, or show the graph.
+  useEffect(() => {
+    const onOpenNote = (e: Event) => {
+      const detail = e instanceof CustomEvent ? (e.detail as unknown) : null
+      const path = typeof detail === 'object' && detail !== null ? (detail as { path?: unknown }).path : null
+      if (typeof path === 'string') void navigateToViewRef.current({ type: 'file', path })
+    }
+    const onShowGraph = () => { void navigateToViewRef.current({ type: 'graph' }) }
+    window.addEventListener('rowboat:open-note', onOpenNote)
+    window.addEventListener('rowboat:show-in-graph', onShowGraph)
+    return () => {
+      window.removeEventListener('rowboat:open-note', onOpenNote)
+      window.removeEventListener('rowboat:show-in-graph', onShowGraph)
+    }
+  }, [])
 
   // Handle image upload for the markdown editor
   const handleImageUpload = useCallback(async (file: File): Promise<string | null> => {

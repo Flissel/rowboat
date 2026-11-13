@@ -296,4 +296,20 @@ describe("filesystem files", () => {
     expect(await fs.readFile(path.join(k, "Notiz.md"), "utf8")).toBe("[[Konzepte/neu.html|Konzept]]");
     expect(await fs.readFile(path.join(k, "Anderes.html"), "utf8")).toBe("<p>[[Konzepte/neu.html]]</p>");
   });
+
+  it("writeText and editText return workspaceRelPath only for files inside the workspace", async () => {
+    const files = await loadFiles();
+    const rel = "knowledge/Konzepte/k.html";
+    const written = await files.writeText(rel, "<p>eins</p>");
+    expect(written.workspaceRelPath).toBe(rel);
+    const edited = await files.editText(rel, "eins", "zwei");
+    expect(edited).toMatchObject({ success: true, workspaceRelPath: rel });
+
+    const outside = path.join(tmpDir, "outside.html");
+    const outWritten = await files.writeText(outside, "<p>x</p>");
+    expect(outWritten).not.toHaveProperty("workspaceRelPath");
+    const outEdited = await files.editText(outside, "x", "y");
+    expect(outEdited).toMatchObject({ success: true });
+    expect(outEdited).not.toHaveProperty("workspaceRelPath");
+  });
 });
