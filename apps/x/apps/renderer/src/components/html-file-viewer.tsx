@@ -18,7 +18,7 @@ import {
   type Engaged,
   type PendingRequest,
 } from '@/lib/konzept-flaeche'
-import { AlertCircleIcon, ExternalLinkIcon, FileTextIcon, Loader2Icon } from 'lucide-react'
+import { AlertCircleIcon, FileTextIcon, Loader2Icon } from 'lucide-react'
 
 const MAX_SIZE_BYTES = 5 * 1024 * 1024
 /** An existence check that has not settled after this long releases the bridge; its late result is discarded. */
@@ -299,16 +299,7 @@ function FlaecheViewer({ path, active }: { path: string; active: boolean }) {
         <p className="text-xs">
           {state.sizeMB.toFixed(1)} MB — preview limit is {(MAX_SIZE_BYTES / (1024 * 1024)).toFixed(0)} MB.
         </p>
-        <button
-          type="button"
-          onClick={() => {
-            void source.open({ path })
-          }}
-          className="inline-flex items-center gap-1.5 rounded-md border border-border bg-background px-3 py-1.5 text-xs font-medium text-foreground hover:bg-accent"
-        >
-          <ExternalLinkIcon className="size-3.5" />
-          Open in system
-        </button>
+        {/* No "Open in system" (R50): it would open knowledge HTML outside every protection, like R39. */}
       </div>
     )
   }

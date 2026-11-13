@@ -147,7 +147,7 @@ describe('konzept', () => {
       'knowledge/a.html', 'knowledge/a.HTML', 'knowledge/a.html?x=1', 'knowledge/a.html#y', 'knowledge/a%2Ehtml',
       'knowledge/a.html.', 'Knowledge/K/a.htm', '%6Bnowledge/a.html', 'knowledge%2Fa.html', 'knowledge%5Ca.html',
       '/knowledge/a.html', 'knowledge./a.html', 'knowledge/a.xhtml', 'knowledge/a.png', 'knowledge/seite',
-      'knowledge/a.pdf', 'knowledge', 'knowledge/', './knowledge/a', 'bg-tasks/../knowledge/a.html', 'bg-tasks/%2e%2e/x',
+      'knowledge', 'knowledge/', './knowledge/a', 'bg-tasks/../knowledge/a.html', 'bg-tasks/%2e%2e/x',
       'x/..', 'knowledge/%E0%A4%A', 'bg-tasks/%ZZ',
     ]) {
       expect(isKnowledgeFrameUrl(`app://workspace/${p}`), p).toBe(true)
@@ -163,6 +163,29 @@ describe('konzept', () => {
     ]) {
       expect(isKnowledgeFrameUrl(u), u).toBe(false)
     }
+  })
+  it('PDFs unter knowledge/ bleiben frei (R49), Umgehungen über den Namen nicht', () => {
+    for (const p of ['knowledge/a.pdf', 'knowledge/K/Bericht.PDF', 'knowledge/a.pdf?v=2', 'knowledge/a.pdf#page=3',
+      'knowledge/a%2Epdf', 'knowledge/a.pdf.', 'Knowledge/x%20y.pdf', 'knowledge%2Fa.pdf']) {
+      expect(isKnowledgeFrameUrl(`app://workspace/${p}`), p).toBe(false)
+      expect(frameNavigationDecision(`app://workspace/${p}`), p).toBe('allow')
+    }
+    for (const p of ['knowledge/a.pdf/x.html', 'knowledge/a.pdf.html', 'knowledge/a.pdf%3Fx.html', 'knowledge/a.pdf/..',
+      'knowledge/a.pdf%2F..', 'knowledge/a%2Epdf%00', 'knowledge/%ZZ.pdf', 'knowledge/a.pdfx']) {
+      expect(isKnowledgeFrameUrl(`app://workspace/${p}`), p).toBe(true)
+    }
+    // ausgeliefert als Wissens-HTML (Content-Type text/html) oder laut Zustand eingesperrt: gesperrt trotz Namen
+    expect(frameNavigationDecision('app://workspace/knowledge/a.pdf', true)).toBe('block')
+    expect(frameNavigationDecision('app://workspace/knowledge/a.pdf', false, true)).toBe('block')
+    expect(workspaceResponseDecision({ relPaths: ['knowledge/a.pdf'], contentType: 'text/html' })).toBe('konzept')
+    expect(workspaceResponseDecision({ relPaths: ['knowledge/a.pdf'], contentType: 'application/pdf' })).toBe('unveraendert')
+    // Rückhalt: Anfragen des PDF-Rahmens (Betrachter, chrome-extension:) laufen wie bisher
+    const pdf = 'app://workspace/knowledge/a.pdf'
+    expect(backstopDecision({
+      url: 'chrome-extension://mhjfbmdgcfjbbpaeojofohoefgiehjai/index.html', resourceType: 'subFrame', frameId: 7,
+      frameUrl: pdf, ancestorIds: [1], attached: true, chainConfinedByUrl: isKnowledgeFrameUrl(pdf),
+      confined: new Set<number>(), recentlyConfined: new Map<number, number>(), now: 1000, appUrl: null,
+    })).toBe(false)
   })
   it('isKnowledgeScopePath: erstes Segment knowledge, bei .. im Zweifel ja', () => {
     expect(isKnowledgeScopePath('knowledge/a.html')).toBe(true)
@@ -202,7 +225,8 @@ describe('konzept', () => {
   })
   it('isConfinedCommit: knowledge/, ausgeliefert oder Kind eines eingesperrten Rahmens', () => {
     expect(isConfinedCommit('app://workspace/knowledge/a.html', false, false)).toBe(true)
-    expect(isConfinedCommit('app://workspace/knowledge/a.pdf', false, false)).toBe(true)
+    expect(isConfinedCommit('app://workspace/knowledge/a.pdf', false, false)).toBe(false) // R49
+    expect(isConfinedCommit('app://workspace/knowledge/a.pdf', true, false)).toBe(true) // als Wissens-HTML ausgeliefert
     expect(isConfinedCommit('app://workspace/knowledge/seite', false, false)).toBe(true)
     expect(isConfinedCommit('about:srcdoc', false, true)).toBe(true)
     expect(isConfinedCommit('app://workspace/bg-tasks/l.html', true, false)).toBe(true)
@@ -273,6 +297,10 @@ describe('konzept', () => {
     // eingesperrt nur nach Zustand (Rahmen hat sich selbst nach about:blank/außen navigiert) oder über einen Vorfahr
     expect(backstopDecision({ ...basis, chainConfinedByUrl: false, frameUrl: 'about:blank' })).toBe(true)
     expect(backstopDecision({ ...basis, chainConfinedByUrl: false, frameUrl: 'https://example.com/x', url: 'https://example.com/y' })).toBe(true)
+    // R48: "eigenes Dokument" nur für eine Adresse unter knowledge/
+    expect(backstopDecision({ ...basis, chainConfinedByUrl: false, frameUrl: 'https://x/', url: 'https://x/?d=1' })).toBe(true)
+    expect(backstopDecision({ ...basis, chainConfinedByUrl: false, frameUrl: 'https://x/', url: 'https://x/' })).toBe(true)
+    expect(backstopDecision({ ...basis, frameUrl: `${k}?v=3`, url: `${k}?v=4` })).toBe(false)
     expect(backstopDecision({ ...basis, chainConfinedByUrl: false, frameId: 8, frameUrl: 'about:srcdoc', ancestorIds: [7, 1], url: 'app://-/x.js' })).toBe(true)
     expect(backstopDecision({ ...basis, chainConfinedByUrl: false, ...kuerzlich, now: 1000 + CONFINED_GRACE_MS })).toBe(true)
     // bekannter, angehängter, nicht eingesperrter Rahmen: alles frei, auch bei offenem Konzept

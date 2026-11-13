@@ -370,10 +370,14 @@ export function isKnowledgeFrameUrl(url: string): boolean {
   } catch {
     return true
   }
-  return [roh, dekodiert].some((pfad) => {
-    const segs = segmente(pfad)
-    return segs.includes('..') || (segs.length >= 1 && segName(segs[0]) === 'knowledge')
-  })
+  const formen = [segmente(roh), segmente(dekodiert)]
+  if (formen.some((segs) => segs.includes('..'))) return true
+  if (!formen.some((segs) => segs.length >= 1 && segName(segs[0]) === 'knowledge')) return false
+  // R49: PDFs zeigt Chromiums eingebauter Betrachter (chrome-extension:) im Rahmen der Ansicht; sie bleiben wie vor
+  // der Konzept-Fläche. Der dekodierte letzte Name entscheidet (wie beim Ausliefern). Eine Datei x.pdf geht nach Namen
+  // als application/pdf hinaus; käme sie je als text/html, bekäme sie die Regel und stünde im Ausgeliefert-Register.
+  const letzte = formen[1][formen[1].length - 1]
+  return !(formen[1].length >= 2 && segName(letzte).endsWith('.pdf'))
 }
 
 /** Schlüssel, unter dem ein ausgeliefertes Dokument wiedererkannt wird: die Adresse ohne Fragment. */
@@ -566,7 +570,8 @@ export function noteFramesAttached(state: BackstopState, attachedIds: ReadonlySe
  * 1. Laden eines Hauptrahmens, `data:`/`blob:`/`about:`: durchlassen.
  * 2. Eingesperrte Kette (der Rahmen oder ein Vorfahr zeigt eine Adresse unter knowledge/, `chainConfinedByUrl`, oder
  *    steht in `confined`/nicht abgelaufen in `recentlyConfined`): nur das eigene Dokument des Rahmens (`frameUrl`,
- *    ohne Query und Fragment verglichen) ist erlaubt, sonst nichts – auch keine andere app://-Adresse.
+ *    ohne Query und Fragment verglichen, und nur wenn `frameUrl` unter knowledge/ liegt, R48) ist erlaubt, sonst
+ *    nichts – auch keine andere app://-Adresse.
  * 3. Rahmen identifiziert, lesbar, im Baum und nicht eingesperrt: durchlassen.
  * 4. Sonst (nicht identifizierbar, nicht lesbar, nicht im Baum): `app:`, `devtools:` und der eigene
  *    Entwicklungsserver (`appUrl`, gleicher Host) bleiben frei; alles andere wird abgebrochen, solange die Ansicht
@@ -590,7 +595,9 @@ export function backstopDecision(r: {
   if (s !== null && DOKUMENT_SCHEMATA.has(s)) return false
   const kette = r.frameId === null ? [] : [r.frameId, ...r.ancestorIds]
   if (r.chainConfinedByUrl || isFrameChainConfined(kette, r.confined, r.recentlyConfined, r.now)) {
-    return !(r.frameUrl !== null && ohneQueryUndFragment(r.url) === ohneQueryUndFragment(r.frameUrl))
+    // R48: "eigenes Dokument" nur für eine Rahmen-Adresse unter app://workspace/knowledge/, nie für eine Netz-Adresse
+    if (r.frameUrl !== null && isKnowledgeFrameUrl(r.frameUrl) && ohneQueryUndFragment(r.url) === ohneQueryUndFragment(r.frameUrl)) return false
+    return true
   }
   if (r.frameId !== null && r.attached) return false
   if (s !== null && UNBEKANNT_FREI.has(s)) return false
