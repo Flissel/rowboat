@@ -54,5 +54,5 @@ export const wikiLabel = (wikiPath: string) => {
   if (!basePath && heading) return heading
 
   const name = (basePath || normalized).split('/').pop() || normalized
-  return name.replace(/\.(md|html?|xhtml)$/i, '')
+  return name.replace(/\.md$/i, '')
 }

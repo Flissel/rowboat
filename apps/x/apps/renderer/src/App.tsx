@@ -94,7 +94,7 @@ import { matchBillingError, type BillingErrorMatch } from "@/lib/billing-error"
 import { dispatchCreditExhausted, dispatchCreditReplenished } from "@/lib/credit-status"
 import { ensureMarkdownExtension, normalizeWikiPath, splitWikiFragment, stripKnowledgePrefix, toKnowledgePath, wikiLabel } from '@/lib/wiki-links'
 import { buildHierarchyGraph, graphFileData, parseVaultMap, vaultMapNodeId, type NodeInfo } from '@/lib/graph-hierarchy'
-import { graphHtmlData, graphNodeLabel, knowledgeHtmlFiles } from '@/lib/graph-html'
+import { canCreateWikiTarget, graphHtmlData, graphNodeLabel, knowledgeHtmlFiles, resolveWikiTarget } from '@/lib/graph-html'
 import { splitFrontmatter, joinFrontmatter } from '@/lib/frontmatter'
 import { extractConferenceLink } from '@/lib/calendar-event'
 import { OnboardingModal } from '@/components/onboarding'
@@ -7005,6 +7005,14 @@ function App() {
       if (basenameMatches.length === 1) return toKnowledgePath(basenameMatches[0])
     }
 
+    // Extensionless link without x.md: exactly one x.html/.htm/.xhtml wins.
+    const byLower = new Map(knowledgeGraphFiles.map((f) => {
+      const p = toKnowledgePath(f)
+      return [p ? p.toLowerCase() : '', p] as const
+    }))
+    const htmlHit = resolveWikiTarget(basePath, (p) => byLower.has(p.toLowerCase()))
+    if (htmlHit && htmlHit !== toKnowledgePath(basePath)) return byLower.get(htmlHit.toLowerCase()) ?? htmlHit
+
     return toKnowledgePath(basePath)
   }, [knowledgeGraphFiles])
 
@@ -7014,6 +7022,8 @@ function App() {
     try {
       const exists = await window.ipc.invoke('workspace:exists', { path: resolvedPath })
       if (!exists.exists) {
+        // Never write Markdown into an HTML path.
+        if (!canCreateWikiTarget(resolvedPath)) return null
         const title = wikiLabel(wikiPath) || 'New Note'
         await window.ipc.invoke('workspace:writeFile', {
           path: resolvedPath,
@@ -7093,7 +7103,7 @@ function App() {
       } catch {
         vaultMap = undefined
       }
-      const { edges: typedEdges, info: hierarchyInfo } = buildHierarchyGraph(contents, nodeSet, toKnowledgePath, vaultMap)
+      const { edges: typedEdges, info: hierarchyInfo } = buildHierarchyGraph(contents, nodeSet, (raw) => resolveWikiTarget(raw, (p) => nodeSet.has(p)), vaultMap)
       edges.push(...typedEdges)
 
       const degreeMap = new Map<string, number>()
