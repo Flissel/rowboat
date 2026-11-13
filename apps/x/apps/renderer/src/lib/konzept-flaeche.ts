@@ -124,25 +124,37 @@ export function nextPendingRequest(
   return state
 }
 
+/** So lange (Date.now) nach "Abbrechen" ignoriert die Brücke alle Anfragen der Seite (gegen Dauerschleifen). */
+export const cancelQuietMs = 10_000
+
 /**
- * Nimmt die Brücke eine neue Anfrage der Seite an? Nein, solange eine Existenzprüfung läuft; nein, solange eine
- * Rückfrage offen ist, außer sie ist älter als 10 s (dann darf sie ersetzt werden). Es wird nichts eingereiht.
+ * Nimmt die Brücke eine neue Anfrage der Seite an? Nein, solange eine Existenzprüfung läuft; nein bis 10 s nach
+ * "Abbrechen" (`cancelledAt`, Date.now; null = nicht abgebrochen); nein, solange eine Rückfrage offen ist, außer sie
+ * ist älter als 10 s (dann darf sie ersetzt werden). Es wird nichts eingereiht.
  */
-export function canAcceptRequest(state: PendingRequest | null, checkInFlight: boolean, now: number): boolean {
+export function canAcceptRequest(
+  state: PendingRequest | null,
+  checkInFlight: boolean,
+  now: number,
+  cancelledAt: number | null,
+): boolean {
   if (checkInFlight) return false
+  if (cancelledAt !== null && now - cancelledAt <= cancelQuietMs) return false
   return state === null || now - state.at > pendingMaxAgeMs
 }
 
 /** Moment (performance.now), ab dem die Bestätigung einer bestimmten Anfrage tatsächlich gemalt war. */
 export type Armed = { id: number; armedAt: number }
+/** Moment (performance.now), in dem der Nutzer "Öffnen" für eine Anfrage angesteuert hat (Zeiger hinein / Tastaturfokus). */
+export type Engaged = { id: number; at: number }
 
-/** "Öffnen" gilt nur für die Anfrage, die gemalt wurde, und erst `confirmDelayMs` nach dem ersten Bild. */
-export function canConfirm(state: PendingRequest | null, armed: Armed | null, now: number): boolean {
-  if (state === null || armed === null || armed.id !== state.id) return false
+/**
+ * "Öffnen" gilt nur für die Anfrage, die gemalt wurde, erst `confirmDelayMs` nach dem ersten Bild, und nur, wenn der
+ * Nutzer den Knopf NACH Ablauf dieser Sperre angesteuert hat. Ein Zeiger, der schon dort ruhte, muss hinaus und zurück.
+ */
+export function canConfirm(state: PendingRequest | null, armed: Armed | null, engaged: Engaged | null, now: number): boolean {
+  if (state === null || armed === null || engaged === null) return false
+  if (armed.id !== state.id || engaged.id !== state.id) return false
+  if (engaged.at < armed.armedAt + confirmDelayMs) return false
   return now - armed.armedAt >= confirmDelayMs
-}
-
-/** Passt der Host sicher in die Kopfzeile? Sonst steht dort "(Adresse unten)" und der Host im Detailbereich. */
-export function hostFitsRow(host: string): boolean {
-  return host.length > 0 && host.length <= 30
 }

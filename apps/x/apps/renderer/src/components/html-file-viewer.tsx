@@ -7,8 +7,6 @@ import {
   cacheBustedUrl,
   canAcceptRequest,
   canConfirm,
-  confirmDelayMs,
-  hostFitsRow,
   konzeptHinweise,
   linkOpenRequest,
   nextPendingRequest,
@@ -16,11 +14,14 @@ import {
   reloadDebounceMs,
   workspaceEventTouches,
   type Armed,
+  type Engaged,
   type PendingRequest,
 } from '@/lib/konzept-flaeche'
 import { AlertCircleIcon, ExternalLinkIcon, FileTextIcon, Loader2Icon } from 'lucide-react'
 
 const MAX_SIZE_BYTES = 5 * 1024 * 1024
+/** An existence check that has not settled after this long releases the bridge; its late result is discarded. */
+const EXISTENCE_CHECK_TIMEOUT_MS = 5000
 
 type ViewerState =
   | { kind: 'loading' }
@@ -59,13 +60,15 @@ function FlaecheViewer({ path, active }: { path: string; active: boolean }) {
   const [fileSize, setFileSize] = useState(0)
   const [pending, setPending] = useState<PendingRequest | null>(null)
   const [armed, setArmed] = useState<Armed | null>(null)
-  const [, setTick] = useState(0)
-  // Mirrors of state for the message listener (no stale closures), a request id counter, a flag for a
-  // running existence check, and a generation that changes when the frame is remounted or hidden.
+  const [engaged, setEngaged] = useState<Engaged | null>(null)
+  // Mirrors of state for the message listener (no stale closures), a request id counter, the token of a
+  // running existence check (null = none), the Date.now of the last "Abbrechen" (null = none since the last
+  // reload / path change), and a generation that changes when the frame is remounted or hidden.
   const pendingRef = useRef<PendingRequest | null>(null)
   pendingRef.current = pending
   const requestIdRef = useRef(0)
-  const checkInFlightRef = useRef(false)
+  const checkInFlightRef = useRef<object | null>(null)
+  const cancelledAtRef = useRef<number | null>(null)
   const generationRef = useRef(0)
   const iframeRef = useRef<HTMLIFrameElement | null>(null)
   const lastPathRef = useRef<string | null>(null)
@@ -78,6 +81,7 @@ function FlaecheViewer({ path, active }: { path: string; active: boolean }) {
     lastPathRef.current = path
     if (!isReload) {
       generationRef.current += 1
+      cancelledAtRef.current = null
       setPending(null)
       setState({ kind: 'loading' })
       setIframeLoaded(false)
@@ -160,6 +164,7 @@ function FlaecheViewer({ path, active }: { path: string; active: boolean }) {
     if (!stale || !active) return
     setStale(false)
     generationRef.current += 1
+    cancelledAtRef.current = null
     setPending((p) => nextPendingRequest(p, { type: 'reset' }))
     setVersion((v) => v + 1)
   }, [stale, active])
@@ -176,7 +181,8 @@ function FlaecheViewer({ path, active }: { path: string; active: boolean }) {
   // anything themselves). One listener per visible viewer, only from this frame's own window. Neither
   // a web link nor a note opens on a message: both only show the confirmation in the header row, and
   // only a click on its "Öffnen" button opens them. At most one request at a time: while one is pending
-  // (younger than 10 s) or an existence check runs, further messages are ignored, not queued.
+  // (younger than 10 s) or an existence check runs, further messages are ignored, not queued; for 10 s
+  // after "Abbrechen" every request is ignored.
   useEffect(() => {
     if (!active) return
     const onMessage = (e: MessageEvent) => {
@@ -185,7 +191,7 @@ function FlaecheViewer({ path, active }: { path: string; active: boolean }) {
       const link = linkOpenRequest(e.data)
       const note = link ? null : noteOpenRequest(e.data)
       if (!link && !note) return
-      if (!canAcceptRequest(pendingRef.current, checkInFlightRef.current, Date.now())) return
+      if (!canAcceptRequest(pendingRef.current, checkInFlightRef.current !== null, Date.now(), cancelledAtRef.current)) return
       if (link) {
         const id = ++requestIdRef.current
         setPending((p) => nextPendingRequest(p, { type: 'request', id, kind: 'link', value: link, now: Date.now() }))
@@ -193,18 +199,31 @@ function FlaecheViewer({ path, active }: { path: string; active: boolean }) {
       }
       if (!note) return
       const generation = generationRef.current
-      checkInFlightRef.current = true
-      source
-        .stat({ path: note })
+      // The flag is always released: on settle, on a synchronous throw (turned into a rejection), or after
+      // EXISTENCE_CHECK_TIMEOUT_MS -- then the generation is bumped so a late result is discarded. The token
+      // keeps a late settle from releasing a newer check.
+      const check = {}
+      checkInFlightRef.current = check
+      const release = () => {
+        if (checkInFlightRef.current === check) checkInFlightRef.current = null
+      }
+      const timeout = setTimeout(() => {
+        if (checkInFlightRef.current !== check) return
+        generationRef.current += 1
+        release()
+      }, EXISTENCE_CHECK_TIMEOUT_MS)
+      Promise.resolve()
+        .then(() => source.stat({ path: note }))
         .then((st) => {
-          // Discard if the frame was remounted/reloaded or the viewer hidden meanwhile.
+          // Discard if the frame was remounted/reloaded, the viewer hidden or the check timed out meanwhile.
           if (generation !== generationRef.current || st.kind !== 'file') return
           const id = ++requestIdRef.current
           setPending((p) => nextPendingRequest(p, { type: 'request', id, kind: 'note', value: note, now: Date.now() }))
         })
         .catch(() => {})
         .finally(() => {
-          checkInFlightRef.current = false
+          clearTimeout(timeout)
+          release()
         })
     }
     window.addEventListener('message', onMessage)
@@ -228,12 +247,11 @@ function FlaecheViewer({ path, active }: { path: string; active: boolean }) {
       cancelAnimationFrame(raf2)
     }
   }, [pendingId])
-  const armedAt = armed?.armedAt
-  useEffect(() => {
-    if (armedAt === undefined) return
-    const timer = setTimeout(() => setTick((n) => n + 1), confirmDelayMs + 20)
-    return () => clearTimeout(timer)
-  }, [armedAt])
+  // After the lock, "Öffnen" also needs the user to steer to it (pointer enters it, or keyboard focus with
+  // :focus-visible). Every such moment is recorded; canConfirm only counts one after armedAt + confirmDelayMs,
+  // so a cursor already resting where the button appeared must leave and come back. Recording it re-renders,
+  // which is what turns the button active (no timer needed).
+  const engage = (id: number) => setEngaged({ id, at: performance.now() })
 
   const title = useMemo(() => {
     const name = path.split('/').pop() ?? path
@@ -248,6 +266,8 @@ function FlaecheViewer({ path, active }: { path: string; active: boolean }) {
       return ''
     }
   }, [pending])
+  // Visual state only; the click handler checks again at click time.
+  const canOpen = canConfirm(pending, armed, engaged, performance.now())
 
   if (state.kind === 'error') {
     return (
@@ -301,23 +321,29 @@ function FlaecheViewer({ path, active }: { path: string; active: boolean }) {
           height never changes, so the page does not move, and the buttons never sit over page pixels. */}
       {pending ? (
         <div key={pending.id} className="flex h-10 shrink-0 items-center gap-2 border-b border-border bg-muted px-3 text-xs text-foreground">
+          {/* Only the question: never a host or note name here (it could be clipped into a spoof). The full
+              host and address / path are in the detail area below. */}
           <p className="min-w-0 flex-1 overflow-hidden whitespace-nowrap">
             <span className="font-medium">{pending.kind === 'link' ? 'Link öffnen?' : 'Notiz öffnen?'}</span>{' '}
-            {pending.kind === 'link' ? (
-              hostFitsRow(pendingHost) ? (
-                <span className="font-semibold">{pendingHost}</span>
-              ) : (
-                <span>(Adresse unten)</span>
-              )
-            ) : (
-              <span>(Pfad unten)</span>
-            )}
+            <span>{pending.kind === 'link' ? '(Adresse unten)' : '(Pfad unten)'}</span>
           </p>
           <button
             type="button"
-            disabled={!canConfirm(pending, armed, performance.now())}
+            // Not `disabled`: a disabled button can neither take keyboard focus nor reliably report the pointer
+            // entering it. It is inactive (aria-disabled, greyed, click ignored) until canConfirm allows it.
+            aria-disabled={!canOpen}
+            onPointerEnter={() => engage(pending.id)}
+            onFocus={(e) => {
+              let byKeyboard = false
+              try {
+                byKeyboard = e.currentTarget.matches(':focus-visible')
+              } catch {
+                byKeyboard = false
+              }
+              if (byKeyboard) engage(pending.id)
+            }}
             onClick={() => {
-              if (!canConfirm(pending, armed, performance.now())) return
+              if (!canConfirm(pending, armed, engaged, performance.now())) return
               const { kind, value } = pending
               setPending((p) => nextPendingRequest(p, { type: 'open' }))
               if (kind === 'link') {
@@ -327,13 +353,21 @@ function FlaecheViewer({ path, active }: { path: string; active: boolean }) {
                 window.dispatchEvent(new CustomEvent('rowboat:open-note', { detail: { path: value } }))
               }
             }}
-            className="shrink-0 rounded-md border border-border bg-background px-2.5 py-1 font-medium hover:bg-accent disabled:opacity-50"
+            className={
+              canOpen
+                ? 'shrink-0 rounded-md border border-border bg-background px-2.5 py-1 font-medium hover:bg-accent'
+                : 'shrink-0 cursor-not-allowed rounded-md border border-border bg-background px-2.5 py-1 font-medium opacity-50'
+            }
           >
             Öffnen
           </button>
           <button
             type="button"
-            onClick={() => setPending((p) => nextPendingRequest(p, { type: 'cancel' }))}
+            onClick={() => {
+              // A looping page would re-post at once and keep the header in confirmation mode: quiet for 10 s.
+              cancelledAtRef.current = Date.now()
+              setPending((p) => nextPendingRequest(p, { type: 'cancel' }))
+            }}
             className="shrink-0 rounded-md border border-border bg-background px-2.5 py-1 font-medium hover:bg-accent"
           >
             Abbrechen

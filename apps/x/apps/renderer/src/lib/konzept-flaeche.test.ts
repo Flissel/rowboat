@@ -3,7 +3,6 @@ import {
   cacheBustedUrl,
   canAcceptRequest,
   canConfirm,
-  hostFitsRow,
   konzeptHinweise,
   konzeptPathFromTool,
   linkOpenRequest,
@@ -137,29 +136,39 @@ describe('konzept-flaeche', () => {
 
   it('nimmt höchstens eine Anfrage zur Zeit an', () => {
     const a = nextPendingRequest(null, req(1, 1000))
-    expect(canAcceptRequest(null, false, 1000)).toBe(true)
-    expect(canAcceptRequest(null, true, 1000)).toBe(false)
-    expect(canAcceptRequest(a, false, 5000)).toBe(false)
-    expect(canAcceptRequest(a, false, 11000)).toBe(false)
-    expect(canAcceptRequest(a, false, 11001)).toBe(true)
-    expect(canAcceptRequest(a, true, 20000)).toBe(false)
+    expect(canAcceptRequest(null, false, 1000, null)).toBe(true)
+    expect(canAcceptRequest(null, true, 1000, null)).toBe(false)
+    expect(canAcceptRequest(a, false, 5000, null)).toBe(false)
+    expect(canAcceptRequest(a, false, 11000, null)).toBe(false)
+    expect(canAcceptRequest(a, false, 11001, null)).toBe(true)
+    expect(canAcceptRequest(a, true, 20000, null)).toBe(false)
   })
 
-  it('sperrt "Öffnen" 700 ms ab dem gemalten Bild dieser Anfrage', () => {
+  it('hört nach "Abbrechen" 10 s lang nicht auf die Seite', () => {
+    expect(canAcceptRequest(null, false, 1000, 1000)).toBe(false)
+    expect(canAcceptRequest(null, false, 6000, 1000)).toBe(false)
+    expect(canAcceptRequest(null, false, 11000, 1000)).toBe(false)
+    expect(canAcceptRequest(null, false, 11001, 1000)).toBe(true)
+    // Ruhezeit vorbei, aber Existenzprüfung läuft: weiter nein
+    expect(canAcceptRequest(null, true, 20000, 1000)).toBe(false)
+  })
+
+  it('sperrt "Öffnen" 700 ms ab dem gemalten Bild dieser Anfrage und verlangt danach bewusstes Ansteuern', () => {
     const a = nextPendingRequest(null, req(7, 1000))
-    expect(canConfirm(null, { id: 7, armedAt: 0 }, 5000)).toBe(false)
-    expect(canConfirm(a, null, 5000)).toBe(false) // noch nicht gemalt
-    expect(canConfirm(a, { id: 7, armedAt: 100 }, 799)).toBe(false)
-    expect(canConfirm(a, { id: 7, armedAt: 100 }, 800)).toBe(true)
+    expect(canConfirm(null, { id: 7, armedAt: 0 }, { id: 7, at: 900 }, 5000)).toBe(false)
+    expect(canConfirm(a, null, { id: 7, at: 900 }, 5000)).toBe(false) // noch nicht gemalt
+    // gemalt + 700 ms, aber nicht angesteuert
+    expect(canConfirm(a, { id: 7, armedAt: 100 }, null, 5000)).toBe(false)
+    // angesteuert, bevor die Sperre ablief (z. B. Zeiger ruhte schon dort): nein
+    expect(canConfirm(a, { id: 7, armedAt: 100 }, { id: 7, at: 799 }, 5000)).toBe(false)
+    // angesteuert nach Ablauf der Sperre: ja
+    expect(canConfirm(a, { id: 7, armedAt: 100 }, { id: 7, at: 800 }, 800)).toBe(true)
+    expect(canConfirm(a, { id: 7, armedAt: 100 }, { id: 7, at: 2000 }, 2500)).toBe(true)
+    // angesteuert für eine andere Anfrage: nein
+    expect(canConfirm(a, { id: 7, armedAt: 100 }, { id: 6, at: 2000 }, 2500)).toBe(false)
     // Bild einer anderen (älteren) Anfrage schaltet die neue nicht frei
-    expect(canConfirm(a, { id: 6, armedAt: 0 }, 5000)).toBe(false)
+    expect(canConfirm(a, { id: 6, armedAt: 0 }, { id: 7, at: 2000 }, 5000)).toBe(false)
     // spätes Bild: Sperre zählt ab dem Bild, nicht ab der Anfrage
-    expect(canConfirm(a, { id: 7, armedAt: 4000 }, 4500)).toBe(false)
-  })
-
-  it('zeigt den Host in der Kopfzeile nur, wenn er sicher passt', () => {
-    expect(hostFitsRow('example.com')).toBe(true)
-    expect(hostFitsRow('')).toBe(false)
-    expect(hostFitsRow('a.b.c.d.e.f.g.h.i.j.k.l.m.n.o.p.example.com')).toBe(false)
+    expect(canConfirm(a, { id: 7, armedAt: 4000 }, { id: 7, at: 4500 }, 4500)).toBe(false)
   })
 })
