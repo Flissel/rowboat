@@ -1,4 +1,4 @@
-// Ansicht fuer alles ausser Arbeitsverzeichnis-Dateien der Desktop-App (Web-Fassung, Spaces, lokale Vorschau):
+// Ansicht fuer alles ausser Wissens-HTML der Desktop-App (Web-Fassung, Spaces, lokale Vorschau, Hintergrund-Berichte):
 // unveraendert wie vor der Konzept-Flaeche (sandbox mit allow-popups, keine Kopfzeile, kein Neuladen, keine Nachrichtenbruecke).
 import { useFileViewerSource } from './file-viewer-source'
 import { useEffect, useMemo, useState } from 'react'

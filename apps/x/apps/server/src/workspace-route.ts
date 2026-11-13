@@ -1,7 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { Hono } from 'hono';
-import { htmlResponseHeaders, shouldApplyHtmlHeaders } from '@x/shared/dist/konzept.js';
+import { htmlResponseHeaders, workspaceResponseDecision } from '@x/shared/dist/konzept.js';
 
 // GET /workspace/{rel-path} — the network twin of the Electron app://workspace
 // protocol (apps/main/src/main.ts): serves note attachments/media to paired
@@ -52,9 +52,14 @@ export function createWorkspaceRoutes(resolveWorkspacePath: (relPath: string) =>
       if (!stats.isFile()) return c.text('Not Found', 404);
       const data = await fs.readFile(realTarget);
       const type = CONTENT_TYPES[path.extname(absPath).toLowerCase()] ?? 'application/octet-stream';
-      // HTML aus dem Arbeitsverzeichnis: Typ, Kein-Netz-Regel und nosniff. Entscheidung ueber
-      // beide Namen (angefragt, aufgeloester Symlink) und den abgeleiteten Content-Type.
-      const htmlHeaders = shouldApplyHtmlHeaders([relPath, realTarget], type) ? htmlResponseHeaders() : null;
+      // Wissens-HTML (R38): Typ, Kein-Netz-Regel, nosniff. Entscheidung ueber beide Namen (angefragt,
+      // aufgeloestes Ziel relativ zur aufgeloesten Wurzel) und den abgeleiteten Content-Type. Alles
+      // ausserhalb von knowledge/ (z. B. Hintergrund-Berichte) geht wie vor der Konzept-Flaeche hinaus.
+      const realRel = path.relative(realRoot, realTarget);
+      const htmlHeaders =
+        workspaceResponseDecision({ relPaths: [relPath, realRel], contentType: type }) === 'konzept'
+          ? htmlResponseHeaders()
+          : null;
       return c.body(new Uint8Array(data), 200, {
         'Content-Type': type,
         'Content-Length': String(stats.size),

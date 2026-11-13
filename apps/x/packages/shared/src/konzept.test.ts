@@ -9,11 +9,19 @@ import {
   isKanalPath,
   isKnowledgeHtmlPath,
   readKonzept,
-  workspaceHtmlHeaders,
   htmlResponseHeaders,
   isHtmlPath,
+  isKnowledgeFrameUrl,
+  isKnowledgeScopePath,
   needsNosniffOnly,
   shouldApplyHtmlHeaders,
+  backstopDecision,
+  createBackstopState,
+  isConfinedCommit,
+  noteFrameCommit,
+  noteFramesAttached,
+  CONFINED_GRACE_MS,
+  workspaceResponseDecision,
 } from './konzept.js'
 
 const SEITE = (block: string) => `<!doctype html><html><head><title>Mein &amp; Konzept</title>
@@ -76,12 +84,29 @@ describe('konzept', () => {
     expect(isKanalPath('knowledge/kanal/x.html')).toBe(true)
     expect(isKanalPath('knowledge/Kanalarbeit/x.html')).toBe(false)
   })
-  it('liefert Köpfe und Navigationsentscheid', () => {
-    expect(workspaceHtmlHeaders('knowledge/a.html')?.['Content-Security-Policy']).toBe(WORKSPACE_HTML_CSP)
-    expect(workspaceHtmlHeaders('knowledge/a.md')).toBeNull()
-    expect(frameNavigationDecision('app://workspace/knowledge/a.html', 'https://example.com/?d=1')).toBe('block')
-    expect(frameNavigationDecision('app://workspace/knowledge/a.html', 'app://workspace/knowledge/b.html')).toBe('block')
-    expect(frameNavigationDecision('https://www.youtube.com/embed/x', 'https://www.youtube.com/y')).toBe('allow')
+  it('die Regel lautet wörtlich wie in R40', () => {
+    expect(WORKSPACE_HTML_CSP).toBe(
+      "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:; font-src data:; media-src data: blob:; form-action 'none'; base-uri 'none'; sandbox allow-scripts; webrtc 'block'",
+    )
+    expect(htmlResponseHeaders()).toEqual({
+      'Content-Type': 'text/html; charset=utf-8',
+      'Content-Security-Policy': WORKSPACE_HTML_CSP,
+      'X-Content-Type-Options': 'nosniff',
+      'X-DNS-Prefetch-Control': 'off',
+    })
+  })
+  it('Navigationsentscheid: Rahmen unter knowledge/ gesperrt, alles andere wie vorher', () => {
+    expect(frameNavigationDecision('app://workspace/knowledge/a.html')).toBe('block')
+    // R43: ohne Blick auf die Endung
+    expect(frameNavigationDecision('app://workspace/knowledge/seite')).toBe('block')
+    expect(frameNavigationDecision('app://workspace/knowledge/a.png?f=a.html')).toBe('block')
+    expect(frameNavigationDecision('https://www.youtube.com/embed/x')).toBe('allow')
+    // Hintergrund-Bericht außerhalb von knowledge/: unberührt (R38)
+    expect(frameNavigationDecision('app://workspace/bg-tasks/x/index.html')).toBe('allow')
+    expect(frameNavigationDecision('app://workspace/knowledge.html')).toBe('allow')
+    expect(frameNavigationDecision('app://space-document/o/s/a/x.html')).toBe('allow')
+    // vom Hauptprozess als Wissens-HTML ausgeliefert (Symlink-Ziel, Content-Type)
+    expect(frameNavigationDecision('app://workspace/bg-tasks/link.html', true)).toBe('block')
   })
   it('Pfade: Backslash, führender Slash, //, ., .. und Groß/Klein', () => {
     expect(isKnowledgeHtmlPath('\\knowledge\\a.html')).toBe(true)
@@ -116,41 +141,144 @@ describe('konzept', () => {
     expect(r.daten?.bezuege).toEqual(['[[A/B]]', 'Marke'])
     expect(r.fehler).toHaveLength(1)
   })
-  it('HTML-Köpfe und Navigation: Schreibweisen, Query, Fragment, Kodierung, Endpunkt', () => {
-    for (const p of ['knowledge/a.HTML', 'knowledge/a.html?x=1', 'knowledge/a.html#y', 'knowledge/a%2Ehtml', 'knowledge/a.html.', 'knowledge/a.html ']) {
-      expect(workspaceHtmlHeaders(p)?.['Content-Security-Policy'], p).toBe(WORKSPACE_HTML_CSP)
-      expect(frameNavigationDecision(`app://workspace/${p}`, 'https://example.com/'), p).toBe('block')
+  it('isKnowledgeFrameUrl (R43): alles unter app://workspace/knowledge/, im Zweifel eingesperrt', () => {
+    for (const p of [
+      'knowledge/a.html', 'knowledge/a.HTML', 'knowledge/a.html?x=1', 'knowledge/a.html#y', 'knowledge/a%2Ehtml',
+      'knowledge/a.html.', 'Knowledge/K/a.htm', '%6Bnowledge/a.html', 'knowledge%2Fa.html', 'knowledge%5Ca.html',
+      '/knowledge/a.html', 'knowledge./a.html', 'knowledge/a.xhtml', 'knowledge/a.png', 'knowledge/seite',
+      'knowledge/a.pdf', 'knowledge', 'knowledge/', './knowledge/a', 'bg-tasks/../knowledge/a.html', 'bg-tasks/%2e%2e/x',
+      'x/..', 'knowledge/%E0%A4%A', 'bg-tasks/%ZZ',
+    ]) {
+      expect(isKnowledgeFrameUrl(`app://workspace/${p}`), p).toBe(true)
+      expect(frameNavigationDecision(`app://workspace/${p}`), p).toBe('block')
     }
-    expect(frameNavigationDecision('APP://Workspace/knowledge/a.html', 'x')).toBe('block')
-    expect(frameNavigationDecision('app://workspace/knowledge/a.png?f=a.html', 'x')).toBe('allow')
-    expect(workspaceHtmlHeaders('knowledge/a.md')).toBeNull()
+    expect(isKnowledgeFrameUrl('APP://Workspace/knowledge/a.html')).toBe(true)
+    expect(isKnowledgeFrameUrl('app://workspace\\knowledge\\a.html')).toBe(false) // kein Host app://workspace
+    for (const u of [
+      'app://workspace/bg-tasks/x/index.html', 'app://workspace/knowledge.html', 'app://workspace/wissen/a.html',
+      'app://workspace/index.html', 'app://workspace', 'app://workspace/', 'app://workspacex/knowledge/a.html',
+      'app://workspace@evil/knowledge/a.html', 'app://file-preview/knowledge/a.html', 'app://-/index.html',
+      'app://space-document/o/s/knowledge/a.html', 'about:blank', 'about:srcdoc', '', 'https://example.com/knowledge/a.html',
+    ]) {
+      expect(isKnowledgeFrameUrl(u), u).toBe(false)
+    }
+  })
+  it('isKnowledgeScopePath: erstes Segment knowledge, bei .. im Zweifel ja', () => {
+    expect(isKnowledgeScopePath('knowledge/a.html')).toBe(true)
+    expect(isKnowledgeScopePath('\\Knowledge\\x\\y.txt')).toBe(true)
+    expect(isKnowledgeScopePath('bg-tasks/x/index.html')).toBe(false)
+    expect(isKnowledgeScopePath('knowledge')).toBe(false)
+    expect(isKnowledgeScopePath('bg-tasks/../knowledge/a.html')).toBe(true)
   })
   it('.xhtml gilt als HTML (Typ bleibt text/html)', () => {
     expect(isHtmlPath('knowledge/a.XHTML')).toBe(true)
-    expect(workspaceHtmlHeaders('knowledge/a.xhtml')?.['Content-Type']).toBe('text/html; charset=utf-8')
-    expect(workspaceHtmlHeaders('knowledge/a.xhtml')?.['Content-Security-Policy']).toBe(WORKSPACE_HTML_CSP)
-    expect(frameNavigationDecision('app://workspace/knowledge/a.xhtml', 'https://example.com/')).toBe('block')
+    expect(workspaceResponseDecision({ relPaths: ['knowledge/a.xhtml'], contentType: null })).toBe('konzept')
+    expect(htmlResponseHeaders()['Content-Type']).toBe('text/html; charset=utf-8')
+    expect(frameNavigationDecision('app://workspace/knowledge/a.xhtml')).toBe('block')
   })
-  it('shouldApplyHtmlHeaders: reine Pfadnamen (letztes Segment) und Content-Type', () => {
-    const f = shouldApplyHtmlHeaders
-    expect(f(['knowledge/x.txt', '/ws/knowledge/y.html'], 'text/plain')).toBe(true) // Verknüpfung
-    expect(f(['x.txt'], 'Text/HTML; charset=utf-8')).toBe(true)
-    expect(f(['x'], 'application/xhtml+xml')).toBe(true)
-    expect(f(['a.HTM'], null)).toBe(true)
-    expect(f(['knowledge/a.html'], 'text/plain')).toBe(true)
-    // Dateisystem- und dekodierte Anfragepfade: nur das letzte Segment zählt, # ? % sind gewöhnlich
-    expect(f(['C:\\ws\\page.html#d\\notes.txt'], 'text/plain')).toBe(false)
-    expect(f(['/home/u/a.html?x/notes.txt'], 'text/plain')).toBe(false)
-    expect(f(['page.html#d/notes.txt'], 'text/plain')).toBe(false)
-    expect(f(['a.html?x/notes.txt'], 'text/plain')).toBe(false)
-    expect(f(['knowledge/a%2Ehtml'], 'text/plain')).toBe(false) // wörtlicher Name, nicht .html
-    expect(f(['C:\\ws\\C#proj\\y.html'], 'text/plain')).toBe(true)
-    expect(f(['/home/u/100%/y.HTM.'], 'text/plain')).toBe(true)
-    expect(f(['/home/u/a?b/y.md'], 'text/plain')).toBe(false)
-    expect(f(['x.txt', 'y.md'], 'text/plain')).toBe(false)
-    expect(f(['a.png'], 'image/png')).toBe(false)
-    expect(f(['a.mp4'], 'video/mp4')).toBe(false)
-    expect(htmlResponseHeaders()['Content-Security-Policy']).toBe(WORKSPACE_HTML_CSP)
+  it('workspaceResponseDecision: nur Wissens-HTML bekommt die Regel (R38)', () => {
+    const d = workspaceResponseDecision
+    expect(d({ relPaths: ['knowledge/a.html'], contentType: 'text/html' })).toBe('konzept')
+    expect(d({ relPaths: ['knowledge/a.html'], contentType: 'application/octet-stream' })).toBe('konzept')
+    // Hintergrund-Bericht und seine Geschwister: wie vor der Konzept-Fläche
+    expect(d({ relPaths: ['bg-tasks/x/index.html', 'bg-tasks/x/index.html'], contentType: 'text/html' })).toBe('unveraendert')
+    expect(d({ relPaths: ['bg-tasks/x/bild.png'], contentType: 'image/png' })).toBe('unveraendert')
+    expect(d({ relPaths: ['bg-tasks/x/daten'], contentType: null })).toBe('unveraendert')
+    // Symlink: angefragt außerhalb, Ziel im Wissensordner (oder umgekehrt) -> Regel
+    expect(d({ relPaths: ['bg-tasks/link.html', 'knowledge/a.html'], contentType: 'text/html' })).toBe('konzept')
+    expect(d({ relPaths: ['bg-tasks/x.txt', 'knowledge\\a.html'], contentType: 'text/plain' })).toBe('konzept')
+    expect(d({ relPaths: ['knowledge/l.html', 'bg-tasks/x/index.html'], contentType: 'text/html' })).toBe('konzept')
+    // im Wissensordner nach Content-Type; generisch -> nosniff; Medien unverändert
+    expect(d({ relPaths: ['knowledge/seite'], contentType: 'Text/HTML; charset=utf-8' })).toBe('konzept')
+    expect(d({ relPaths: ['knowledge/seite'], contentType: null })).toBe('nosniff')
+    expect(d({ relPaths: ['knowledge/a.png'], contentType: 'image/png' })).toBe('unveraendert')
+    // Fehlerantworten: nur der Content-Type zählt
+    expect(d({ relPaths: ['knowledge/a.html'], contentType: 'text/plain', ok: false })).toBe('nosniff')
+    expect(d({ relPaths: ['knowledge/a.html'], contentType: 'text/html', ok: false })).toBe('konzept')
+    // der Fern-Server hat schon entschieden (z. B. über das Symlink-Ziel)
+    expect(d({ relPaths: ['bg-tasks/link.html'], contentType: 'text/html', csp: WORKSPACE_HTML_CSP })).toBe('konzept')
+    expect(d({ relPaths: ['bg-tasks/link.html'], contentType: 'text/html', csp: 'default-src *' })).toBe('unveraendert')
+  })
+  it('isConfinedCommit: knowledge/, ausgeliefert oder Kind eines eingesperrten Rahmens', () => {
+    expect(isConfinedCommit('app://workspace/knowledge/a.html', false, false)).toBe(true)
+    expect(isConfinedCommit('app://workspace/knowledge/a.pdf', false, false)).toBe(true)
+    expect(isConfinedCommit('app://workspace/knowledge/seite', false, false)).toBe(true)
+    expect(isConfinedCommit('about:srcdoc', false, true)).toBe(true)
+    expect(isConfinedCommit('app://workspace/bg-tasks/l.html', true, false)).toBe(true)
+    expect(isConfinedCommit('app://workspace/bg-tasks/x/index.html', false, false)).toBe(false)
+    expect(isConfinedCommit('https://www.youtube.com/embed/x', false, false)).toBe(false)
+  })
+  it('Rückhalt-Zustand (R46): In-Page entlässt nie, Dokumentwechsel und Abbau entlassen in recentlyConfined, Ablauf', () => {
+    const k = 'app://workspace/knowledge/a.html'
+    const st = createBackstopState()
+    noteFrameCommit(st, { frameId: 7, parentId: 1, url: k, inPage: false, now: 1000 })
+    expect([...st.confined]).toEqual([7])
+    // In-Page-Navigation zu einer fremden Adresse: bleibt eingesperrt
+    noteFrameCommit(st, { frameId: 7, parentId: 1, url: 'https://example.com/#x', inPage: true, now: 1100 })
+    expect(st.confined.has(7)).toBe(true)
+    // In-Page innerhalb von knowledge/ fügt hinzu
+    noteFrameCommit(st, { frameId: 9, parentId: 1, url: `${k}#teil`, inPage: true, now: 1100 })
+    expect(st.confined.has(9)).toBe(true)
+    // Kind eines eingesperrten Rahmens
+    noteFrameCommit(st, { frameId: 8, parentId: 7, url: 'about:srcdoc', inPage: false, now: 1150 })
+    expect(st.confined.has(8)).toBe(true)
+    // Dokumentwechsel nach außerhalb: entlassen, mit Zeitpunkt
+    noteFrameCommit(st, { frameId: 7, parentId: 1, url: 'https://www.figma.com/embed', inPage: false, now: 1200 })
+    expect(st.confined.has(7)).toBe(false)
+    expect(st.recentlyConfined.get(7)).toBe(1200)
+    // erneut eingesperrt: aus recentlyConfined heraus
+    noteFrameCommit(st, { frameId: 7, parentId: 1, url: k, inPage: false, now: 1300 })
+    expect(st.confined.has(7)).toBe(true)
+    expect(st.recentlyConfined.has(7)).toBe(false)
+    // Abbau: nicht mehr im Baum -> entlassen
+    noteFramesAttached(st, new Set([1, 7]), 2000)
+    expect([...st.confined]).toEqual([7])
+    expect(st.recentlyConfined.get(8)).toBe(2000)
+    expect(st.recentlyConfined.get(9)).toBe(2000)
+    // Ablauf nach CONFINED_GRACE_MS
+    noteFramesAttached(st, new Set([1, 7]), 2000 + CONFINED_GRACE_MS)
+    expect(st.recentlyConfined.has(8)).toBe(true)
+    noteFramesAttached(st, new Set([1, 7]), 2001 + CONFINED_GRACE_MS)
+    expect(st.recentlyConfined.size).toBe(0)
+    expect(CONFINED_GRACE_MS).toBe(5000)
+  })
+  it('backstopDecision (R44-R46): jeder Zweig, der Verweiser zählt nie', () => {
+    const leer = { confined: new Set<number>(), recentlyConfined: new Map<number, number>() }
+    const offen = { confined: new Set([7]), recentlyConfined: new Map<number, number>() }
+    const kuerzlich = { confined: new Set<number>(), recentlyConfined: new Map([[7, 1000]]) }
+    const basis = {
+      url: 'https://example.com/x', resourceType: 'image', frameId: 7, ancestorIds: [1], attached: true,
+      chainConfinedByUrl: false, ...offen, now: 1000, appUrl: null,
+    }
+    // Rahmen in confined / in nicht abgelaufenem recentlyConfined -> abbrechen
+    expect(backstopDecision(basis)).toBe(true)
+    expect(backstopDecision({ ...basis, ...kuerzlich, now: 1000 + CONFINED_GRACE_MS })).toBe(true)
+    expect(backstopDecision({ ...basis, ...kuerzlich, now: 1001 + CONFINED_GRACE_MS })).toBe(false)
+    // Vorfahr eingesperrt -> abbrechen (verschachtelter Rahmen im Konzept)
+    expect(backstopDecision({ ...basis, frameId: 8, ancestorIds: [7, 1] })).toBe(true)
+    expect(backstopDecision({ ...basis, frameId: 8, ancestorIds: [7, 1], ...kuerzlich, now: 1500 })).toBe(true)
+    // Rahmen bekannt, im Baum, weder er noch ein Vorfahr eingesperrt -> durchlassen, auch bei offenem Konzept
+    expect(backstopDecision({ ...basis, frameId: 1, ancestorIds: [] })).toBe(false)
+    expect(backstopDecision({ ...basis, frameId: 12, ancestorIds: [1] })).toBe(false)
+    // Adresse des Rahmens oder eines Vorfahren unter knowledge/ (vor dem Navigations-Ereignis) -> abbrechen
+    expect(backstopDecision({ ...basis, ...leer, frameId: 12, chainConfinedByUrl: true })).toBe(true)
+    // Rahmen nicht identifizierbar/nicht lesbar oder nicht im Baum: nach der Ansicht
+    for (const rahmen of [{ frameId: null }, { frameId: 12, attached: false }]) {
+      expect(backstopDecision({ ...basis, ...rahmen }), JSON.stringify(rahmen)).toBe(true)
+      expect(backstopDecision({ ...basis, ...rahmen, ...kuerzlich, now: 2000 }), JSON.stringify(rahmen)).toBe(true)
+      expect(backstopDecision({ ...basis, ...rahmen, ...kuerzlich, now: 1001 + CONFINED_GRACE_MS })).toBe(false)
+      expect(backstopDecision({ ...basis, ...rahmen, ...leer }), JSON.stringify(rahmen)).toBe(false)
+    }
+    // freie Schemata und der eigene Entwicklungsserver: auch aus einem eingesperrten Rahmen
+    for (const url of ['app://-/assets/x.js', 'app://workspace/knowledge/b.png', 'data:,x', 'blob:null/1', 'about:blank',
+      'devtools://devtools/x', 'chrome-extension://pdf/x.js', 'http://localhost:5173/src/x.ts', 'ws://localhost:5173/']) {
+      expect(backstopDecision({ ...basis, url, chainConfinedByUrl: true, appUrl: 'http://localhost:5173' }), url).toBe(false)
+    }
+    expect(backstopDecision({ ...basis, url: 'http://localhost:9999/', appUrl: 'http://localhost:5173' })).toBe(true)
+    expect(backstopDecision({ ...basis, url: 'kein-schema' })).toBe(true)
+    // Laden eines Hauptrahmens: nie
+    expect(backstopDecision({ ...basis, resourceType: 'mainFrame', chainConfinedByUrl: true })).toBe(false)
+    expect(backstopDecision({ ...basis, resourceType: 'mainFrame', frameId: null })).toBe(false)
   })
   it('needsNosniffOnly: fehlend oder generisch', () => {
     expect(needsNosniffOnly(null)).toBe(true)

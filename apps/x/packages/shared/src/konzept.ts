@@ -1,7 +1,11 @@
 // Gemeinsame Bausteine der Konzept-Fläche: reine Funktionen ohne DOM (Node und Browser).
 
+/**
+ * Kein-Netz-Regel für Wissens-HTML (R40): CSP plus `sandbox allow-scripts` (das Dokument ist auch dann
+ * abgeschottet, wenn das iframe-Attribut fehlt) und `webrtc 'block'`. Gilt nur für HTML unter `knowledge/` (R38).
+ */
 export const WORKSPACE_HTML_CSP =
-  "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:; font-src data:; media-src data: blob:; form-action 'none'; base-uri 'none'"
+  "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:; font-src data:; media-src data: blob:; form-action 'none'; base-uri 'none'; sandbox allow-scripts; webrtc 'block'"
 
 export const KONZEPT_BLOCK_ID = 'rowboat-konzept'
 export const KONZEPT_MAX_BYTES = 1_048_576
@@ -336,23 +340,46 @@ export function checkVideoKonzept(v: unknown): string[] {
   return f
 }
 
-/** Pfadteil einer URL oder eines Pfads: ohne `?`/`#`, prozent-dekodiert, ohne Punkte/Leerzeichen am Ende. */
-function istHtmlNamentlich(pfadOderUrl: string): boolean {
-  const ohneRest = pfadOderUrl.split(/[?#]/)[0]
-  let dekodiert = ohneRest
-  try {
-    dekodiert = decodeURIComponent(ohneRest)
-  } catch {
-    // ungültige Kodierung: Rohform prüfen
-  }
-  const trim = (x: string) => x.replace(/[. ]+$/, '')
-  return isHtmlPath(trim(ohneRest)) || isHtmlPath(trim(dekodiert))
+const ohneEndpunkt = (x: string) => x.replace(/[. ]+$/, '')
+
+/**
+ * Liegt ein reiner, arbeitsverzeichnis-relativer Pfad im Wissensordner (erstes Segment `knowledge`, Groß/Klein und
+ * Endpunkt egal)? Bei `..` sicherheitshalber `true`: dann gilt die strengere Regel.
+ */
+export function isKnowledgeScopePath(relPath: string): boolean {
+  const segs = segmente(relPath)
+  if (segs.includes('..')) return true
+  return segs.length >= 2 && segName(segs[0]) === 'knowledge'
 }
 
-/** Im Zweifel (Query, Fragment, Kodierung, Endpunkt) gilt eine Datei als HTML und bekommt die Regel. */
-export function workspaceHtmlHeaders(relPath: string): Record<string, string> | null {
-  if (!istHtmlNamentlich(relPath)) return null
-  return htmlAntwortKoepfe()
+/**
+ * Rahmen-Schutz (R43): zeigt ein Rahmen ein Dokument unter `app://workspace/knowledge/`, gleich welcher Endung? Ein
+ * Nicht-HTML-Dokument führt kein Skript aus, es einzusperren kostet nichts; HTML unter einem seltsamen Namen ist so
+ * mit erfasst. Schema und Host ohne Groß/Klein; der Pfad (ohne Query/Fragment) zählt roh und prozent-dekodiert,
+ * `\` trennt wie `/`, `.`-Segmente entfallen. Ungültige Kodierung oder `..`: eingesperrt. Adressen außerhalb von
+ * app://workspace (auch leer oder about:blank beim ersten Laden eines Rahmens): nicht eingesperrt.
+ * Endung und Content-Type zählen nur beim Ausliefern ({@link workspaceResponseDecision}).
+ */
+export function isKnowledgeFrameUrl(url: string): boolean {
+  const m = /^app:\/\/workspace(?=[/?#]|$)/i.exec(url)
+  if (m === null) return false
+  const roh = url.slice(m[0].length).split(/[?#]/)[0]
+  let dekodiert: string
+  try {
+    dekodiert = decodeURIComponent(roh)
+  } catch {
+    return true
+  }
+  return [roh, dekodiert].some((pfad) => {
+    const segs = segmente(pfad)
+    return segs.includes('..') || (segs.length >= 1 && segName(segs[0]) === 'knowledge')
+  })
+}
+
+/** Schlüssel, unter dem ein ausgeliefertes Dokument wiedererkannt wird: die Adresse ohne Fragment. */
+export function konzeptDocumentKey(url: string): string {
+  const i = url.indexOf('#')
+  return i === -1 ? url : url.slice(0, i)
 }
 
 function htmlAntwortKoepfe(): Record<string, string> {
@@ -360,6 +387,7 @@ function htmlAntwortKoepfe(): Record<string, string> {
     'Content-Type': 'text/html; charset=utf-8',
     'Content-Security-Policy': WORKSPACE_HTML_CSP,
     'X-Content-Type-Options': 'nosniff',
+    'X-DNS-Prefetch-Control': 'off',
   }
 }
 
@@ -368,22 +396,20 @@ function mimeOhneParameter(contentType: string | null): string {
 }
 
 /**
- * Entscheidung für eine Arbeitsverzeichnis-Antwort: Regel anwenden, wenn EINER der Namen
- * einer der Pfade nach HTML aussieht oder der Content-Type HTML/XHTML ist. Die Pfade sind REINE
- * Namen (bereits dekodierter Anfragepfad ohne Query/Fragment, aufgelöster Dateisystempfad): nur das
- * letzte Segment zählt, `#`, `?`, `%` sind gewöhnliche Zeichen. Für rohe URLs gibt es
- * {@link workspaceHtmlHeaders} und {@link frameNavigationDecision}.
+ * Sieht EINER der Namen nach HTML aus oder ist der Content-Type HTML/XHTML? Die Pfade sind REINE Namen (bereits
+ * dekodierter Anfragepfad ohne Query/Fragment, aufgelöster Dateisystempfad): nur das letzte Segment zählt, `#`, `?`,
+ * `%` sind gewöhnliche Zeichen.
  */
 export function shouldApplyHtmlHeaders(plainPaths: string[], contentType: string | null): boolean {
   const mime = mimeOhneParameter(contentType)
   if (mime === 'text/html' || mime === 'application/xhtml+xml') return true
   return plainPaths.some((p) => {
     const segs = p.split(/[\\/]/)
-    return isHtmlPath(segs[segs.length - 1].replace(/[. ]+$/, ''))
+    return isHtmlPath(ohneEndpunkt(segs[segs.length - 1]))
   })
 }
 
-/** Die drei Köpfe für eine Antwort, die {@link shouldApplyHtmlHeaders} bejaht hat. */
+/** Die Köpfe für eine Antwort, die {@link workspaceResponseDecision} als `'konzept'` einstuft. */
 export function htmlResponseHeaders(): Record<string, string> {
   return htmlAntwortKoepfe()
 }
@@ -394,9 +420,150 @@ export function needsNosniffOnly(contentType: string | null): boolean {
   return mime === '' || mime === 'application/octet-stream' || mime === 'text/plain'
 }
 
-export function frameNavigationDecision(frameUrl: string, targetUrl: string): 'allow' | 'block' {
-  void targetUrl
-  const praefix = 'app://workspace/'
-  if (frameUrl.slice(0, praefix.length).toLowerCase() !== praefix) return 'allow'
-  return istHtmlNamentlich(frameUrl.slice(praefix.length)) ? 'block' : 'allow'
+/**
+ * Was eine Antwort von app://workspace bzw. GET /workspace bekommt (R38, R9). Nur Wissens-HTML bekommt die Regel.
+ * `relPaths` sind REINE arbeitsverzeichnis-relative Namen: der dekodierte Anfragepfad und, wo bekannt, das aufgelöste
+ * Ziel relativ zur aufgelösten Wurzel. Liegt keiner davon unter `knowledge/`, bleibt die Antwort wie vor der
+ * Konzept-Fläche (`'unveraendert'`), außer sie trägt die Regel schon (`csp`, vom Fern-Server entschieden). Im
+ * Wissensordner: HTML nach einem der Namen oder nach Content-Type -> `'konzept'` (Fehlerantworten nur nach
+ * Content-Type, ein 404-Text bleibt Text); fehlender oder generischer Typ -> `'nosniff'`.
+ */
+export function workspaceResponseDecision(args: {
+  relPaths: string[]
+  contentType: string | null
+  ok?: boolean
+  csp?: string | null
+}): 'konzept' | 'nosniff' | 'unveraendert' {
+  if (args.csp === WORKSPACE_HTML_CSP) return 'konzept'
+  if (!args.relPaths.some(isKnowledgeScopePath)) return 'unveraendert'
+  const html = args.ok === false
+    ? shouldApplyHtmlHeaders([], args.contentType)
+    : shouldApplyHtmlHeaders(args.relPaths, args.contentType)
+  if (html) return 'konzept'
+  return needsNosniffOnly(args.contentType) ? 'nosniff' : 'unveraendert'
+}
+
+/**
+ * Darf ein Rahmen wegnavigieren? Nein, wenn er ein Dokument unter `app://workspace/knowledge/` zeigt (R43) oder der
+ * Hauptprozess es als Wissens-HTML ausgeliefert hat (Symlink-Ziel, Content-Type): keine Navigation im Rahmen, auch
+ * nicht zu app://. Der erste Ladevorgang ist nicht betroffen, dort ist die Rahmen-Adresse noch leer/about:blank.
+ * Andere Rahmen (Hintergrund-Berichte, Einbettungen) entscheidet der Aufrufer wie vor der Konzept-Fläche.
+ */
+export function frameNavigationDecision(frameUrl: string, servedAsKnowledgeHtml = false): 'allow' | 'block' {
+  return servedAsKnowledgeHtml || isKnowledgeFrameUrl(frameUrl) ? 'block' : 'allow'
+}
+
+function schema(url: string): string | null {
+  const m = /^([a-z][a-z0-9+.-]*):/i.exec(url)
+  return m ? m[1].toLowerCase() : null
+}
+
+/**
+ * Bleibt im Dokument bzw. in der App, nie im Netz: `data:`, `blob:`, `about:`, `app:`, `devtools:` und
+ * `chrome-extension:` (Chromiums eingebauter PDF-Betrachter lädt seine Oberfläche so; ein PDF unter knowledge/ ist
+ * seit R43 ein eingesperrter Rahmen).
+ */
+const FREIE_SCHEMATA = new Set(['data', 'blob', 'about', 'app', 'devtools', 'chrome-extension'])
+
+function gleicherHost(a: string, b: string): boolean {
+  try {
+    const ha = new URL(a).host
+    return ha !== '' && ha === new URL(b).host
+  } catch {
+    return false
+  }
+}
+
+/** So lange bleibt ein Rahmen nach dem Verlassen der Menge `confined` noch eingesperrt (R46). */
+export const CONFINED_GRACE_MS = 5000
+
+/**
+ * Zustand des Rückhalts je Ansicht (R46), geschlüsselt nach der Rahmen-Knoten-Id (frameTreeNodeId): `confined` hält
+ * die eingesperrten Rahmen, `recentlyConfined` die vor kurzem entlassenen mit dem Zeitpunkt des Entlassens.
+ */
+export type BackstopState = { confined: Set<number>; recentlyConfined: Map<number, number> }
+
+export function createBackstopState(): BackstopState {
+  return { confined: new Set(), recentlyConfined: new Map() }
+}
+
+function kuerzlich(recently: ReadonlyMap<number, number>, id: number, now: number): boolean {
+  const t = recently.get(id)
+  return t !== undefined && now - t <= CONFINED_GRACE_MS // Uhr zurückgesprungen: weiter eingesperrt
+}
+
+function entlassen(state: BackstopState, id: number, now: number): void {
+  if (state.confined.delete(id)) state.recentlyConfined.set(id, now)
+}
+
+function abgelaufeneVergessen(state: BackstopState, now: number): void {
+  for (const id of [...state.recentlyConfined.keys()]) {
+    if (!kuerzlich(state.recentlyConfined, id, now)) state.recentlyConfined.delete(id)
+  }
+}
+
+/**
+ * Wird ein Rahmen beim Übernehmen eines Dokuments eingesperrt? Ja, wenn die Adresse unter knowledge/ liegt
+ * ({@link isKnowledgeFrameUrl}), der Hauptprozess sie als Wissens-HTML ausgeliefert hat, oder sein Elternrahmen
+ * eingesperrt ist.
+ */
+export function isConfinedCommit(url: string, servedAsKnowledgeHtml: boolean, parentConfined: boolean): boolean {
+  return parentConfined || servedAsKnowledgeHtml || isKnowledgeFrameUrl(url)
+}
+
+/**
+ * Ein Unterrahmen hat ein Dokument übernommen (R46). Eingesperrt -> in `confined`. Sonst nur bei einem echten
+ * Dokumentwechsel (`inPage: false`) entlassen, nie bei einer Navigation innerhalb der Seite.
+ */
+export function noteFrameCommit(
+  state: BackstopState,
+  c: { frameId: number; parentId: number | null; url: string; servedAsKnowledgeHtml?: boolean; inPage: boolean; now: number },
+): void {
+  abgelaufeneVergessen(state, c.now)
+  const parentConfined = c.parentId !== null && state.confined.has(c.parentId)
+  if (isConfinedCommit(c.url, c.servedAsKnowledgeHtml === true, parentConfined)) {
+    state.confined.add(c.frameId)
+    state.recentlyConfined.delete(c.frameId)
+  } else if (!c.inPage) {
+    entlassen(state, c.frameId, c.now)
+  }
+}
+
+/** Rahmen, die nicht mehr im Baum der Ansicht hängen (abgebaut, gelöst), werden entlassen (R46). */
+export function noteFramesAttached(state: BackstopState, attachedIds: ReadonlySet<number>, now: number): void {
+  for (const id of [...state.confined]) if (!attachedIds.has(id)) entlassen(state, id, now)
+  abgelaufeneVergessen(state, now)
+}
+
+/**
+ * Entscheidung des Rückhalts (R44-R46), nur aus Werten. Der Verweiser (Referer) zählt nie.
+ * - Laden eines Hauptrahmens, freie Schemata ({@link FREIE_SCHEMATA}) und der eigene Entwicklungsserver (`appUrl`,
+ *   gleicher Host): durchlassen.
+ * - Rahmen oder ein Vorfahr zeigt eine Adresse unter knowledge/ (`chainConfinedByUrl`, greift schon vor dem
+ *   Navigations-Ereignis): abbrechen.
+ * - Rahmen identifiziert, lesbar und im Baum der Ansicht (`frameId` gesetzt, `attached`): abbrechen, wenn er oder ein
+ *   Vorfahr (`ancestorIds`) in `confined` oder noch nicht abgelaufen in `recentlyConfined` steht; sonst durchlassen.
+ * - Sonst (nicht identifizierbar, nicht lesbar, nicht im Baum): abbrechen, solange `confined` nicht leer ist oder
+ *   `recentlyConfined` einen nicht abgelaufenen Eintrag hat.
+ */
+export function backstopDecision(r: {
+  url: string
+  resourceType: string
+  frameId: number | null
+  ancestorIds: readonly number[]
+  attached: boolean
+  chainConfinedByUrl: boolean
+  confined: ReadonlySet<number>
+  recentlyConfined: ReadonlyMap<number, number>
+  now: number
+  appUrl?: string | null
+}): boolean {
+  if (r.resourceType === 'mainFrame') return false
+  const s = schema(r.url)
+  if (s !== null && FREIE_SCHEMATA.has(s)) return false
+  if (r.appUrl && gleicherHost(r.url, r.appUrl)) return false
+  if (r.chainConfinedByUrl) return true
+  const eingesperrt = (id: number) => r.confined.has(id) || kuerzlich(r.recentlyConfined, id, r.now)
+  if (r.frameId !== null && r.attached) return [r.frameId, ...r.ancestorIds].some(eingesperrt)
+  return r.confined.size > 0 || [...r.recentlyConfined.keys()].some((id) => kuerzlich(r.recentlyConfined, id, r.now))
 }

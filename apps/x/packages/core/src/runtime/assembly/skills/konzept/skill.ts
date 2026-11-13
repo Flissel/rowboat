@@ -1,3 +1,4 @@
+import { WORKSPACE_HTML_CSP } from '@x/shared/dist/konzept.js';
 import { VIDEOKONZEPT_VORLAGE } from './vorlage.js';
 
 // Instructions are in English like the neighbouring bundled skills; everything
@@ -13,7 +14,7 @@ A concept is ONE self-contained \`.html\` file in the knowledge folder. Rowboat 
 
 1. **Location:** \`knowledge/Konzepte/<Name>.html\` (create the folder with \`file-mkdir\` if needed). Short German name, no slashes. **Never** put a concept under \`knowledge/Kanal/\`.
 2. **One file, at most 1 MB (1,048,576 bytes).** Nothing from the network: no external scripts, styles, fonts, images, iframes or fetches. Images only as \`data:\` URIs (keep them small — they count towards the 1 MB).
-3. **The page runs sandboxed.** It is served with this rule: \`default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:; font-src data:; media-src data: blob:; form-action 'none'; base-uri 'none'\`. So: inline \`<script>\` and \`<style>\` only; no \`eval\`, no \`new Function\`; no forms that submit.
+3. **The page runs sandboxed.** It is served with this rule: \`${WORKSPACE_HTML_CSP}\`. So: inline \`<script>\` and \`<style>\` only; no \`eval\`, no \`new Function\`; no forms that submit.
 4. **Plain links do not work** — neither \`<a href>\` navigation nor \`target="_blank"\`. Links work only as messages from a click handler (see "Links" below).
 5. **Order inside the file:** \`<title>\` → data block → \`<style>\` → content → \`<script>\`.
 6. **Never invent people or details.** Use no names, contact data or customer details the user did not explicitly give you.

@@ -1,6 +1,6 @@
 import "./node-guard.js";
 import { resolveFilePreview } from './file-previews.js';
-import { app, BrowserWindow, desktopCapturer, dialog, powerMonitor, protocol, net, shell, session, safeStorage, type Session } from "electron";
+import { app, BrowserWindow, desktopCapturer, dialog, powerMonitor, protocol, net, shell, session, safeStorage, webFrameMain, type Session, type WebContents } from "electron";
 import path from "node:path";
 import fsPromises from "node:fs/promises";
 import os from "node:os";
@@ -53,10 +53,16 @@ import { forwardRpc } from "./rpc-forwarder.js";
 import { bounceAllLive, getClient as getSpaceClient, listOrgs as listSpaceOrgs } from "@x/core/dist/spaces/orgs.js";
 import { parseOrgUrl } from "@x/shared/dist/spaces.js";
 import {
+  backstopDecision,
+  createBackstopState,
   frameNavigationDecision,
   htmlResponseHeaders,
-  needsNosniffOnly,
-  shouldApplyHtmlHeaders,
+  isKnowledgeFrameUrl,
+  konzeptDocumentKey,
+  noteFrameCommit,
+  noteFramesAttached,
+  workspaceResponseDecision,
+  type BackstopState,
 } from "@x/shared/dist/konzept.js";
 import type { CodeModeManager } from "@x/core/dist/code-mode/acp/manager.js";
 import type { ISessions } from "@x/core/dist/runtime/sessions/index.js";
@@ -241,27 +247,47 @@ async function listSpaceAssets(orgId: string, spaceId: string): Promise<Array<{ 
 }
 
 /**
- * HTML aus dem Arbeitsverzeichnis bekommt Typ, Kein-Netz-Regel und nosniff, egal was die
- * Quelle (file:// oder Fern-Server) geschickt hat. Rumpf, Status und Range-Verhalten bleiben;
- * Fehlerantworten (404/403 ...) gehen unveraendert durch.
+ * Adressen (ohne Fragment), die dieser Prozess als Wissens-HTML ausgeliefert hat, auch wenn der Name es
+ * nicht verraet (Symlink-Ziel im Wissensordner, HTML nach Content-Type). Navigationssperre und
+ * Anfrage-Rueckhalt erkennen solche Rahmen daran. Begrenzt; die aelteste Adresse faellt zuerst heraus.
  */
-function withWorkspaceHtmlHeaders(res: Response, plainPaths: string[]): Response {
-  const contentType = res.headers.get("content-type");
-  // Fehlerantworten: Namen zaehlen nicht (404-Text bleibt Text), aber HTML-Typ (z. B. Proxy-Fehlerseite)
-  // bekommt die Regel.
-  const isHtml = res.ok
-    ? shouldApplyHtmlHeaders(plainPaths, contentType)
-    : shouldApplyHtmlHeaders([], contentType);
-  let extra: Record<string, string> | null = null;
-  if (isHtml) {
-    extra = htmlResponseHeaders();
-  } else if (needsNosniffOnly(contentType)) {
-    // Fehlender/generischer Typ (auch bei Fehlerantworten): nie zu einem Dokument erraten lassen.
-    extra = { "X-Content-Type-Options": "nosniff" };
+const servedKnowledgeHtml = new Set<string>();
+function rememberKnowledgeHtml(url: string): void {
+  const key = konzeptDocumentKey(url);
+  servedKnowledgeHtml.delete(key);
+  servedKnowledgeHtml.add(key);
+  if (servedKnowledgeHtml.size > 500) {
+    const oldest = servedKnowledgeHtml.values().next().value;
+    if (oldest !== undefined) servedKnowledgeHtml.delete(oldest);
   }
-  if (!extra) return res; // Medien (Bild/Video/PDF/Range): dieselbe Response, unveraendert
+}
+function wasServedAsKnowledgeHtml(url: string): boolean {
+  return servedKnowledgeHtml.has(konzeptDocumentKey(url));
+}
+
+/**
+ * Wissens-HTML (R38) bekommt Typ, Kein-Netz-Regel und nosniff, egal was die Quelle (file:// oder
+ * Fern-Server) geschickt hat; generische Typen im Wissensordner bekommen nosniff. Alles andere geht
+ * unveraendert durch, wie vor der Konzept-Flaeche. `relPaths`: angefragter Pfad und, lokal, das
+ * aufgeloeste Ziel relativ zur aufgeloesten Wurzel. Rumpf, Status und Range-Verhalten bleiben.
+ */
+function withWorkspaceHtmlHeaders(res: Response, relPaths: string[], documentUrl: string): Response {
+  const decision = workspaceResponseDecision({
+    relPaths,
+    contentType: res.headers.get("content-type"),
+    ok: res.ok,
+    csp: res.headers.get("content-security-policy"),
+  });
+  if (decision === "unveraendert") return res;
   const headers = new Headers(res.headers);
+  // fetch() hat einen komprimierten Rumpf schon entpackt: Kodierung und Laenge passen nicht mehr.
+  if (headers.has("content-encoding")) {
+    headers.delete("content-encoding");
+    headers.delete("content-length");
+  }
+  const extra = decision === "konzept" ? htmlResponseHeaders() : { "X-Content-Type-Options": "nosniff" };
   for (const [name, value] of Object.entries(extra)) headers.set(name, value);
+  if (decision === "konzept" && res.ok) rememberKnowledgeHtml(documentUrl);
   return new Response(res.body, { status: res.status, statusText: res.statusText, headers });
 }
 
@@ -296,6 +322,7 @@ async function handleAppRequest(request: Request): Promise<Response> {
             return withWorkspaceHtmlHeaders(
               await fetch(`${baseUrl}/workspace/${relPath.split("/").map(encodeURIComponent).join("/")}`, { headers }),
               [relPath],
+              request.url,
             );
           }
           const absPath = resolveWorkspacePath(relPath);
@@ -307,7 +334,11 @@ async function handleAppRequest(request: Request): Promise<Response> {
           if (realTarget !== realRoot && !realTarget.startsWith(realRoot + path.sep)) {
             return new Response("Forbidden", { status: 403 });
           }
-          return withWorkspaceHtmlHeaders(await net.fetch(pathToFileURL(realTarget).toString()), [relPath, realTarget]);
+          return withWorkspaceHtmlHeaders(
+            await net.fetch(pathToFileURL(realTarget).toString()),
+            [relPath, path.relative(realRoot, realTarget)],
+            request.url,
+          );
         } catch {
           return new Response("Forbidden", { status: 403 });
         }
@@ -525,6 +556,116 @@ function wasLaunchedAtLogin(): boolean {
   }
 }
 
+/**
+ * Rueckhalt-Zustand je Ansicht (R45, R46): Schluessel webContents.id, Inhalt `confined`/`recentlyConfined` nach
+ * frameTreeNodeId. frameTreeNodeId bezeichnet den Rahmen-Knoten im Baum, bleibt ueber Navigationen und
+ * Prozesswechsel des Rahmens gleich und wird von Chromium nicht wiederverwendet; processId/routingId wechseln dagegen
+ * beim Prozesswechsel. Die Uebergaenge (noteFrameCommit, noteFramesAttached) und die Entscheidung (backstopDecision)
+ * liegen rein in @x/shared; hier nur das Auslesen aus Electron.
+ */
+const backstopByContents = new Map<number, BackstopState>();
+const trackedContents = new WeakSet<WebContents>();
+const EMPTY_IDS: ReadonlySet<number> = new Set();
+const EMPTY_RECENT: ReadonlyMap<number, number> = new Map();
+const isConfinedUrl = (url: string) => isKnowledgeFrameUrl(url) || wasServedAsKnowledgeHtml(url);
+
+/** Knoten-Ids aller Rahmen im Baum der Ansicht; null, wenn der Baum nicht lesbar ist (dann wird nichts entlassen). */
+function attachedFrameIds(wc: WebContents): Set<number> | null {
+  try {
+    return new Set(wc.mainFrame.framesInSubtree.map((f) => f.frameTreeNodeId));
+  } catch {
+    return null;
+  }
+}
+
+function trackConfinedFrames(wc: WebContents): void {
+  if (trackedContents.has(wc)) return;
+  trackedContents.add(wc);
+  const contentsId = wc.id;
+  const state = createBackstopState();
+  backstopByContents.set(contentsId, state);
+  const committed = (url: string, isMainFrame: boolean, processId: number, routingId: number, inPage: boolean) => {
+    const now = Date.now();
+    const live = attachedFrameIds(wc);
+    if (live) noteFramesAttached(state, live, now);
+    if (isMainFrame) return; // die App selbst; ihr Hauptrahmen wird nie eingesperrt
+    try {
+      const frame = webFrameMain.fromId(processId, routingId);
+      if (!frame) return;
+      noteFrameCommit(state, {
+        frameId: frame.frameTreeNodeId,
+        parentId: frame.parent?.frameTreeNodeId ?? null,
+        url,
+        servedAsKnowledgeHtml: wasServedAsKnowledgeHtml(url),
+        inPage,
+        now,
+      });
+    } catch {
+      // Rahmen schon verworfen: der Rueckhalt entscheidet dann nach der Ansicht
+    }
+  };
+  wc.on("did-frame-navigate", (_event, url, _code, _status, isMainFrame, processId, routingId) =>
+    committed(url, isMainFrame, processId, routingId, false));
+  wc.on("did-navigate-in-page", (_event, url, isMainFrame, processId, routingId) =>
+    committed(url, isMainFrame, processId, routingId, true));
+  wc.once("destroyed", () => backstopByContents.delete(contentsId));
+}
+
+/**
+ * Rueckhalt der Kein-Netz-Regel (R40, R43-R46) auf der Standard-Sitzung. Den Rahmen liefert Electron 39 nur als
+ * details.frame (die Details tragen weder processId noch frameId/frameToken, also kein webFrameMain.fromId/
+ * fromFrameToken). Ausgelesen werden Knoten-Id des Rahmens und seiner Vorfahren, ob er im Baum der Ansicht haengt,
+ * und ob er oder ein Vorfahr eine Adresse unter knowledge/ zeigt; der Verweiser nie. Fehler im Rueckhalt: abbrechen
+ * (ausser Hauptrahmen). Die App registriert sonst kein onBeforeRequest auf dieser Sitzung.
+ */
+const backstopSessions = new WeakSet<Session>();
+function configureKnowledgeHtmlRequestBackstop(ses: Session): void {
+  if (backstopSessions.has(ses)) return;
+  backstopSessions.add(ses);
+  app.on("web-contents-created", (_event, wc) => {
+    if (wc.session === ses) trackConfinedFrames(wc);
+  });
+  ses.webRequest.onBeforeRequest((details, callback) => {
+    let cancel = true;
+    try {
+      const now = Date.now();
+      const wc = details.webContents;
+      const state = wc ? backstopByContents.get(wc.id) : undefined;
+      const live = wc ? attachedFrameIds(wc) : null;
+      if (state && live) noteFramesAttached(state, live, now);
+      let frameId: number | null = null;
+      const ancestorIds: number[] = [];
+      let chainConfinedByUrl = false;
+      try {
+        if (details.frame) {
+          frameId = details.frame.frameTreeNodeId;
+          for (let f: typeof details.frame | null = details.frame; f; f = f.parent) {
+            if (f !== details.frame) ancestorIds.push(f.frameTreeNodeId);
+            if (isConfinedUrl(f.url)) chainConfinedByUrl = true;
+          }
+        }
+      } catch {
+        frameId = null; // Rahmen schon verworfen
+      }
+      cancel = backstopDecision({
+        url: details.url,
+        resourceType: details.resourceType,
+        frameId,
+        ancestorIds,
+        attached: frameId !== null && live !== null && live.has(frameId),
+        chainConfinedByUrl,
+        confined: state?.confined ?? EMPTY_IDS,
+        recentlyConfined: state?.recentlyConfined ?? EMPTY_RECENT,
+        now,
+        appUrl: app.isPackaged ? null : DEV_SERVER_URL,
+      });
+    } catch {
+      cancel = details.resourceType !== "mainFrame";
+    }
+    callback(cancel ? { cancel: true } : {});
+  });
+}
+
 function createWindow(options: { startHidden?: boolean } = {}) {
   const win = new BrowserWindow({
     width: 1280,
@@ -550,6 +691,8 @@ function createWindow(options: { startHidden?: boolean } = {}) {
 
   configureSessionPermissions(session.defaultSession);
   configureAppDisplayMediaHandler(session.defaultSession);
+  configureKnowledgeHtmlRequestBackstop(session.defaultSession);
+  trackConfinedFrames(win.webContents);
   configureSessionPermissions(session.fromPartition(BROWSER_PARTITION), BROWSER_EXTRA_PERMISSIONS);
 
   mainWindow = win;
@@ -619,14 +762,16 @@ function createWindow(options: { startHidden?: boolean } = {}) {
   // navigation untouched so the embeds keep working.
   win.webContents.on("will-frame-navigate", (event) => {
     if (event.isMainFrame) return;
-    if (!event.frame?.url.startsWith("app://workspace/") && !event.frame?.url.startsWith("app://space-document/")) return;
-    // Konzept-Flaeche: ein Skript in einer app://workspace/-HTML-Seite darf den Rahmen nicht
-    // wegnavigieren (Seitenwechsel, meta refresh, Formular). Der erste Ladevorgang des Rahmens
-    // ist davon nicht betroffen: dort ist frame.url noch leer/about:blank (-> 'allow').
-    if (frameNavigationDecision(event.frame.url, event.url) === "block") {
+    // Konzept-Flaeche (R43): ein Rahmen unter app://workspace/knowledge/ (oder als Wissens-HTML
+    // ausgeliefert) darf nicht wegnavigieren (Seitenwechsel, meta refresh, Formular, Link). Der erste
+    // Ladevorgang ist nicht betroffen: dort ist frame.url noch leer/about:blank. Andere
+    // app://workspace-Seiten (Hintergrund-Berichte) wie vorher.
+    const frameUrl = event.frame?.url ?? "";
+    if (frameNavigationDecision(frameUrl, wasServedAsKnowledgeHtml(frameUrl)) === "block") {
       event.preventDefault();
       return;
     }
+    if (!frameUrl.startsWith("app://workspace/") && !frameUrl.startsWith("app://space-document/")) return;
     if (routeExternalNavigation(event.url)) event.preventDefault();
   });
 

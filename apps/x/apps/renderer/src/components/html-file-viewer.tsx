@@ -53,8 +53,8 @@ function FlaecheViewer({ path, active }: { path: string; active: boolean }) {
   const [state, setState] = useState<ViewerState>({ kind: 'loading' })
   const [iframeLoaded, setIframeLoaded] = useState(false)
   // Reload = remount the iframe (new key + cache-busting query). The main process blocks every
-  // navigation of a frame that already holds an app://workspace HTML document, so changing src
-  // or calling location.reload() on the frame does nothing.
+  // navigation of a frame that already holds a knowledge HTML document, so changing src or
+  // calling location.reload() on the frame does nothing.
   const [version, setVersion] = useState(0)
   const [stale, setStale] = useState(false)
   const [fileText, setFileText] = useState<string | null>(null)
@@ -313,10 +313,9 @@ function FlaecheViewer({ path, active }: { path: string; active: boolean }) {
     )
   }
 
-  // Serve via the `app://workspace/<rel-path>` protocol so the iframe has a
-  // proper base URL — relative `<link>`, `<img>`, `<script>` references next
-  // to the file resolve correctly (the path-traversal guard in
-  // resolveWorkspacePath already gates the protocol handler).
+  // Served via `app://workspace/<rel-path>`. For knowledge HTML the main process adds the
+  // no-network rule (CSP incl. `sandbox allow-scripts`), so files next to the page do not load
+  // either: a concept is one file with inline styles, scripts and data: images.
   return (
     <div className="flex h-full w-full flex-col">
       {/* Fixed-height row: the normal header, or (while a request is pending) the confirmation. The
@@ -383,22 +382,14 @@ function FlaecheViewer({ path, active }: { path: string; active: boolean }) {
       ) : (
         <div className="flex h-10 shrink-0 items-center gap-2 border-b border-border bg-background px-3">
           <p className="min-w-0 flex-1 truncate text-sm font-medium text-foreground">{title}</p>
+          {/* No "open in new window": that path (shell.openPath) shows the file in the system browser,
+              outside every protection (R39). */}
           <button
             type="button"
             onClick={() => window.dispatchEvent(new CustomEvent('rowboat:show-in-graph', { detail: { path } }))}
             className="shrink-0 rounded-md border border-border bg-background px-2.5 py-1 text-xs font-medium text-foreground hover:bg-accent"
           >
             Im Graphen zeigen
-          </button>
-          <button
-            type="button"
-            onClick={() => {
-              void source.open({ path })
-            }}
-            className="inline-flex shrink-0 items-center gap-1.5 rounded-md border border-border bg-background px-2.5 py-1 text-xs font-medium text-foreground hover:bg-accent"
-          >
-            <ExternalLinkIcon className="size-3.5" />
-            In neuem Fenster öffnen
           </button>
         </div>
       )}
