@@ -139,7 +139,8 @@ export function canAcceptRequest(
   cancelledAt: number | null,
 ): boolean {
   if (checkInFlight) return false
-  if (cancelledAt !== null && now - cancelledAt <= cancelQuietMs) return false
+  // Springt die Uhr zurück (now < cancelledAt), verlängert das die Ruhezeit nicht.
+  if (cancelledAt !== null && now >= cancelledAt && now - cancelledAt <= cancelQuietMs) return false
   return state === null || now - state.at > pendingMaxAgeMs
 }
 
@@ -149,12 +150,23 @@ export type Armed = { id: number; armedAt: number }
 export type Engaged = { id: number; at: number }
 
 /**
+ * Zeitpunkt eines Eingabe-Ereignisses: sein `timeStamp` (wann es geschah), nie später als `now` (performance.now bei
+ * der Behandlung). So rückt ein Hänger des Hauptfadens das Ereignis nicht hinter die Sperre; das `min` schützt vor
+ * einer Plattform, auf der `timeStamp` einen anderen Zeitursprung hat.
+ */
+export function eventTime(timeStamp: number, now: number): number {
+  return Math.min(timeStamp, now)
+}
+
+/**
  * "Öffnen" gilt nur für die Anfrage, die gemalt wurde, erst `confirmDelayMs` nach dem ersten Bild, und nur, wenn der
  * Nutzer den Knopf NACH Ablauf dieser Sperre angesteuert hat. Ein Zeiger, der schon dort ruhte, muss hinaus und zurück.
+ * `now` ist der Zeitpunkt des Klicks (beim Klick: `eventTime` des Klick-Ereignisses); er muss nach dem Ansteuern liegen.
  */
 export function canConfirm(state: PendingRequest | null, armed: Armed | null, engaged: Engaged | null, now: number): boolean {
   if (state === null || armed === null || engaged === null) return false
   if (armed.id !== state.id || engaged.id !== state.id) return false
   if (engaged.at < armed.armedAt + confirmDelayMs) return false
+  if (now <= engaged.at) return false
   return now - armed.armedAt >= confirmDelayMs
 }

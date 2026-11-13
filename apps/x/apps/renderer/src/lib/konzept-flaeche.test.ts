@@ -3,6 +3,7 @@ import {
   cacheBustedUrl,
   canAcceptRequest,
   canConfirm,
+  eventTime,
   konzeptHinweise,
   konzeptPathFromTool,
   linkOpenRequest,
@@ -151,6 +152,23 @@ describe('konzept-flaeche', () => {
     expect(canAcceptRequest(null, false, 11001, 1000)).toBe(true)
     // Ruhezeit vorbei, aber Existenzprüfung läuft: weiter nein
     expect(canAcceptRequest(null, true, 20000, 1000)).toBe(false)
+    // Uhr springt zurück: die Ruhezeit wird nicht verlängert
+    expect(canAcceptRequest(null, false, 500, 1000)).toBe(true)
+  })
+
+  it('nimmt Zeitpunkte aus dem Ereignis, nicht aus der verspäteten Behandlung', () => {
+    expect(eventTime(300, 900)).toBe(300)
+    // Plattform mit anderem Zeitursprung (timeStamp in der Zukunft): nie später als jetzt
+    expect(eventTime(5000, 900)).toBe(900)
+    const a = nextPendingRequest(null, req(7, 1000))
+    const armed = { id: 7, armedAt: 100 }
+    // Zeiger kam während der Sperre (Ereignis bei 300), behandelt erst bei 900 nach einem Hänger: nein
+    expect(canConfirm(a, armed, { id: 7, at: eventTime(300, 900) }, eventTime(2000, 2000))).toBe(false)
+    // Klick-Ereignis vor dem Ansteuern: nein
+    expect(canConfirm(a, armed, { id: 7, at: 900 }, eventTime(850, 950))).toBe(false)
+    expect(canConfirm(a, armed, { id: 7, at: 900 }, 900)).toBe(false)
+    // normale Reihenfolge: Sperre vorbei, dann hinein, dann Klick
+    expect(canConfirm(a, armed, { id: 7, at: eventTime(900, 905) }, eventTime(1200, 1210))).toBe(true)
   })
 
   it('sperrt "Öffnen" 700 ms ab dem gemalten Bild dieser Anfrage und verlangt danach bewusstes Ansteuern', () => {
@@ -161,8 +179,8 @@ describe('konzept-flaeche', () => {
     expect(canConfirm(a, { id: 7, armedAt: 100 }, null, 5000)).toBe(false)
     // angesteuert, bevor die Sperre ablief (z. B. Zeiger ruhte schon dort): nein
     expect(canConfirm(a, { id: 7, armedAt: 100 }, { id: 7, at: 799 }, 5000)).toBe(false)
-    // angesteuert nach Ablauf der Sperre: ja
-    expect(canConfirm(a, { id: 7, armedAt: 100 }, { id: 7, at: 800 }, 800)).toBe(true)
+    // angesteuert nach Ablauf der Sperre, danach geklickt: ja
+    expect(canConfirm(a, { id: 7, armedAt: 100 }, { id: 7, at: 800 }, 801)).toBe(true)
     expect(canConfirm(a, { id: 7, armedAt: 100 }, { id: 7, at: 2000 }, 2500)).toBe(true)
     // angesteuert für eine andere Anfrage: nein
     expect(canConfirm(a, { id: 7, armedAt: 100 }, { id: 6, at: 2000 }, 2500)).toBe(false)

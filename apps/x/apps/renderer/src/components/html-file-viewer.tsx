@@ -7,6 +7,7 @@ import {
   cacheBustedUrl,
   canAcceptRequest,
   canConfirm,
+  eventTime,
   konzeptHinweise,
   linkOpenRequest,
   nextPendingRequest,
@@ -250,8 +251,9 @@ function FlaecheViewer({ path, active }: { path: string; active: boolean }) {
   // After the lock, "Öffnen" also needs the user to steer to it (pointer enters it, or keyboard focus with
   // :focus-visible). Every such moment is recorded; canConfirm only counts one after armedAt + confirmDelayMs,
   // so a cursor already resting where the button appeared must leave and come back. Recording it re-renders,
-  // which is what turns the button active (no timer needed).
-  const engage = (id: number) => setEngaged({ id, at: performance.now() })
+  // which is what turns the button active (no timer needed). `at` is the event's own time (eventTime), so a
+  // stalled main thread cannot move an entry made during the lock behind it.
+  const engage = (id: number, at: number) => setEngaged({ id, at })
 
   const title = useMemo(() => {
     const name = path.split('/').pop() ?? path
@@ -332,18 +334,21 @@ function FlaecheViewer({ path, active }: { path: string; active: boolean }) {
             // Not `disabled`: a disabled button can neither take keyboard focus nor reliably report the pointer
             // entering it. It is inactive (aria-disabled, greyed, click ignored) until canConfirm allows it.
             aria-disabled={!canOpen}
-            onPointerEnter={() => engage(pending.id)}
+            title={canOpen ? undefined : 'Zum Öffnen den Mauszeiger neu auf den Knopf bewegen'}
+            onPointerEnter={(e) => engage(pending.id, eventTime(e.timeStamp, performance.now()))}
             onFocus={(e) => {
+              const at = eventTime(e.timeStamp, performance.now())
               let byKeyboard = false
               try {
                 byKeyboard = e.currentTarget.matches(':focus-visible')
               } catch {
                 byKeyboard = false
               }
-              if (byKeyboard) engage(pending.id)
+              if (byKeyboard) engage(pending.id, at)
             }}
-            onClick={() => {
-              if (!canConfirm(pending, armed, engaged, performance.now())) return
+            onClick={(e) => {
+              // Judged at the click's own time, which must lie after the engagement.
+              if (!canConfirm(pending, armed, engaged, eventTime(e.timeStamp, performance.now()))) return
               const { kind, value } = pending
               setPending((p) => nextPendingRequest(p, { type: 'open' }))
               if (kind === 'link') {
@@ -366,6 +371,8 @@ function FlaecheViewer({ path, active }: { path: string; active: boolean }) {
             onClick={() => {
               // A looping page would re-post at once and keep the header in confirmation mode: quiet for 10 s.
               cancelledAtRef.current = Date.now()
+              // A note check started before the cancel must not raise a strip afterwards.
+              generationRef.current += 1
               setPending((p) => nextPendingRequest(p, { type: 'cancel' }))
             }}
             className="shrink-0 rounded-md border border-border bg-background px-2.5 py-1 font-medium hover:bg-accent"
