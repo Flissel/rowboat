@@ -349,7 +349,8 @@ function mimeOhneParameter(contentType: string | null): string {
 export function shouldApplyHtmlHeaders(names: string[], contentType: string | null): boolean {
   const mime = mimeOhneParameter(contentType)
   if (mime === 'text/html' || mime === 'application/xhtml+xml') return true
-  return names.some((n) => istHtmlNamentlich(n))
+  // Namen auch als reine Dateinamen pruefen: absolute Pfade koennen # ? % im Ordnernamen haben.
+  return names.some((n) => istHtmlNamentlich(n) || isHtmlPath(n.replace(/[. ]+$/, '')))
 }
 
 /** Die drei Köpfe für eine Antwort, die {@link shouldApplyHtmlHeaders} bejaht hat. */

@@ -245,14 +245,15 @@ async function listSpaceAssets(orgId: string, spaceId: string): Promise<Array<{ 
  * Quelle (file:// oder Fern-Server) geschickt hat. Rumpf, Status und Range-Verhalten bleiben;
  * Fehlerantworten (404/403 ...) gehen unveraendert durch.
  */
-function withWorkspaceHtmlHeaders(res: Response, names: string[], local: boolean): Response {
-  if (!res.ok) return res;
+function withWorkspaceHtmlHeaders(res: Response, names: string[]): Response {
   const contentType = res.headers.get("content-type");
+  // Fehlerantworten gehen unveraendert durch, ausser sie sind selbst HTML (z. B. Proxy-Fehlerseite).
+  if (!res.ok && !shouldApplyHtmlHeaders([], contentType)) return res;
   let extra: Record<string, string> | null = null;
   if (shouldApplyHtmlHeaders(names, contentType)) {
     extra = htmlResponseHeaders();
-  } else if (local && needsNosniffOnly(contentType)) {
-    // Fehlender/generischer Typ bei lokalen Dateien: nie zu einem Dokument erraten lassen.
+  } else if (needsNosniffOnly(contentType)) {
+    // Fehlender/generischer Typ (lokal wie fern): nie zu einem Dokument erraten lassen.
     extra = { "X-Content-Type-Options": "nosniff" };
   }
   if (!extra) return res; // Medien (Bild/Video/PDF/Range): dieselbe Response, unveraendert
@@ -292,7 +293,6 @@ async function handleAppRequest(request: Request): Promise<Response> {
             return withWorkspaceHtmlHeaders(
               await fetch(`${baseUrl}/workspace/${relPath.split("/").map(encodeURIComponent).join("/")}`, { headers }),
               [relPath],
-              false,
             );
           }
           const absPath = resolveWorkspacePath(relPath);
@@ -304,7 +304,7 @@ async function handleAppRequest(request: Request): Promise<Response> {
           if (realTarget !== realRoot && !realTarget.startsWith(realRoot + path.sep)) {
             return new Response("Forbidden", { status: 403 });
           }
-          return withWorkspaceHtmlHeaders(await net.fetch(pathToFileURL(realTarget).toString()), [relPath, realTarget], true);
+          return withWorkspaceHtmlHeaders(await net.fetch(pathToFileURL(realTarget).toString()), [relPath, realTarget]);
         } catch {
           return new Response("Forbidden", { status: 403 });
         }

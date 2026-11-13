@@ -136,6 +136,10 @@ describe('konzept', () => {
     expect(shouldApplyHtmlHeaders(['x.txt'], 'Text/HTML; charset=utf-8')).toBe(true)
     expect(shouldApplyHtmlHeaders(['x'], 'application/xhtml+xml')).toBe(true)
     expect(shouldApplyHtmlHeaders(['a.HTM'], null)).toBe(true)
+    for (const dir of ['C:\\Users\\u\\C#proj\\ws', '/home/u/a?b/ws', '/home/u/100%/ws', '/home/u/a%2/ws']) {
+      expect(shouldApplyHtmlHeaders(['x.txt', `${dir}/y.html`], 'text/plain'), dir).toBe(true)
+      expect(shouldApplyHtmlHeaders(['x.txt', `${dir}/y.md`], 'text/plain'), dir).toBe(false)
+    }
     expect(shouldApplyHtmlHeaders(['x.txt', 'y.md'], 'text/plain')).toBe(false)
     expect(shouldApplyHtmlHeaders(['a.png'], 'image/png')).toBe(false)
     expect(shouldApplyHtmlHeaders(['a.mp4'], 'video/mp4')).toBe(false)

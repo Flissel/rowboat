@@ -64,4 +64,22 @@ describe('workspace route: HTML delivery', () => {
     expect(res.headers.get('content-security-policy')).toBe(WORKSPACE_HTML_CSP);
     expect(res.headers.get('content-type')).toBe('text/html; charset=utf-8');
   });
+
+  it('wendet die Regel auf eine Verknuepfung an, auch wenn der Arbeitsordner # oder % im Namen hat', async (ctx) => {
+    const sonder = fs.mkdtempSync(path.join(os.tmpdir(), 'ws#50%-'));
+    try {
+      fs.writeFileSync(path.join(sonder, 'y.html'), '<p>y</p>');
+      try {
+        fs.symlinkSync(path.join(sonder, 'y.html'), path.join(sonder, 'x.txt'));
+      } catch {
+        ctx.skip(); // Windows ohne Symlink-Recht
+      }
+      const sApp = createWorkspaceRoutes((rel) => path.join(sonder, rel));
+      const res = await sApp.request('/workspace/x.txt');
+      expect(res.status).toBe(200);
+      expect(res.headers.get('content-security-policy')).toBe(WORKSPACE_HTML_CSP);
+    } finally {
+      fs.rmSync(sonder, { recursive: true, force: true });
+    }
+  });
 });
