@@ -10,6 +10,10 @@ import {
   isKnowledgeHtmlPath,
   readKonzept,
   workspaceHtmlHeaders,
+  htmlResponseHeaders,
+  isHtmlPath,
+  needsNosniffOnly,
+  shouldApplyHtmlHeaders,
 } from './konzept.js'
 
 const SEITE = (block: string) => `<!doctype html><html><head><title>Mein &amp; Konzept</title>
@@ -120,6 +124,31 @@ describe('konzept', () => {
     expect(frameNavigationDecision('APP://Workspace/knowledge/a.html', 'x')).toBe('block')
     expect(frameNavigationDecision('app://workspace/knowledge/a.png?f=a.html', 'x')).toBe('allow')
     expect(workspaceHtmlHeaders('knowledge/a.md')).toBeNull()
+  })
+  it('.xhtml gilt als HTML (Typ bleibt text/html)', () => {
+    expect(isHtmlPath('knowledge/a.XHTML')).toBe(true)
+    expect(workspaceHtmlHeaders('knowledge/a.xhtml')?.['Content-Type']).toBe('text/html; charset=utf-8')
+    expect(workspaceHtmlHeaders('knowledge/a.xhtml')?.['Content-Security-Policy']).toBe(WORKSPACE_HTML_CSP)
+    expect(frameNavigationDecision('app://workspace/knowledge/a.xhtml', 'https://example.com/')).toBe('block')
+  })
+  it('shouldApplyHtmlHeaders: Namen und erkannter Content-Type', () => {
+    expect(shouldApplyHtmlHeaders(['x.txt', 'y.html'], 'text/plain')).toBe(true) // Verknüpfung
+    expect(shouldApplyHtmlHeaders(['x.txt'], 'Text/HTML; charset=utf-8')).toBe(true)
+    expect(shouldApplyHtmlHeaders(['x'], 'application/xhtml+xml')).toBe(true)
+    expect(shouldApplyHtmlHeaders(['a.HTM'], null)).toBe(true)
+    expect(shouldApplyHtmlHeaders(['x.txt', 'y.md'], 'text/plain')).toBe(false)
+    expect(shouldApplyHtmlHeaders(['a.png'], 'image/png')).toBe(false)
+    expect(shouldApplyHtmlHeaders(['a.mp4'], 'video/mp4')).toBe(false)
+    expect(htmlResponseHeaders()['Content-Security-Policy']).toBe(WORKSPACE_HTML_CSP)
+  })
+  it('needsNosniffOnly: fehlend oder generisch', () => {
+    expect(needsNosniffOnly(null)).toBe(true)
+    expect(needsNosniffOnly('')).toBe(true)
+    expect(needsNosniffOnly('application/octet-stream')).toBe(true)
+    expect(needsNosniffOnly('Text/Plain; charset=utf-8')).toBe(true)
+    expect(needsNosniffOnly('image/png')).toBe(false)
+    expect(needsNosniffOnly('video/mp4')).toBe(false)
+    expect(needsNosniffOnly('application/pdf')).toBe(false)
   })
   it('hostile Eingaben bleiben linear schnell', () => {
     for (const eingabe of ['<'.repeat(200_000), '<script '.repeat(50_000), '<!--'.repeat(100_000), '<a title="'.repeat(50_000)]) {

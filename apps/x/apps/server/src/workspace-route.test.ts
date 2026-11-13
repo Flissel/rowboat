@@ -9,12 +9,21 @@ import { createWorkspaceRoutes } from './workspace-route.js';
 describe('workspace route: HTML delivery', () => {
   let root: string;
   let app: Hono;
+  let symlinkOk = false;
 
   beforeAll(() => {
     root = fs.mkdtempSync(path.join(os.tmpdir(), 'ws-route-'));
     fs.mkdirSync(path.join(root, 'knowledge'));
     fs.writeFileSync(path.join(root, 'knowledge', 'a.html'), '<p>hi</p>');
     fs.writeFileSync(path.join(root, 'knowledge', 'b.md'), '# b');
+    fs.writeFileSync(path.join(root, 'knowledge', 'c.HTM'), '<p>c</p>');
+    fs.writeFileSync(path.join(root, 'knowledge', 'd.xhtml'), '<p>d</p>');
+    try {
+      fs.symlinkSync(path.join(root, 'knowledge', 'a.html'), path.join(root, 'knowledge', 'x.txt'));
+      symlinkOk = true;
+    } catch {
+      symlinkOk = false; // Windows ohne Symlink-Recht
+    }
     app = createWorkspaceRoutes((rel) => path.join(root, rel));
   });
 
@@ -32,5 +41,27 @@ describe('workspace route: HTML delivery', () => {
     const md = await app.request('/workspace/knowledge/b.md');
     expect(md.headers.get('content-type')).toBe('text/markdown; charset=utf-8');
     expect(md.headers.get('content-security-policy')).toBeNull();
+  });
+
+  it('wendet die Regel auch auf .HTM, .xhtml und Endpunkt-Namen an', async () => {
+    for (const p of ['c.HTM', 'd.xhtml', 'a.html.', 'a.html%20']) {
+      const res = await app.request(`/workspace/knowledge/${p}`);
+      if (res.status !== 200) continue; // Namen mit Endpunkt loest nicht jedes Dateisystem auf
+      expect(res.headers.get('content-security-policy'), p).toBe(WORKSPACE_HTML_CSP);
+    }
+    for (const p of ['c.HTM', 'd.xhtml']) {
+      const res = await app.request(`/workspace/knowledge/${p}`);
+      expect(res.status, p).toBe(200);
+      expect(res.headers.get('content-type'), p).toBe('text/html; charset=utf-8');
+      expect(res.headers.get('x-content-type-options'), p).toBe('nosniff');
+    }
+  });
+
+  it('wendet die Regel auf eine Verknuepfung x.txt -> a.html an', async (ctx) => {
+    if (!symlinkOk) ctx.skip();
+    const res = await app.request('/workspace/knowledge/x.txt');
+    expect(res.status).toBe(200);
+    expect(res.headers.get('content-security-policy')).toBe(WORKSPACE_HTML_CSP);
+    expect(res.headers.get('content-type')).toBe('text/html; charset=utf-8');
   });
 });

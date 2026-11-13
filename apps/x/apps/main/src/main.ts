@@ -52,7 +52,12 @@ import container, { registerBrowserControlService, registerNotificationService, 
 import { forwardRpc } from "./rpc-forwarder.js";
 import { bounceAllLive, getClient as getSpaceClient, listOrgs as listSpaceOrgs } from "@x/core/dist/spaces/orgs.js";
 import { parseOrgUrl } from "@x/shared/dist/spaces.js";
-import { frameNavigationDecision, workspaceHtmlHeaders } from "@x/shared/dist/konzept.js";
+import {
+  frameNavigationDecision,
+  htmlResponseHeaders,
+  needsNosniffOnly,
+  shouldApplyHtmlHeaders,
+} from "@x/shared/dist/konzept.js";
 import type { CodeModeManager } from "@x/core/dist/code-mode/acp/manager.js";
 import type { ISessions } from "@x/core/dist/runtime/sessions/index.js";
 import { browserViewManager, BROWSER_PARTITION } from "./browser/view.js";
@@ -240,9 +245,17 @@ async function listSpaceAssets(orgId: string, spaceId: string): Promise<Array<{ 
  * Quelle (file:// oder Fern-Server) geschickt hat. Rumpf, Status und Range-Verhalten bleiben;
  * Fehlerantworten (404/403 ...) gehen unveraendert durch.
  */
-function withWorkspaceHtmlHeaders(res: Response, relPath: string): Response {
-  const extra = workspaceHtmlHeaders(relPath);
-  if (!extra || !res.ok) return res;
+function withWorkspaceHtmlHeaders(res: Response, names: string[], local: boolean): Response {
+  if (!res.ok) return res;
+  const contentType = res.headers.get("content-type");
+  let extra: Record<string, string> | null = null;
+  if (shouldApplyHtmlHeaders(names, contentType)) {
+    extra = htmlResponseHeaders();
+  } else if (local && needsNosniffOnly(contentType)) {
+    // Fehlender/generischer Typ bei lokalen Dateien: nie zu einem Dokument erraten lassen.
+    extra = { "X-Content-Type-Options": "nosniff" };
+  }
+  if (!extra) return res; // Medien (Bild/Video/PDF/Range): dieselbe Response, unveraendert
   const headers = new Headers(res.headers);
   for (const [name, value] of Object.entries(extra)) headers.set(name, value);
   return new Response(res.body, { status: res.status, statusText: res.statusText, headers });
@@ -278,7 +291,8 @@ async function handleAppRequest(request: Request): Promise<Response> {
             if (range) headers.set("range", range);
             return withWorkspaceHtmlHeaders(
               await fetch(`${baseUrl}/workspace/${relPath.split("/").map(encodeURIComponent).join("/")}`, { headers }),
-              relPath,
+              [relPath],
+              false,
             );
           }
           const absPath = resolveWorkspacePath(relPath);
@@ -290,7 +304,7 @@ async function handleAppRequest(request: Request): Promise<Response> {
           if (realTarget !== realRoot && !realTarget.startsWith(realRoot + path.sep)) {
             return new Response("Forbidden", { status: 403 });
           }
-          return withWorkspaceHtmlHeaders(await net.fetch(pathToFileURL(realTarget).toString()), relPath);
+          return withWorkspaceHtmlHeaders(await net.fetch(pathToFileURL(realTarget).toString()), [relPath, realTarget], true);
         } catch {
           return new Response("Forbidden", { status: 403 });
         }

@@ -36,7 +36,7 @@ function segName(s: string): string {
 }
 
 export function isHtmlPath(relPath: string): boolean {
-  return /\.html?$/i.test(relPath)
+  return /\.(html?|xhtml)$/i.test(relPath)
 }
 
 export function isKnowledgeHtmlPath(relPath: string): boolean {
@@ -326,11 +326,41 @@ function istHtmlNamentlich(pfadOderUrl: string): boolean {
 /** Im Zweifel (Query, Fragment, Kodierung, Endpunkt) gilt eine Datei als HTML und bekommt die Regel. */
 export function workspaceHtmlHeaders(relPath: string): Record<string, string> | null {
   if (!istHtmlNamentlich(relPath)) return null
+  return htmlAntwortKoepfe()
+}
+
+function htmlAntwortKoepfe(): Record<string, string> {
   return {
     'Content-Type': 'text/html; charset=utf-8',
     'Content-Security-Policy': WORKSPACE_HTML_CSP,
     'X-Content-Type-Options': 'nosniff',
   }
+}
+
+function mimeOhneParameter(contentType: string | null): string {
+  return (contentType ?? '').split(';')[0].trim().toLowerCase()
+}
+
+/**
+ * Entscheidung für eine Arbeitsverzeichnis-Antwort: Regel anwenden, wenn EINER der Namen
+ * (angefragter Pfad, aufgelöster Verknüpfungs-Pfad) nach HTML aussieht oder der Content-Type
+ * HTML/XHTML ist (z. B. aus der MIME-Erkennung bei Dateien mit ungewöhnlichem Namen).
+ */
+export function shouldApplyHtmlHeaders(names: string[], contentType: string | null): boolean {
+  const mime = mimeOhneParameter(contentType)
+  if (mime === 'text/html' || mime === 'application/xhtml+xml') return true
+  return names.some((n) => istHtmlNamentlich(n))
+}
+
+/** Die drei Köpfe für eine Antwort, die {@link shouldApplyHtmlHeaders} bejaht hat. */
+export function htmlResponseHeaders(): Record<string, string> {
+  return htmlAntwortKoepfe()
+}
+
+/** Content-Type fehlt oder ist generisch: Chromium könnte den Inhalt als Dokument erraten. */
+export function needsNosniffOnly(contentType: string | null): boolean {
+  const mime = mimeOhneParameter(contentType)
+  return mime === '' || mime === 'application/octet-stream' || mime === 'text/plain'
 }
 
 export function frameNavigationDecision(frameUrl: string, targetUrl: string): 'allow' | 'block' {
