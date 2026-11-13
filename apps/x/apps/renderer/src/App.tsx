@@ -11,7 +11,7 @@ import { noteSpaceVisit } from '@/lib/spaces-visits'
 import { railForOpening, rememberRail } from '@/lib/spaces-rail-memory'
 import * as React from 'react'
 import { useCallback, useEffect, useLayoutEffect, useMemo, useState, useRef } from 'react'
-import { workspace, quickAskShortcut, pttKey, type ipc } from '@x/shared';
+import { workspace, quickAskShortcut, pttKey, konzept, type ipc } from '@x/shared';
 import { RunEvent } from '@x/shared/src/runs.js';
 import type { ToolUIPart } from 'ai';
 import './App.css'
@@ -94,6 +94,7 @@ import { matchBillingError, type BillingErrorMatch } from "@/lib/billing-error"
 import { dispatchCreditExhausted, dispatchCreditReplenished } from "@/lib/credit-status"
 import { ensureMarkdownExtension, normalizeWikiPath, splitWikiFragment, stripKnowledgePrefix, toKnowledgePath, wikiLabel } from '@/lib/wiki-links'
 import { buildHierarchyGraph, graphFileData, parseVaultMap, vaultMapNodeId, type NodeInfo } from '@/lib/graph-hierarchy'
+import { graphHtmlData, graphNodeLabel, knowledgeHtmlFiles } from '@/lib/graph-html'
 import { splitFrontmatter, joinFrontmatter } from '@/lib/frontmatter'
 import { extractConferenceLink } from '@/lib/calendar-event'
 import { OnboardingModal } from '@/components/onboarding'
@@ -6345,13 +6346,18 @@ function App() {
     )
     return Array.from(new Set(files.map(stripKnowledgePrefix)))
   }, [tree])
+  // Graph, wiki-link resolution and [[ completion also see HTML concepts (with extension);
+  // knowledgeFiles stays markdown-only for everything that assumes Markdown.
+  const knowledgeGraphFiles = React.useMemo(() => (
+    [...knowledgeFiles, ...knowledgeHtmlFiles(collectFilePaths(tree))]
+  ), [tree, knowledgeFiles])
   const knowledgeFilePaths = React.useMemo(() => (
-    knowledgeFiles.reduce<string[]>((acc, filePath) => {
+    knowledgeGraphFiles.reduce<string[]>((acc, filePath) => {
       const resolved = toKnowledgePath(filePath)
       if (resolved) acc.push(resolved)
       return acc
     }, [])
-  ), [knowledgeFiles])
+  ), [knowledgeGraphFiles])
   const knowledgeFilePathsKey = knowledgeFilePaths.join('\n')
 
   // Compute visible files (files whose parent directories are expanded)
@@ -6987,12 +6993,12 @@ function App() {
 
     const targetPath = ensureMarkdownExtension(basePath)
     const targetKey = targetPath.toLowerCase()
-    const exactMatch = knowledgeFiles.find((filePath) => normalizeWikiPath(filePath).toLowerCase() === targetKey)
+    const exactMatch = knowledgeGraphFiles.find((filePath) => normalizeWikiPath(filePath).toLowerCase() === targetKey)
     if (exactMatch) return toKnowledgePath(exactMatch)
 
     if (!basePath.includes('/')) {
       const targetBaseName = targetPath.split('/').pop()?.toLowerCase()
-      const basenameMatches = knowledgeFiles.filter((filePath) => {
+      const basenameMatches = knowledgeGraphFiles.filter((filePath) => {
         const normalizedFile = normalizeWikiPath(filePath)
         return normalizedFile.split('/').pop()?.toLowerCase() === targetBaseName
       })
@@ -7000,7 +7006,7 @@ function App() {
     }
 
     return toKnowledgePath(basePath)
-  }, [knowledgeFiles])
+  }, [knowledgeGraphFiles])
 
   const ensureWikiFile = useCallback(async (wikiPath: string) => {
     const resolvedPath = resolveWikiFilePath(wikiPath)
@@ -7032,7 +7038,7 @@ function App() {
   }, [ensureWikiFile, navigateToFile])
 
   const wikiLinkConfig = React.useMemo(() => ({
-    files: knowledgeFiles,
+    files: knowledgeGraphFiles,
     recent: recentWikiFiles,
     onOpen: (path: string) => {
       void openWikiLink(path)
@@ -7040,7 +7046,7 @@ function App() {
     onCreate: (path: string) => {
       void ensureWikiFile(path)
     },
-  }), [knowledgeFiles, recentWikiFiles, openWikiLink, ensureWikiFile])
+  }), [knowledgeGraphFiles, recentWikiFiles, openWikiLink, ensureWikiFile])
 
   const isBrainGraphOpen = isKnowledgeViewOpen && knowledgeViewMode === 'graph'
 
@@ -7070,7 +7076,8 @@ function App() {
         graphFilePaths.map(async (path) => {
           try {
             const result = await window.ipc.invoke('workspace:readFile', { path })
-            return { path, data: graphFileData(result) }
+            const data = graphFileData(result)
+            return { path, data: konzept.isHtmlPath(path) ? graphHtmlData(data) : data }
           } catch (err) {
             console.error('Failed to read file for graph:', path, err)
             return { path, data: '' }
@@ -7124,6 +7131,7 @@ function App() {
         }
       }
 
+      const contentByPath = new Map(contents.map((c) => [c.path, c.data]))
       const nodes = graphFilePaths.map((path) => {
         const degree = degreeMap.get(path) ?? 0
         const radius = 6 + Math.min(18, degree * 2)
@@ -7135,7 +7143,7 @@ function App() {
         const colors = getNodeColors(groupIndex, depth)
         return {
           id: path,
-          label: wikiLabel(path) || path,
+          label: graphNodeLabel(path, contentByPath.get(path) ?? ''),
           degree,
           radius,
           group,
