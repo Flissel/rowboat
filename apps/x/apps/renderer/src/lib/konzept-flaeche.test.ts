@@ -1,15 +1,14 @@
 import { describe, expect, it } from 'vitest'
 import {
-  acceptNoteMessage,
   cacheBustedUrl,
+  canConfirm,
   konzeptHinweise,
   konzeptPathFromTool,
   linkOpenRequest,
-  nextPendingLink,
+  nextPendingRequest,
   noteOpenRequest,
   reloadDebounceMs,
   shouldAutoOpen,
-  userActivationActive,
   workspaceEventTouches,
 } from './konzept-flaeche'
 
@@ -119,59 +118,29 @@ describe('konzept-flaeche', () => {
     expect(cacheBustedUrl('app://workspace/k.html?x=1', 3)).toBe('app://workspace/k.html?x=1&v=3')
   })
 
-  it('wertet userActivation fail-closed aus', () => {
-    expect(userActivationActive({ userActivation: { isActive: true } })).toBe(true)
-    expect(userActivationActive({ userActivation: { isActive: false } })).toBe(false)
-    expect(userActivationActive({ userActivation: {} })).toBe(false)
-    expect(userActivationActive({})).toBe(false)
-    expect(userActivationActive(undefined)).toBe(false)
+  it('führt die Rückfrage durch ihre Zustände (Link und Notiz zusammen)', () => {
+    const a = nextPendingRequest(null, { type: 'request', kind: 'link', value: 'https://a.example/', now: 1000 })
+    expect(a).toEqual({ kind: 'link', value: 'https://a.example/', at: 1000 })
+    // zweite Anfrage (egal welcher Art) innerhalb von 10 s ersetzt nicht
+    expect(nextPendingRequest(a, { type: 'request', kind: 'note', value: 'knowledge/n.md', now: 5000 })).toBe(a)
+    expect(nextPendingRequest(a, { type: 'request', kind: 'link', value: 'https://b.example/', now: 11000 })).toBe(a)
+    // älter als 10 s: ersetzt, Zeitpunkt neu
+    expect(nextPendingRequest(a, { type: 'request', kind: 'note', value: 'knowledge/n.md', now: 11001 })).toEqual({ kind: 'note', value: 'knowledge/n.md', at: 11001 })
+    expect(nextPendingRequest(a, { type: 'cancel' })).toBeNull()
+    expect(nextPendingRequest(a, { type: 'open' })).toBeNull()
+    expect(nextPendingRequest(a, { type: 'reset' })).toBeNull()
+    expect(nextPendingRequest(null, { type: 'cancel' })).toBeNull()
   })
 
-  it('führt die Link-Rückfrage durch ihre Zustände', () => {
-    const a = nextPendingLink(null, { type: 'request', url: 'https://a.example/', now: 1000 })
-    expect(a).toEqual({ url: 'https://a.example/', at: 1000 })
-    // zweite Anfrage innerhalb von 10 s ersetzt nicht
-    expect(nextPendingLink(a, { type: 'request', url: 'https://b.example/', now: 5000 })).toBe(a)
-    expect(nextPendingLink(a, { type: 'request', url: 'https://b.example/', now: 11000 })).toBe(a)
-    // älter als 10 s: ersetzt
-    expect(nextPendingLink(a, { type: 'request', url: 'https://b.example/', now: 11001 })).toEqual({ url: 'https://b.example/', at: 11001 })
-    expect(nextPendingLink(a, { type: 'cancel' })).toBeNull()
-    expect(nextPendingLink(a, { type: 'open' })).toBeNull()
-    expect(nextPendingLink(a, { type: 'reset' })).toBeNull()
-    expect(nextPendingLink(null, { type: 'cancel' })).toBeNull()
-  })
-
-  describe('acceptNoteMessage', () => {
-    const base = {
-      fromFrame: true,
-      visible: true,
-      activationActive: true,
-      frameIsActiveElement: true,
-      frameFocusedAt: 500,
-      lastParentInputAt: 100 as number | null,
-      lastActionAt: null as number | null,
-      now: 2000,
-    }
-    it('nimmt: Klick in der Seite, dann Nachricht', () => {
-      expect(acceptNoteMessage(base)).toBe(true)
-      expect(acceptNoteMessage({ ...base, lastParentInputAt: null })).toBe(true)
-    })
-    it('lehnt ab: Nutzer tippt im Chat, während die Seite sendet', () => {
-      expect(acceptNoteMessage({ ...base, lastParentInputAt: 1500, frameIsActiveElement: false })).toBe(false)
-      // Fokus liegt (noch) am Rahmen, aber es gab Eingabe im Hauptfenster danach
-      expect(acceptNoteMessage({ ...base, lastParentInputAt: 1500 })).toBe(false)
-      expect(acceptNoteMessage({ ...base, lastParentInputAt: 500 })).toBe(false)
-    })
-    it('lehnt ab: fremdes Fenster, verborgen, keine Aktivierung, Rahmen ohne Fokus, nie fokussiert', () => {
-      expect(acceptNoteMessage({ ...base, fromFrame: false })).toBe(false)
-      expect(acceptNoteMessage({ ...base, visible: false })).toBe(false)
-      expect(acceptNoteMessage({ ...base, activationActive: false })).toBe(false)
-      expect(acceptNoteMessage({ ...base, frameIsActiveElement: false })).toBe(false)
-      expect(acceptNoteMessage({ ...base, frameFocusedAt: null })).toBe(false)
-    })
-    it('hält die Wartezeit von 1 s ein', () => {
-      expect(acceptNoteMessage({ ...base, lastActionAt: 1500 })).toBe(false)
-      expect(acceptNoteMessage({ ...base, lastActionAt: 1000 })).toBe(true)
-    })
+  it('sperrt "Öffnen" 700 ms nach Erscheinen oder Inhaltswechsel', () => {
+    const a = nextPendingRequest(null, { type: 'request', kind: 'link', value: 'https://a.example/', now: 1000 })
+    expect(canConfirm(null, 5000)).toBe(false)
+    expect(canConfirm(a, 1000)).toBe(false)
+    expect(canConfirm(a, 1699)).toBe(false)
+    expect(canConfirm(a, 1700)).toBe(true)
+    // nach 10 s ersetzter Inhalt: wieder gesperrt
+    const b = nextPendingRequest(a, { type: 'request', kind: 'link', value: 'https://b.example/', now: 20000 })
+    expect(canConfirm(b, 20100)).toBe(false)
+    expect(canConfirm(b, 20700)).toBe(true)
   })
 })

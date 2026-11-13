@@ -18,7 +18,7 @@ import './App.css'
 import z from 'zod';
 import { CheckIcon, LoaderIcon, PanelLeftIcon, ChevronLeftIcon, ChevronRightIcon, Plus, HistoryIcon, MessageSquare } from 'lucide-react';
 import { cn, compactPath, parentPath } from '@/lib/utils';
-import { EMAIL_ENABLED, SPACES_ENABLED } from '@/lib/feature-flags';
+import { EMAIL_ENABLED, LOCAL_RUNTIME, SPACES_ENABLED } from '@/lib/feature-flags';
 import { gateEmailView } from '@/lib/email-gate';
 import { SHORTCUTS, isRichTextTarget } from '@/lib/shortcuts';
 import { Keys } from '@/components/keys';
@@ -6088,6 +6088,7 @@ function App() {
   // Per run, surviving chat-tab switches: a concept already opened in a run never pulls the user back.
   const konzeptOpenedByRunRef = useRef<Map<string, Set<string>>>(new Map())
   useEffect(() => {
+    if (!LOCAL_RUNTIME) return // the Flaeche is desktop-only; the web build must not move the chat or open files
     const conversation = sessionChat.chatState?.conversation
     if (!conversation) return
     const completed = conversation.filter(

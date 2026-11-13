@@ -63,13 +63,6 @@ export function linkOpenRequest(msg: unknown): string | null {
   return u.href
 }
 
-/** Wahr nur, wenn der Browser `navigator.userActivation.isActive === true` meldet; fehlt die API, gilt es als nicht aktiv. */
-export function userActivationActive(nav: unknown): boolean {
-  if (!isRecord(nav)) return false
-  const ua = nav.userActivation
-  return isRecord(ua) && ua.isActive === true
-}
-
 /** Hinweise für den Streifen unter der Kopfzeile. Fremde Seiten ohne Datenblock: keine. `sizeBytes` = echte Dateigröße. */
 export function konzeptHinweise(html: string, sizeBytes?: number): string[] {
   const { daten, fehler } = konzept.readKonzept(html)
@@ -104,44 +97,27 @@ export function cacheBustedUrl(url: string, version: number): string {
   return `${url}${url.includes('?') ? '&' : '?'}v=${version}`
 }
 
-/** Eine offene Link-Rückfrage der Seite (Bestätigungsstreifen in der Kopfzeile). */
-export type PendingLink = { url: string; at: number }
-export const pendingLinkMaxAgeMs = 10_000
+/** Eine offene Rückfrage der Seite (Bestätigungsstreifen): Web-Link oder Notiz. `at` = Zeitpunkt, an dem der Inhalt erschien. */
+export type PendingRequest = { kind: 'link' | 'note'; value: string; at: number }
+export const pendingMaxAgeMs = 10_000
+/** So lange bleibt "Öffnen" nach Erscheinen oder Inhaltswechsel gesperrt (gegen Zeitdruck-Klicks). */
+export const confirmDelayMs = 700
 
 /**
- * Zustandsübergänge der Link-Rückfrage. Eine neue Anfrage ersetzt die offene nur, wenn keine offen ist oder
- * die offene älter als 10 s ist. Abbrechen, Öffnen und Zurücksetzen (Neuladen, Ansicht verborgen) leeren sie.
+ * Zustandsübergänge der Rückfrage (Links und Notizen zusammen, eine offene Anfrage). Eine neue Anfrage ersetzt
+ * die offene nur, wenn keine offen ist oder die offene älter als 10 s ist. Abbrechen, Öffnen und Zurücksetzen
+ * (Neuladen, Ansicht verborgen) leeren sie.
  */
-export function nextPendingLink(
-  state: PendingLink | null,
-  event: { type: 'request'; url: string; now: number } | { type: 'cancel' | 'open' | 'reset' },
-): PendingLink | null {
+export function nextPendingRequest(
+  state: PendingRequest | null,
+  event: { type: 'request'; kind: 'link' | 'note'; value: string; now: number } | { type: 'cancel' | 'open' | 'reset' },
+): PendingRequest | null {
   if (event.type !== 'request') return null
-  if (state === null || event.now - state.at > pendingLinkMaxAgeMs) return { url: event.url, at: event.now }
+  if (state === null || event.now - state.at > pendingMaxAgeMs) return { kind: event.kind, value: event.value, at: event.now }
   return state
 }
 
-export const noteActionCooldownMs = 1000
-
-/**
- * Darf eine Notiz-Anfrage der Seite die Notiz öffnen? Nur wenn der Klick wirklich im Rahmen stattfand:
- * Nachricht vom Rahmen, Ansicht sichtbar, Aktivierung aktiv, der Rahmen hat den Fokus, und seit der Rahmen den
- * Fokus bekam, gab es keine Eingabe im Hauptfenster (Tippen im Chat hält die Aktivierung auch am Leben).
- * Zeiten in ms (gleiche Uhr); null = noch nie.
- */
-export function acceptNoteMessage(f: {
-  fromFrame: boolean
-  visible: boolean
-  activationActive: boolean
-  frameIsActiveElement: boolean
-  frameFocusedAt: number | null
-  lastParentInputAt: number | null
-  lastActionAt: number | null
-  now: number
-}): boolean {
-  if (!f.fromFrame || !f.visible || !f.activationActive || !f.frameIsActiveElement) return false
-  if (f.frameFocusedAt === null) return false
-  if (f.lastParentInputAt !== null && f.lastParentInputAt >= f.frameFocusedAt) return false
-  if (f.lastActionAt !== null && f.now - f.lastActionAt < noteActionCooldownMs) return false
-  return true
+/** "Öffnen" darf erst nach `confirmDelayMs` gedrückt werden. */
+export function canConfirm(state: PendingRequest | null, now: number): boolean {
+  return state !== null && now - state.at >= confirmDelayMs
 }

@@ -4,16 +4,16 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { konzept } from '@x/shared'
 import { LOCAL_RUNTIME } from '@/lib/feature-flags'
 import {
-  acceptNoteMessage,
   cacheBustedUrl,
+  canConfirm,
+  confirmDelayMs,
   konzeptHinweise,
   linkOpenRequest,
-  nextPendingLink,
+  nextPendingRequest,
   noteOpenRequest,
   reloadDebounceMs,
-  userActivationActive,
   workspaceEventTouches,
-  type PendingLink,
+  type PendingRequest,
 } from '@/lib/konzept-flaeche'
 import { AlertCircleIcon, ExternalLinkIcon, FileTextIcon, Loader2Icon } from 'lucide-react'
 
@@ -33,13 +33,13 @@ interface HtmlFileViewerProps {
 }
 
 /**
- * The Flaeche (header, hints, reload, message bridge) applies only to workspace files in the desktop
- * app. Every other source (web build, Spaces documents, local previews) keeps the view as it was
- * before: LegacyHtmlFileViewer, untouched.
+ * The Flaeche (header, hints, reload, message bridge, confirmation strip) applies only to HTML under
+ * knowledge/ in the desktop app. Everything else (web build, Spaces documents, local previews,
+ * background-task reports) keeps the view as it was before: LegacyHtmlFileViewer, untouched.
  */
 export function HtmlFileViewer({ path, active = true }: HtmlFileViewerProps) {
   const source = useFileViewerSource()
-  if (!LOCAL_RUNTIME || !source.workspace) return <LegacyHtmlFileViewer path={path} />
+  if (!LOCAL_RUNTIME || !source.workspace || !konzept.isKnowledgeHtmlPath(path)) return <LegacyHtmlFileViewer path={path} />
   return <FlaecheViewer path={path} active={active} />
 }
 
@@ -54,12 +54,10 @@ function FlaecheViewer({ path, active }: { path: string; active: boolean }) {
   const [stale, setStale] = useState(false)
   const [fileText, setFileText] = useState<string | null>(null)
   const [fileSize, setFileSize] = useState(0)
-  const [pendingLink, setPendingLink] = useState<PendingLink | null>(null)
+  const [pending, setPending] = useState<PendingRequest | null>(null)
+  const [, setTick] = useState(0)
   const iframeRef = useRef<HTMLIFrameElement | null>(null)
   const lastPathRef = useRef<string | null>(null)
-  const lastActionRef = useRef<number | null>(null)
-  const lastParentInputRef = useRef<number | null>(null)
-  const frameFocusedRef = useRef<number | null>(null)
   const iframeSrc = useMemo(() => cacheBustedUrl(source.url(path), version), [path, source, version])
 
   useEffect(() => {
@@ -148,92 +146,68 @@ function FlaecheViewer({ path, active }: { path: string; active: boolean }) {
   useEffect(() => {
     if (!stale || !active) return
     setStale(false)
-    setPendingLink((p) => nextPendingLink(p, { type: 'reset' }))
+    setPending((p) => nextPendingRequest(p, { type: 'reset' }))
     setVersion((v) => v + 1)
   }, [stale, active])
 
   // A hidden viewer shows no confirmation strip and has no listener (below).
   useEffect(() => {
-    if (!active) setPendingLink((p) => nextPendingLink(p, { type: 'reset' }))
-  }, [active])
-
-  // Track where the user's input happens. Events inside the cross-origin frame never reach these
-  // capture listeners; typing in the chat or clicking the app does. The frame "took focus" when the
-  // parent window blurs while the iframe is the active element.
-  useEffect(() => {
-    if (!active) return
-    const onInput = () => {
-      lastParentInputRef.current = performance.now()
-    }
-    const onBlur = () => {
-      if (iframeRef.current && document.activeElement === iframeRef.current) frameFocusedRef.current = performance.now()
-    }
-    window.addEventListener('pointerdown', onInput, true)
-    window.addEventListener('keydown', onInput, true)
-    window.addEventListener('blur', onBlur)
-    return () => {
-      window.removeEventListener('pointerdown', onInput, true)
-      window.removeEventListener('keydown', onInput, true)
-      window.removeEventListener('blur', onBlur)
-    }
+    if (!active) setPending((p) => nextPendingRequest(p, { type: 'reset' }))
   }, [active])
 
   // Requests from the page arrive as messages (the frame has no allow-popups, so scripts cannot open
-  // anything themselves). One listener per visible viewer, only from this frame's own window.
-  //  - Web link: never opens on a message alone; it only shows the confirmation strip. "Öffnen" opens it.
-  //  - Note: opens directly, but only after a real click inside the frame (acceptNoteMessage), and only
-  //    if the target file exists.
+  // anything themselves). One listener per visible viewer, only from this frame's own window. Neither
+  // a web link nor a note opens on a message: both only show the confirmation strip, and only a click
+  // on its "Öffnen" button opens them. No activation, focus or timing heuristics.
   useEffect(() => {
     if (!active) return
+    let gone = false
     const onMessage = (e: MessageEvent) => {
       const frameWindow = iframeRef.current?.contentWindow
       if (!frameWindow || e.source !== frameWindow) return
       const link = linkOpenRequest(e.data)
       if (link) {
-        const now = Date.now()
-        setPendingLink((p) => nextPendingLink(p, { type: 'request', url: link, now }))
+        setPending((p) => nextPendingRequest(p, { type: 'request', kind: 'link', value: link, now: Date.now() }))
         return
       }
       const note = noteOpenRequest(e.data)
       if (!note) return
-      const now = performance.now()
-      const ok = acceptNoteMessage({
-        fromFrame: true,
-        visible: active,
-        activationActive: userActivationActive(navigator),
-        frameIsActiveElement: document.activeElement === iframeRef.current,
-        frameFocusedAt: frameFocusedRef.current,
-        lastParentInputAt: lastParentInputRef.current,
-        lastActionAt: lastActionRef.current,
-        now,
-      })
-      if (!ok) return
-      lastActionRef.current = now
       source
         .stat({ path: note })
         .then((st) => {
-          if (st.kind === 'file') window.dispatchEvent(new CustomEvent('rowboat:open-note', { detail: { path: note } }))
+          if (gone || st.kind !== 'file') return
+          setPending((p) => nextPendingRequest(p, { type: 'request', kind: 'note', value: note, now: Date.now() }))
         })
         .catch(() => {})
     }
     window.addEventListener('message', onMessage)
-    return () => window.removeEventListener('message', onMessage)
+    return () => {
+      gone = true
+      window.removeEventListener('message', onMessage)
+    }
   }, [active, source])
+
+  // Re-render once the lock of "Öffnen" is over.
+  const pendingAt = pending?.at
+  useEffect(() => {
+    if (pendingAt === undefined) return
+    const timer = setTimeout(() => setTick((n) => n + 1), confirmDelayMs + 20)
+    return () => clearTimeout(timer)
+  }, [pendingAt])
 
   const title = useMemo(() => {
     const name = path.split('/').pop() ?? path
     return (fileText ? konzept.htmlTitle(fileText) : null) || name
   }, [fileText, path])
   const hinweise = useMemo(() => (fileText ? konzeptHinweise(fileText, fileSize) : []), [fileText, fileSize])
-  const canShowInGraph = konzept.isKnowledgeHtmlPath(path)
   const pendingHost = useMemo(() => {
-    if (!pendingLink) return ''
+    if (pending?.kind !== 'link') return ''
     try {
-      return new URL(pendingLink.url).host
+      return new URL(pending.value).host
     } catch {
       return ''
     }
-  }, [pendingLink])
+  }, [pending])
 
   if (state.kind === 'error') {
     return (
@@ -285,15 +259,13 @@ function FlaecheViewer({ path, active }: { path: string; active: boolean }) {
     <div className="flex h-full w-full flex-col">
       <div className="flex shrink-0 items-center gap-2 border-b border-border bg-background px-3 py-1.5">
         <p className="min-w-0 flex-1 truncate text-sm font-medium text-foreground">{title}</p>
-        {canShowInGraph && (
-          <button
-            type="button"
-            onClick={() => window.dispatchEvent(new CustomEvent('rowboat:show-in-graph', { detail: { path } }))}
-            className="shrink-0 rounded-md border border-border bg-background px-2.5 py-1 text-xs font-medium text-foreground hover:bg-accent"
-          >
-            Im Graphen zeigen
-          </button>
-        )}
+        <button
+          type="button"
+          onClick={() => window.dispatchEvent(new CustomEvent('rowboat:show-in-graph', { detail: { path } }))}
+          className="shrink-0 rounded-md border border-border bg-background px-2.5 py-1 text-xs font-medium text-foreground hover:bg-accent"
+        >
+          Im Graphen zeigen
+        </button>
         <button
           type="button"
           onClick={() => {
@@ -305,34 +277,6 @@ function FlaecheViewer({ path, active }: { path: string; active: boolean }) {
           In neuem Fenster öffnen
         </button>
       </div>
-      {pendingLink && (
-        <div className="flex shrink-0 items-start gap-3 border-b border-border bg-muted px-3 py-2 text-xs text-foreground">
-          <div className="min-w-0 flex-1">
-            <p className="font-medium">Link öffnen?</p>
-            {pendingHost && <p className="text-sm font-semibold">{pendingHost}</p>}
-            <p className="break-all text-muted-foreground">{pendingLink.url}</p>
-          </div>
-          <button
-            type="button"
-            onClick={() => {
-              const url = pendingLink.url
-              setPendingLink((p) => nextPendingLink(p, { type: 'open' }))
-              // Same path the rest of the renderer uses: the main window-open handler sends it to the system browser.
-              window.open(url, '_blank', 'noopener,noreferrer')
-            }}
-            className="shrink-0 rounded-md border border-border bg-background px-2.5 py-1 font-medium hover:bg-accent"
-          >
-            Öffnen
-          </button>
-          <button
-            type="button"
-            onClick={() => setPendingLink((p) => nextPendingLink(p, { type: 'cancel' }))}
-            className="shrink-0 rounded-md border border-border bg-background px-2.5 py-1 font-medium hover:bg-accent"
-          >
-            Abbrechen
-          </button>
-        </div>
-      )}
       {hinweise.length > 0 && (
         <ul className="shrink-0 space-y-0.5 border-b border-border bg-amber-50 px-3 py-1.5 text-xs text-amber-900 dark:bg-amber-950 dark:text-amber-200">
           {hinweise.map((h, i) => (
@@ -341,6 +285,46 @@ function FlaecheViewer({ path, active }: { path: string; active: boolean }) {
         </ul>
       )}
       <div className="relative min-h-0 flex-1">
+        {pending && (
+          // Overlay on top of the frame (never in the flow): the page content does not move when the
+          // strip appears or changes. Keyed by the request so no focus carries over; nothing here
+          // takes focus by itself, and "Öffnen" is locked for confirmDelayMs.
+          <div
+            key={pending.at}
+            className="absolute inset-x-0 top-0 z-10 flex items-start gap-3 border-b border-border bg-muted px-3 py-2 text-xs text-foreground shadow-md"
+          >
+            <div className="min-w-0 flex-1">
+              <p className="font-medium">{pending.kind === 'link' ? 'Link öffnen?' : 'Notiz öffnen?'}</p>
+              {pending.kind === 'link' && pendingHost && <p className="break-all text-sm font-semibold">{pendingHost}</p>}
+              <p className="max-h-24 overflow-y-auto break-all text-muted-foreground">{pending.value}</p>
+            </div>
+            <button
+              type="button"
+              disabled={!canConfirm(pending, Date.now())}
+              onClick={() => {
+                if (!canConfirm(pending, Date.now())) return
+                const { kind, value } = pending
+                setPending((p) => nextPendingRequest(p, { type: 'open' }))
+                if (kind === 'link') {
+                  // Same path the rest of the renderer uses: the main window-open handler sends it to the system browser.
+                  window.open(value, '_blank', 'noopener,noreferrer')
+                } else {
+                  window.dispatchEvent(new CustomEvent('rowboat:open-note', { detail: { path: value } }))
+                }
+              }}
+              className="shrink-0 rounded-md border border-border bg-background px-2.5 py-1 font-medium hover:bg-accent disabled:opacity-50"
+            >
+              Öffnen
+            </button>
+            <button
+              type="button"
+              onClick={() => setPending((p) => nextPendingRequest(p, { type: 'cancel' }))}
+              className="shrink-0 rounded-md border border-border bg-background px-2.5 py-1 font-medium hover:bg-accent"
+            >
+              Abbrechen
+            </button>
+          </div>
+        )}
         {state.kind === 'loaded' && (
           <iframe
             key={`${path}#${version}`}
@@ -348,7 +332,7 @@ function FlaecheViewer({ path, active }: { path: string; active: boolean }) {
             src={iframeSrc}
             // No `allow-popups` and no `allow-same-origin`: the doc stays origin-isolated and a
             // script cannot open a window (Electron would send it to the system browser).
-            // Web links ask for confirmation in the viewer; notes open only after a click in the frame.
+            // Web links and notes ask for confirmation in the viewer.
             sandbox="allow-scripts"
             className="h-full w-full border-0 bg-white"
             title="HTML preview"
