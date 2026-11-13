@@ -57,6 +57,7 @@ import {
   createBackstopState,
   frameNavigationDecision,
   htmlResponseHeaders,
+  isFrameChainConfined,
   isKnowledgeFrameUrl,
   konzeptDocumentKey,
   noteFrameCommit,
@@ -578,13 +579,37 @@ function attachedFrameIds(wc: WebContents): Set<number> | null {
   }
 }
 
+/** Knoten-Ids und Adressen eines Rahmens und seiner Vorfahren (der Rahmen zuerst); null, wenn nicht lesbar. */
+function frameChain(frame: Electron.WebFrameMain | null | undefined): { ids: number[]; urls: string[] } | null {
+  if (!frame) return null;
+  try {
+    const ids: number[] = [];
+    const urls: string[] = [];
+    for (let f: Electron.WebFrameMain | null = frame; f; f = f.parent) {
+      ids.push(f.frameTreeNodeId);
+      urls.push(f.url);
+    }
+    return { ids, urls };
+  } catch {
+    return null; // Rahmen schon verworfen
+  }
+}
+
+/** Sperrt der Rueckhalt-Zustand diesen Rahmen oder einen Vorfahren (R47)? Fuer die Navigationssperre. */
+function isFrameConfinedByState(wc: WebContents, frame: Electron.WebFrameMain | null | undefined): boolean {
+  const state = backstopByContents.get(wc.id);
+  const chain = frameChain(frame);
+  if (!state || !chain) return false;
+  return isFrameChainConfined(chain.ids, state.confined, state.recentlyConfined, Date.now());
+}
+
 function trackConfinedFrames(wc: WebContents): void {
   if (trackedContents.has(wc)) return;
   trackedContents.add(wc);
   const contentsId = wc.id;
   const state = createBackstopState();
   backstopByContents.set(contentsId, state);
-  const committed = (url: string, isMainFrame: boolean, processId: number, routingId: number, inPage: boolean) => {
+  const committed = (url: string, isMainFrame: boolean, processId: number, routingId: number) => {
     const now = Date.now();
     const live = attachedFrameIds(wc);
     if (live) noteFramesAttached(state, live, now);
@@ -597,7 +622,6 @@ function trackConfinedFrames(wc: WebContents): void {
         parentId: frame.parent?.frameTreeNodeId ?? null,
         url,
         servedAsKnowledgeHtml: wasServedAsKnowledgeHtml(url),
-        inPage,
         now,
       });
     } catch {
@@ -605,18 +629,18 @@ function trackConfinedFrames(wc: WebContents): void {
     }
   };
   wc.on("did-frame-navigate", (_event, url, _code, _status, isMainFrame, processId, routingId) =>
-    committed(url, isMainFrame, processId, routingId, false));
+    committed(url, isMainFrame, processId, routingId));
   wc.on("did-navigate-in-page", (_event, url, isMainFrame, processId, routingId) =>
-    committed(url, isMainFrame, processId, routingId, true));
+    committed(url, isMainFrame, processId, routingId));
   wc.once("destroyed", () => backstopByContents.delete(contentsId));
 }
 
 /**
- * Rueckhalt der Kein-Netz-Regel (R40, R43-R46) auf der Standard-Sitzung. Den Rahmen liefert Electron 39 nur als
+ * Rueckhalt der Kein-Netz-Regel (R40, R43-R47) auf der Standard-Sitzung. Den Rahmen liefert Electron 39 nur als
  * details.frame (die Details tragen weder processId noch frameId/frameToken, also kein webFrameMain.fromId/
- * fromFrameToken). Ausgelesen werden Knoten-Id des Rahmens und seiner Vorfahren, ob er im Baum der Ansicht haengt,
- * und ob er oder ein Vorfahr eine Adresse unter knowledge/ zeigt; der Verweiser nie. Fehler im Rueckhalt: abbrechen
- * (ausser Hauptrahmen). Die App registriert sonst kein onBeforeRequest auf dieser Sitzung.
+ * fromFrameToken). Ausgelesen werden Knoten-Id und Adresse des Rahmens, die Ids seiner Vorfahren, ob er im Baum der
+ * Ansicht haengt, und ob er oder ein Vorfahr eine Adresse unter knowledge/ zeigt; der Verweiser nie. Fehler im
+ * Rueckhalt: abbrechen (ausser Hauptrahmen). Die App registriert sonst kein onBeforeRequest auf dieser Sitzung.
  */
 const backstopSessions = new WeakSet<Session>();
 function configureKnowledgeHtmlRequestBackstop(ses: Session): void {
@@ -633,27 +657,16 @@ function configureKnowledgeHtmlRequestBackstop(ses: Session): void {
       const state = wc ? backstopByContents.get(wc.id) : undefined;
       const live = wc ? attachedFrameIds(wc) : null;
       if (state && live) noteFramesAttached(state, live, now);
-      let frameId: number | null = null;
-      const ancestorIds: number[] = [];
-      let chainConfinedByUrl = false;
-      try {
-        if (details.frame) {
-          frameId = details.frame.frameTreeNodeId;
-          for (let f: typeof details.frame | null = details.frame; f; f = f.parent) {
-            if (f !== details.frame) ancestorIds.push(f.frameTreeNodeId);
-            if (isConfinedUrl(f.url)) chainConfinedByUrl = true;
-          }
-        }
-      } catch {
-        frameId = null; // Rahmen schon verworfen
-      }
+      const chain = frameChain(details.frame);
+      const frameId = chain ? chain.ids[0] : null;
       cancel = backstopDecision({
         url: details.url,
         resourceType: details.resourceType,
         frameId,
-        ancestorIds,
+        frameUrl: chain ? chain.urls[0] : null,
+        ancestorIds: chain ? chain.ids.slice(1) : [],
         attached: frameId !== null && live !== null && live.has(frameId),
-        chainConfinedByUrl,
+        chainConfinedByUrl: chain ? chain.urls.some(isConfinedUrl) : false,
         confined: state?.confined ?? EMPTY_IDS,
         recentlyConfined: state?.recentlyConfined ?? EMPTY_RECENT,
         now,
@@ -762,12 +775,20 @@ function createWindow(options: { startHidden?: boolean } = {}) {
   // navigation untouched so the embeds keep working.
   win.webContents.on("will-frame-navigate", (event) => {
     if (event.isMainFrame) return;
-    // Konzept-Flaeche (R43): ein Rahmen unter app://workspace/knowledge/ (oder als Wissens-HTML
-    // ausgeliefert) darf nicht wegnavigieren (Seitenwechsel, meta refresh, Formular, Link). Der erste
-    // Ladevorgang ist nicht betroffen: dort ist frame.url noch leer/about:blank. Andere
-    // app://workspace-Seiten (Hintergrund-Berichte) wie vorher.
-    const frameUrl = event.frame?.url ?? "";
-    if (frameNavigationDecision(frameUrl, wasServedAsKnowledgeHtml(frameUrl)) === "block") {
+    // Konzept-Flaeche (R43, R47): ein Rahmen unter app://workspace/knowledge/ (oder als Wissens-HTML
+    // ausgeliefert, oder laut Rueckhalt-Zustand eingesperrt, auch ueber einen Vorfahren) darf nicht
+    // wegnavigieren (Seitenwechsel, meta refresh, Formular, Link). Der erste Ladevorgang eines neuen
+    // Rahmens ist nicht betroffen: frame.url noch leer/about:blank, Knoten noch nicht im Zustand. Die
+    // Ansicht laedt neu, indem sie den Rahmen neu einhaengt (neuer Knoten). Andere app://workspace-Seiten
+    // (Hintergrund-Berichte) wie vorher.
+    let frameUrl = "";
+    try {
+      frameUrl = event.frame?.url ?? "";
+    } catch {
+      frameUrl = "";
+    }
+    const confinedByState = isFrameConfinedByState(win.webContents, event.frame);
+    if (frameNavigationDecision(frameUrl, wasServedAsKnowledgeHtml(frameUrl), confinedByState) === "block") {
       event.preventDefault();
       return;
     }

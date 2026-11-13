@@ -18,6 +18,7 @@ import {
   backstopDecision,
   createBackstopState,
   isConfinedCommit,
+  isFrameChainConfined,
   noteFrameCommit,
   noteFramesAttached,
   CONFINED_GRACE_MS,
@@ -208,30 +209,26 @@ describe('konzept', () => {
     expect(isConfinedCommit('app://workspace/bg-tasks/x/index.html', false, false)).toBe(false)
     expect(isConfinedCommit('https://www.youtube.com/embed/x', false, false)).toBe(false)
   })
-  it('Rückhalt-Zustand (R46): In-Page entlässt nie, Dokumentwechsel und Abbau entlassen in recentlyConfined, Ablauf', () => {
+  it('Rückhalt-Zustand (R47): eingesperrt auf Lebenszeit, nur der Abbau entlässt, Ablauf nach 5 s', () => {
     const k = 'app://workspace/knowledge/a.html'
     const st = createBackstopState()
-    noteFrameCommit(st, { frameId: 7, parentId: 1, url: k, inPage: false, now: 1000 })
+    noteFrameCommit(st, { frameId: 7, parentId: 1, url: k, now: 1000 })
     expect([...st.confined]).toEqual([7])
-    // In-Page-Navigation zu einer fremden Adresse: bleibt eingesperrt
-    noteFrameCommit(st, { frameId: 7, parentId: 1, url: 'https://example.com/#x', inPage: true, now: 1100 })
-    expect(st.confined.has(7)).toBe(true)
-    // In-Page innerhalb von knowledge/ fügt hinzu
-    noteFrameCommit(st, { frameId: 9, parentId: 1, url: `${k}#teil`, inPage: true, now: 1100 })
-    expect(st.confined.has(9)).toBe(true)
-    // Kind eines eingesperrten Rahmens
-    noteFrameCommit(st, { frameId: 8, parentId: 7, url: 'about:srcdoc', inPage: false, now: 1150 })
-    expect(st.confined.has(8)).toBe(true)
-    // Dokumentwechsel nach außerhalb: entlassen, mit Zeitpunkt
-    noteFrameCommit(st, { frameId: 7, parentId: 1, url: 'https://www.figma.com/embed', inPage: false, now: 1200 })
-    expect(st.confined.has(7)).toBe(false)
-    expect(st.recentlyConfined.get(7)).toBe(1200)
-    // erneut eingesperrt: aus recentlyConfined heraus
-    noteFrameCommit(st, { frameId: 7, parentId: 1, url: k, inPage: false, now: 1300 })
-    expect(st.confined.has(7)).toBe(true)
-    expect(st.recentlyConfined.has(7)).toBe(false)
-    // Abbau: nicht mehr im Baum -> entlassen
-    noteFramesAttached(st, new Set([1, 7]), 2000)
+    // keine Navigation entlässt: In-Page, eigener Wechsel nach about:blank oder nach außen
+    for (const url of ['https://example.com/#x', 'about:blank', 'https://www.figma.com/embed', 'app://-/index.html']) {
+      noteFrameCommit(st, { frameId: 7, parentId: 1, url, now: 1100 })
+      expect(st.confined.has(7), url).toBe(true)
+    }
+    expect(st.recentlyConfined.size).toBe(0)
+    // In-Page innerhalb von knowledge/ und Kind eines eingesperrten Rahmens: aufgenommen
+    noteFrameCommit(st, { frameId: 9, parentId: 1, url: `${k}#teil`, now: 1100 })
+    noteFrameCommit(st, { frameId: 8, parentId: 7, url: 'about:srcdoc', now: 1150 })
+    expect(st.confined.has(9) && st.confined.has(8)).toBe(true)
+    // fremder Rahmen bleibt draußen
+    noteFrameCommit(st, { frameId: 12, parentId: 1, url: 'https://www.youtube.com/embed/x', now: 1150 })
+    expect(st.confined.has(12)).toBe(false)
+    // Abbau: nicht mehr im Baum -> recentlyConfined
+    noteFramesAttached(st, new Set([1, 7, 12]), 2000)
     expect([...st.confined]).toEqual([7])
     expect(st.recentlyConfined.get(8)).toBe(2000)
     expect(st.recentlyConfined.get(9)).toBe(2000)
@@ -242,43 +239,67 @@ describe('konzept', () => {
     expect(st.recentlyConfined.size).toBe(0)
     expect(CONFINED_GRACE_MS).toBe(5000)
   })
-  it('backstopDecision (R44-R46): jeder Zweig, der Verweiser zählt nie', () => {
+  it('Navigationssperre nach Zustand (R47): Rahmen oder Vorfahr eingesperrt -> block', () => {
+    const confined = new Set([7])
+    const recent = new Map([[9, 1000]])
+    expect(isFrameChainConfined([7, 1], confined, recent, 1000)).toBe(true)
+    expect(isFrameChainConfined([8, 7, 1], confined, recent, 1000)).toBe(true)
+    expect(isFrameChainConfined([9, 1], confined, recent, 1000 + CONFINED_GRACE_MS)).toBe(true)
+    expect(isFrameChainConfined([9, 1], confined, recent, 1001 + CONFINED_GRACE_MS)).toBe(false)
+    expect(isFrameChainConfined([12, 1], confined, recent, 1000)).toBe(false)
+    // Rahmen hat sich selbst nach about:blank / nach außen navigiert: Adresse sagt nichts mehr, der Zustand schon
+    expect(frameNavigationDecision('about:blank', false, true)).toBe('block')
+    expect(frameNavigationDecision('https://example.com/', false, true)).toBe('block')
+    expect(frameNavigationDecision('https://www.youtube.com/embed/x', false, false)).toBe('allow')
+  })
+  it('backstopDecision (R44-R47): jeder Zweig, der Verweiser zählt nie', () => {
+    const k = 'app://workspace/knowledge/a.html'
     const leer = { confined: new Set<number>(), recentlyConfined: new Map<number, number>() }
     const offen = { confined: new Set([7]), recentlyConfined: new Map<number, number>() }
     const kuerzlich = { confined: new Set<number>(), recentlyConfined: new Map([[7, 1000]]) }
     const basis = {
-      url: 'https://example.com/x', resourceType: 'image', frameId: 7, ancestorIds: [1], attached: true,
-      chainConfinedByUrl: false, ...offen, now: 1000, appUrl: null,
+      url: 'https://example.com/x', resourceType: 'image', frameId: 7, frameUrl: k, ancestorIds: [1], attached: true,
+      chainConfinedByUrl: true, ...offen, now: 1000, appUrl: 'http://localhost:5173',
     }
-    // Rahmen in confined / in nicht abgelaufenem recentlyConfined -> abbrechen
-    expect(backstopDecision(basis)).toBe(true)
-    expect(backstopDecision({ ...basis, ...kuerzlich, now: 1000 + CONFINED_GRACE_MS })).toBe(true)
-    expect(backstopDecision({ ...basis, ...kuerzlich, now: 1001 + CONFINED_GRACE_MS })).toBe(false)
-    // Vorfahr eingesperrt -> abbrechen (verschachtelter Rahmen im Konzept)
-    expect(backstopDecision({ ...basis, frameId: 8, ancestorIds: [7, 1] })).toBe(true)
-    expect(backstopDecision({ ...basis, frameId: 8, ancestorIds: [7, 1], ...kuerzlich, now: 1500 })).toBe(true)
-    // Rahmen bekannt, im Baum, weder er noch ein Vorfahr eingesperrt -> durchlassen, auch bei offenem Konzept
-    expect(backstopDecision({ ...basis, frameId: 1, ancestorIds: [] })).toBe(false)
-    expect(backstopDecision({ ...basis, frameId: 12, ancestorIds: [1] })).toBe(false)
-    // Adresse des Rahmens oder eines Vorfahren unter knowledge/ (vor dem Navigations-Ereignis) -> abbrechen
-    expect(backstopDecision({ ...basis, ...leer, frameId: 12, chainConfinedByUrl: true })).toBe(true)
-    // Rahmen nicht identifizierbar/nicht lesbar oder nicht im Baum: nach der Ansicht
-    for (const rahmen of [{ frameId: null }, { frameId: 12, attached: false }]) {
-      expect(backstopDecision({ ...basis, ...rahmen }), JSON.stringify(rahmen)).toBe(true)
-      expect(backstopDecision({ ...basis, ...rahmen, ...kuerzlich, now: 2000 }), JSON.stringify(rahmen)).toBe(true)
-      expect(backstopDecision({ ...basis, ...rahmen, ...kuerzlich, now: 1001 + CONFINED_GRACE_MS })).toBe(false)
-      expect(backstopDecision({ ...basis, ...rahmen, ...leer }), JSON.stringify(rahmen)).toBe(false)
+    // eingesperrter Rahmen: nur data:/blob:/about: und das eigene Dokument (ohne Query/Fragment)
+    for (const url of ['data:,x', 'blob:null/1', 'about:blank', k, `${k}#teil`, `${k}?v=2`]) {
+      expect(backstopDecision({ ...basis, url }), url).toBe(false)
     }
-    // freie Schemata und der eigene Entwicklungsserver: auch aus einem eingesperrten Rahmen
-    for (const url of ['app://-/assets/x.js', 'app://workspace/knowledge/b.png', 'data:,x', 'blob:null/1', 'about:blank',
-      'devtools://devtools/x', 'chrome-extension://pdf/x.js', 'http://localhost:5173/src/x.ts', 'ws://localhost:5173/']) {
-      expect(backstopDecision({ ...basis, url, chainConfinedByUrl: true, appUrl: 'http://localhost:5173' }), url).toBe(false)
+    for (const url of ['https://example.com/x', 'app://workspace/knowledge/b.html', 'app://workspace/knowledge/b.png',
+      'app://-/index.html', 'devtools://devtools/x', 'chrome-extension://pdf/x.js', 'http://localhost:5173/src/x.ts',
+      'http://127.0.0.1:8765/', 'kein-schema']) {
+      expect(backstopDecision({ ...basis, url }), url).toBe(true)
     }
-    expect(backstopDecision({ ...basis, url: 'http://localhost:9999/', appUrl: 'http://localhost:5173' })).toBe(true)
-    expect(backstopDecision({ ...basis, url: 'kein-schema' })).toBe(true)
+    // eingesperrt nur nach Zustand (Rahmen hat sich selbst nach about:blank/außen navigiert) oder über einen Vorfahr
+    expect(backstopDecision({ ...basis, chainConfinedByUrl: false, frameUrl: 'about:blank' })).toBe(true)
+    expect(backstopDecision({ ...basis, chainConfinedByUrl: false, frameUrl: 'https://example.com/x', url: 'https://example.com/y' })).toBe(true)
+    expect(backstopDecision({ ...basis, chainConfinedByUrl: false, frameId: 8, frameUrl: 'about:srcdoc', ancestorIds: [7, 1], url: 'app://-/x.js' })).toBe(true)
+    expect(backstopDecision({ ...basis, chainConfinedByUrl: false, ...kuerzlich, now: 1000 + CONFINED_GRACE_MS })).toBe(true)
+    // bekannter, angehängter, nicht eingesperrter Rahmen: alles frei, auch bei offenem Konzept
+    const app = { ...basis, chainConfinedByUrl: false, frameId: 1, frameUrl: 'app://-/index.html', ancestorIds: [] }
+    for (const url of ['https://api.example.com/v1', 'app://-/x.js', 'chrome-extension://pdf/x.js', 'wss://sync.example/']) {
+      expect(backstopDecision({ ...app, url }), url).toBe(false)
+    }
+    expect(backstopDecision({ ...app, frameId: 12, ancestorIds: [1], frameUrl: 'https://www.youtube.com/embed/x' })).toBe(false)
+    expect(backstopDecision({ ...basis, ...kuerzlich, chainConfinedByUrl: false, now: 1001 + CONFINED_GRACE_MS })).toBe(false)
+    // Rahmen nicht identifizierbar, nicht lesbar oder nicht im Baum
+    for (const rahmen of [{ frameId: null, frameUrl: null, ancestorIds: [] }, { frameId: 12, frameUrl: null, ancestorIds: [], attached: false }]) {
+      const u = { ...basis, ...rahmen, chainConfinedByUrl: false }
+      const n = JSON.stringify(rahmen)
+      expect(backstopDecision(u), n).toBe(true)
+      expect(backstopDecision({ ...u, ...kuerzlich, now: 2000 }), n).toBe(true)
+      expect(backstopDecision({ ...u, ...kuerzlich, now: 1001 + CONFINED_GRACE_MS }), n).toBe(false)
+      expect(backstopDecision({ ...u, ...leer }), n).toBe(false)
+      for (const url of ['app://-/x.js', 'devtools://devtools/x', 'http://localhost:5173/src/x.ts', 'ws://localhost:5173/', 'data:,x']) {
+        expect(backstopDecision({ ...u, url }), url).toBe(false)
+      }
+      for (const url of ['chrome-extension://pdf/x.js', 'http://localhost:9999/', 'kein-schema']) {
+        expect(backstopDecision({ ...u, url }), url).toBe(true)
+      }
+    }
     // Laden eines Hauptrahmens: nie
-    expect(backstopDecision({ ...basis, resourceType: 'mainFrame', chainConfinedByUrl: true })).toBe(false)
-    expect(backstopDecision({ ...basis, resourceType: 'mainFrame', frameId: null })).toBe(false)
+    expect(backstopDecision({ ...basis, resourceType: 'mainFrame' })).toBe(false)
+    expect(backstopDecision({ ...basis, resourceType: 'mainFrame', frameId: null, chainConfinedByUrl: false })).toBe(false)
   })
   it('needsNosniffOnly: fehlend oder generisch', () => {
     expect(needsNosniffOnly(null)).toBe(true)

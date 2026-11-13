@@ -444,13 +444,18 @@ export function workspaceResponseDecision(args: {
 }
 
 /**
- * Darf ein Rahmen wegnavigieren? Nein, wenn er ein Dokument unter `app://workspace/knowledge/` zeigt (R43) oder der
- * Hauptprozess es als Wissens-HTML ausgeliefert hat (Symlink-Ziel, Content-Type): keine Navigation im Rahmen, auch
- * nicht zu app://. Der erste Ladevorgang ist nicht betroffen, dort ist die Rahmen-Adresse noch leer/about:blank.
- * Andere Rahmen (Hintergrund-Berichte, Einbettungen) entscheidet der Aufrufer wie vor der Konzept-Fläche.
+ * Darf ein Rahmen wegnavigieren? Nein, wenn er ein Dokument unter `app://workspace/knowledge/` zeigt (R43), der
+ * Hauptprozess es als Wissens-HTML ausgeliefert hat (Symlink-Ziel, Content-Type), oder der Rahmen bzw. ein Vorfahr
+ * laut Rückhalt-Zustand eingesperrt ist (`confinedByState`, R47, {@link isFrameChainConfined}): keine Navigation im
+ * Rahmen, auch nicht zu app://. Der erste Ladevorgang eines neuen Rahmens ist nicht betroffen (Adresse noch
+ * leer/about:blank, Knoten noch nicht im Zustand). Andere Rahmen entscheidet der Aufrufer wie vor der Konzept-Fläche.
  */
-export function frameNavigationDecision(frameUrl: string, servedAsKnowledgeHtml = false): 'allow' | 'block' {
-  return servedAsKnowledgeHtml || isKnowledgeFrameUrl(frameUrl) ? 'block' : 'allow'
+export function frameNavigationDecision(
+  frameUrl: string,
+  servedAsKnowledgeHtml = false,
+  confinedByState = false,
+): 'allow' | 'block' {
+  return confinedByState || servedAsKnowledgeHtml || isKnowledgeFrameUrl(frameUrl) ? 'block' : 'allow'
 }
 
 function schema(url: string): string | null {
@@ -458,12 +463,14 @@ function schema(url: string): string | null {
   return m ? m[1].toLowerCase() : null
 }
 
+/** Bleibt im Dokument, nie im Netz: für jede Anfrage frei (R47). */
+const DOKUMENT_SCHEMATA = new Set(['data', 'blob', 'about'])
+
 /**
- * Bleibt im Dokument bzw. in der App, nie im Netz: `data:`, `blob:`, `about:`, `app:`, `devtools:` und
- * `chrome-extension:` (Chromiums eingebauter PDF-Betrachter lädt seine Oberfläche so; ein PDF unter knowledge/ ist
- * seit R43 ein eingesperrter Rahmen).
+ * Verkehr der App selbst, der bei unbekanntem Rahmen trotz offenem Konzept frei bleibt (R47): app:, devtools:.
+ * Aus einer eingesperrten Kette ist keines davon frei; ein bekannter, nicht eingesperrter Rahmen darf alles.
  */
-const FREIE_SCHEMATA = new Set(['data', 'blob', 'about', 'app', 'devtools', 'chrome-extension'])
+const UNBEKANNT_FREI = new Set(['app', 'devtools'])
 
 function gleicherHost(a: string, b: string): boolean {
   try {
@@ -474,12 +481,17 @@ function gleicherHost(a: string, b: string): boolean {
   }
 }
 
-/** So lange bleibt ein Rahmen nach dem Verlassen der Menge `confined` noch eingesperrt (R46). */
+/** Adresse ohne Query und Fragment: so vergleicht der Rückhalt "eigenes Dokument" (R47). */
+function ohneQueryUndFragment(url: string): string {
+  return url.split(/[?#]/)[0]
+}
+
+/** So lange bleibt ein Rahmen nach dem Abbau noch eingesperrt (R46). */
 export const CONFINED_GRACE_MS = 5000
 
 /**
- * Zustand des Rückhalts je Ansicht (R46), geschlüsselt nach der Rahmen-Knoten-Id (frameTreeNodeId): `confined` hält
- * die eingesperrten Rahmen, `recentlyConfined` die vor kurzem entlassenen mit dem Zeitpunkt des Entlassens.
+ * Zustand des Rückhalts je Ansicht (R46, R47), geschlüsselt nach der Rahmen-Knoten-Id (frameTreeNodeId): `confined`
+ * hält die eingesperrten Rahmen (lebenslang), `recentlyConfined` die abgebauten mit dem Zeitpunkt des Abbaus.
  */
 export type BackstopState = { confined: Set<number>; recentlyConfined: Map<number, number> }
 
@@ -492,14 +504,25 @@ function kuerzlich(recently: ReadonlyMap<number, number>, id: number, now: numbe
   return t !== undefined && now - t <= CONFINED_GRACE_MS // Uhr zurückgesprungen: weiter eingesperrt
 }
 
-function entlassen(state: BackstopState, id: number, now: number): void {
-  if (state.confined.delete(id)) state.recentlyConfined.set(id, now)
-}
-
 function abgelaufeneVergessen(state: BackstopState, now: number): void {
   for (const id of [...state.recentlyConfined.keys()]) {
     if (!kuerzlich(state.recentlyConfined, id, now)) state.recentlyConfined.delete(id)
   }
+}
+
+/** Ist der Rahmen oder ein Vorfahr (Knoten-Ids) eingesperrt oder vor höchstens CONFINED_GRACE_MS abgebaut? */
+export function isFrameChainConfined(
+  ids: readonly number[],
+  confined: ReadonlySet<number>,
+  recentlyConfined: ReadonlyMap<number, number>,
+  now: number,
+): boolean {
+  return ids.some((id) => confined.has(id) || kuerzlich(recentlyConfined, id, now))
+}
+
+/** Sperrt die Ansicht gerade einen Rahmen, oder wurde einer vor höchstens CONFINED_GRACE_MS abgebaut? */
+function konzeptInAnsicht(confined: ReadonlySet<number>, recentlyConfined: ReadonlyMap<number, number>, now: number): boolean {
+  return confined.size > 0 || [...recentlyConfined.keys()].some((id) => kuerzlich(recentlyConfined, id, now))
 }
 
 /**
@@ -512,44 +535,48 @@ export function isConfinedCommit(url: string, servedAsKnowledgeHtml: boolean, pa
 }
 
 /**
- * Ein Unterrahmen hat ein Dokument übernommen (R46). Eingesperrt -> in `confined`. Sonst nur bei einem echten
- * Dokumentwechsel (`inPage: false`) entlassen, nie bei einer Navigation innerhalb der Seite.
+ * Ein Unterrahmen hat ein Dokument übernommen (Dokumentwechsel oder In-Page). Eingesperrt -> in `confined`, auf
+ * Lebenszeit des Rahmens (R47): keine Navigation entlässt ihn, auch keine, die er selbst ausgelöst hat.
  */
 export function noteFrameCommit(
   state: BackstopState,
-  c: { frameId: number; parentId: number | null; url: string; servedAsKnowledgeHtml?: boolean; inPage: boolean; now: number },
+  c: { frameId: number; parentId: number | null; url: string; servedAsKnowledgeHtml?: boolean; now: number },
 ): void {
   abgelaufeneVergessen(state, c.now)
   const parentConfined = c.parentId !== null && state.confined.has(c.parentId)
   if (isConfinedCommit(c.url, c.servedAsKnowledgeHtml === true, parentConfined)) {
     state.confined.add(c.frameId)
     state.recentlyConfined.delete(c.frameId)
-  } else if (!c.inPage) {
-    entlassen(state, c.frameId, c.now)
   }
 }
 
-/** Rahmen, die nicht mehr im Baum der Ansicht hängen (abgebaut, gelöst), werden entlassen (R46). */
+/** Nur der Abbau entlässt (R47): Rahmen, die nicht mehr im Baum hängen, wandern für CONFINED_GRACE_MS nach recentlyConfined. */
 export function noteFramesAttached(state: BackstopState, attachedIds: ReadonlySet<number>, now: number): void {
-  for (const id of [...state.confined]) if (!attachedIds.has(id)) entlassen(state, id, now)
+  for (const id of [...state.confined]) {
+    if (!attachedIds.has(id)) {
+      state.confined.delete(id)
+      state.recentlyConfined.set(id, now)
+    }
+  }
   abgelaufeneVergessen(state, now)
 }
 
 /**
- * Entscheidung des Rückhalts (R44-R46), nur aus Werten. Der Verweiser (Referer) zählt nie.
- * - Laden eines Hauptrahmens, freie Schemata ({@link FREIE_SCHEMATA}) und der eigene Entwicklungsserver (`appUrl`,
- *   gleicher Host): durchlassen.
- * - Rahmen oder ein Vorfahr zeigt eine Adresse unter knowledge/ (`chainConfinedByUrl`, greift schon vor dem
- *   Navigations-Ereignis): abbrechen.
- * - Rahmen identifiziert, lesbar und im Baum der Ansicht (`frameId` gesetzt, `attached`): abbrechen, wenn er oder ein
- *   Vorfahr (`ancestorIds`) in `confined` oder noch nicht abgelaufen in `recentlyConfined` steht; sonst durchlassen.
- * - Sonst (nicht identifizierbar, nicht lesbar, nicht im Baum): abbrechen, solange `confined` nicht leer ist oder
- *   `recentlyConfined` einen nicht abgelaufenen Eintrag hat.
+ * Entscheidung des Rückhalts (R44-R47), nur aus Werten. Der Verweiser (Referer) zählt nie.
+ * 1. Laden eines Hauptrahmens, `data:`/`blob:`/`about:`: durchlassen.
+ * 2. Eingesperrte Kette (der Rahmen oder ein Vorfahr zeigt eine Adresse unter knowledge/, `chainConfinedByUrl`, oder
+ *    steht in `confined`/nicht abgelaufen in `recentlyConfined`): nur das eigene Dokument des Rahmens (`frameUrl`,
+ *    ohne Query und Fragment verglichen) ist erlaubt, sonst nichts – auch keine andere app://-Adresse.
+ * 3. Rahmen identifiziert, lesbar, im Baum und nicht eingesperrt: durchlassen.
+ * 4. Sonst (nicht identifizierbar, nicht lesbar, nicht im Baum): `app:`, `devtools:` und der eigene
+ *    Entwicklungsserver (`appUrl`, gleicher Host) bleiben frei; alles andere wird abgebrochen, solange die Ansicht
+ *    einen Rahmen sperrt oder einer vor höchstens CONFINED_GRACE_MS abgebaut wurde.
  */
 export function backstopDecision(r: {
   url: string
   resourceType: string
   frameId: number | null
+  frameUrl: string | null
   ancestorIds: readonly number[]
   attached: boolean
   chainConfinedByUrl: boolean
@@ -560,10 +587,13 @@ export function backstopDecision(r: {
 }): boolean {
   if (r.resourceType === 'mainFrame') return false
   const s = schema(r.url)
-  if (s !== null && FREIE_SCHEMATA.has(s)) return false
+  if (s !== null && DOKUMENT_SCHEMATA.has(s)) return false
+  const kette = r.frameId === null ? [] : [r.frameId, ...r.ancestorIds]
+  if (r.chainConfinedByUrl || isFrameChainConfined(kette, r.confined, r.recentlyConfined, r.now)) {
+    return !(r.frameUrl !== null && ohneQueryUndFragment(r.url) === ohneQueryUndFragment(r.frameUrl))
+  }
+  if (r.frameId !== null && r.attached) return false
+  if (s !== null && UNBEKANNT_FREI.has(s)) return false
   if (r.appUrl && gleicherHost(r.url, r.appUrl)) return false
-  if (r.chainConfinedByUrl) return true
-  const eingesperrt = (id: number) => r.confined.has(id) || kuerzlich(r.recentlyConfined, id, r.now)
-  if (r.frameId !== null && r.attached) return [r.frameId, ...r.ancestorIds].some(eingesperrt)
-  return r.confined.size > 0 || [...r.recentlyConfined.keys()].some((id) => kuerzlich(r.recentlyConfined, id, r.now))
+  return konzeptInAnsicht(r.confined, r.recentlyConfined, r.now)
 }
