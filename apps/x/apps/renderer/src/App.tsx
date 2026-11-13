@@ -6129,8 +6129,8 @@ function App() {
     }
   }, [sessionChat.chatState?.conversation, runId, navigateToView, isFullScreenChat, assistantLayout.assistant, moveAssistantChat])
 
-  // Requests from the Flaeche header / a concept page (already checked by the viewer: right frame,
-  // real click, valid path): open a note, or show the graph.
+  // Requests from the Flaeche viewer: open a note (only after the user confirmed it in the viewer's
+  // header row; path and existence already checked there), or show the graph.
   useEffect(() => {
     const onOpenNote = (e: Event) => {
       const detail = e instanceof CustomEvent ? (e.detail as unknown) : null

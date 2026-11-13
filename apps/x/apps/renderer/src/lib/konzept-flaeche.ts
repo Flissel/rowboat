@@ -97,10 +97,13 @@ export function cacheBustedUrl(url: string, version: number): string {
   return `${url}${url.includes('?') ? '&' : '?'}v=${version}`
 }
 
-/** Eine offene Rückfrage der Seite (Bestätigungsstreifen): Web-Link oder Notiz. `at` = Zeitpunkt, an dem der Inhalt erschien. */
-export type PendingRequest = { kind: 'link' | 'note'; value: string; at: number }
+/**
+ * Eine offene Rückfrage der Seite (Bestätigung in der Kopfzeile): Web-Link oder Notiz. `id` ist je Anfrage
+ * eindeutig, `at` (Date.now) der Zeitpunkt der Anfrage für die 10-s-Regel.
+ */
+export type PendingRequest = { id: number; kind: 'link' | 'note'; value: string; at: number }
 export const pendingMaxAgeMs = 10_000
-/** So lange bleibt "Öffnen" nach Erscheinen oder Inhaltswechsel gesperrt (gegen Zeitdruck-Klicks). */
+/** So lange bleibt "Öffnen" nach dem ersten gemalten Bild der Bestätigung gesperrt (gegen Zeitdruck-Klicks). */
 export const confirmDelayMs = 700
 
 /**
@@ -110,14 +113,36 @@ export const confirmDelayMs = 700
  */
 export function nextPendingRequest(
   state: PendingRequest | null,
-  event: { type: 'request'; kind: 'link' | 'note'; value: string; now: number } | { type: 'cancel' | 'open' | 'reset' },
+  event:
+    | { type: 'request'; id: number; kind: 'link' | 'note'; value: string; now: number }
+    | { type: 'cancel' | 'open' | 'reset' },
 ): PendingRequest | null {
   if (event.type !== 'request') return null
-  if (state === null || event.now - state.at > pendingMaxAgeMs) return { kind: event.kind, value: event.value, at: event.now }
+  if (state === null || event.now - state.at > pendingMaxAgeMs) {
+    return { id: event.id, kind: event.kind, value: event.value, at: event.now }
+  }
   return state
 }
 
-/** "Öffnen" darf erst nach `confirmDelayMs` gedrückt werden. */
-export function canConfirm(state: PendingRequest | null, now: number): boolean {
-  return state !== null && now - state.at >= confirmDelayMs
+/**
+ * Nimmt die Brücke eine neue Anfrage der Seite an? Nein, solange eine Existenzprüfung läuft; nein, solange eine
+ * Rückfrage offen ist, außer sie ist älter als 10 s (dann darf sie ersetzt werden). Es wird nichts eingereiht.
+ */
+export function canAcceptRequest(state: PendingRequest | null, checkInFlight: boolean, now: number): boolean {
+  if (checkInFlight) return false
+  return state === null || now - state.at > pendingMaxAgeMs
+}
+
+/** Moment (performance.now), ab dem die Bestätigung einer bestimmten Anfrage tatsächlich gemalt war. */
+export type Armed = { id: number; armedAt: number }
+
+/** "Öffnen" gilt nur für die Anfrage, die gemalt wurde, und erst `confirmDelayMs` nach dem ersten Bild. */
+export function canConfirm(state: PendingRequest | null, armed: Armed | null, now: number): boolean {
+  if (state === null || armed === null || armed.id !== state.id) return false
+  return now - armed.armedAt >= confirmDelayMs
+}
+
+/** Passt der Host sicher in die Kopfzeile? Sonst steht dort "(Adresse unten)" und der Host im Detailbereich. */
+export function hostFitsRow(host: string): boolean {
+  return host.length > 0 && host.length <= 30
 }

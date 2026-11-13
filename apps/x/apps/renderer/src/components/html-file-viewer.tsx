@@ -5,14 +5,17 @@ import { konzept } from '@x/shared'
 import { LOCAL_RUNTIME } from '@/lib/feature-flags'
 import {
   cacheBustedUrl,
+  canAcceptRequest,
   canConfirm,
   confirmDelayMs,
+  hostFitsRow,
   konzeptHinweise,
   linkOpenRequest,
   nextPendingRequest,
   noteOpenRequest,
   reloadDebounceMs,
   workspaceEventTouches,
+  type Armed,
   type PendingRequest,
 } from '@/lib/konzept-flaeche'
 import { AlertCircleIcon, ExternalLinkIcon, FileTextIcon, Loader2Icon } from 'lucide-react'
@@ -55,7 +58,15 @@ function FlaecheViewer({ path, active }: { path: string; active: boolean }) {
   const [fileText, setFileText] = useState<string | null>(null)
   const [fileSize, setFileSize] = useState(0)
   const [pending, setPending] = useState<PendingRequest | null>(null)
+  const [armed, setArmed] = useState<Armed | null>(null)
   const [, setTick] = useState(0)
+  // Mirrors of state for the message listener (no stale closures), a request id counter, a flag for a
+  // running existence check, and a generation that changes when the frame is remounted or hidden.
+  const pendingRef = useRef<PendingRequest | null>(null)
+  pendingRef.current = pending
+  const requestIdRef = useRef(0)
+  const checkInFlightRef = useRef(false)
+  const generationRef = useRef(0)
   const iframeRef = useRef<HTMLIFrameElement | null>(null)
   const lastPathRef = useRef<string | null>(null)
   const iframeSrc = useMemo(() => cacheBustedUrl(source.url(path), version), [path, source, version])
@@ -66,6 +77,8 @@ function FlaecheViewer({ path, active }: { path: string; active: boolean }) {
     const isReload = lastPathRef.current === path
     lastPathRef.current = path
     if (!isReload) {
+      generationRef.current += 1
+      setPending(null)
       setState({ kind: 'loading' })
       setIframeLoaded(false)
       setFileText(null)
@@ -146,54 +159,81 @@ function FlaecheViewer({ path, active }: { path: string; active: boolean }) {
   useEffect(() => {
     if (!stale || !active) return
     setStale(false)
+    generationRef.current += 1
     setPending((p) => nextPendingRequest(p, { type: 'reset' }))
     setVersion((v) => v + 1)
   }, [stale, active])
 
   // A hidden viewer shows no confirmation strip and has no listener (below).
   useEffect(() => {
-    if (!active) setPending((p) => nextPendingRequest(p, { type: 'reset' }))
+    if (!active) {
+      generationRef.current += 1
+      setPending((p) => nextPendingRequest(p, { type: 'reset' }))
+    }
   }, [active])
 
   // Requests from the page arrive as messages (the frame has no allow-popups, so scripts cannot open
   // anything themselves). One listener per visible viewer, only from this frame's own window. Neither
-  // a web link nor a note opens on a message: both only show the confirmation strip, and only a click
-  // on its "Öffnen" button opens them. No activation, focus or timing heuristics.
+  // a web link nor a note opens on a message: both only show the confirmation in the header row, and
+  // only a click on its "Öffnen" button opens them. At most one request at a time: while one is pending
+  // (younger than 10 s) or an existence check runs, further messages are ignored, not queued.
   useEffect(() => {
     if (!active) return
-    let gone = false
     const onMessage = (e: MessageEvent) => {
       const frameWindow = iframeRef.current?.contentWindow
       if (!frameWindow || e.source !== frameWindow) return
       const link = linkOpenRequest(e.data)
+      const note = link ? null : noteOpenRequest(e.data)
+      if (!link && !note) return
+      if (!canAcceptRequest(pendingRef.current, checkInFlightRef.current, Date.now())) return
       if (link) {
-        setPending((p) => nextPendingRequest(p, { type: 'request', kind: 'link', value: link, now: Date.now() }))
+        const id = ++requestIdRef.current
+        setPending((p) => nextPendingRequest(p, { type: 'request', id, kind: 'link', value: link, now: Date.now() }))
         return
       }
-      const note = noteOpenRequest(e.data)
       if (!note) return
+      const generation = generationRef.current
+      checkInFlightRef.current = true
       source
         .stat({ path: note })
         .then((st) => {
-          if (gone || st.kind !== 'file') return
-          setPending((p) => nextPendingRequest(p, { type: 'request', kind: 'note', value: note, now: Date.now() }))
+          // Discard if the frame was remounted/reloaded or the viewer hidden meanwhile.
+          if (generation !== generationRef.current || st.kind !== 'file') return
+          const id = ++requestIdRef.current
+          setPending((p) => nextPendingRequest(p, { type: 'request', id, kind: 'note', value: note, now: Date.now() }))
         })
         .catch(() => {})
+        .finally(() => {
+          checkInFlightRef.current = false
+        })
     }
     window.addEventListener('message', onMessage)
-    return () => {
-      gone = true
-      window.removeEventListener('message', onMessage)
-    }
+    return () => window.removeEventListener('message', onMessage)
   }, [active, source])
 
-  // Re-render once the lock of "Öffnen" is over.
-  const pendingAt = pending?.at
+  // The lock of "Öffnen" starts when the confirmation row of THIS request has actually been painted
+  // (double requestAnimationFrame after the commit), measured with performance.now(). A page that
+  // floods the parent with messages can delay the paint but not shorten the lock.
+  const pendingId = pending?.id
   useEffect(() => {
-    if (pendingAt === undefined) return
+    if (pendingId === undefined) return
+    let raf2 = 0
+    const raf1 = requestAnimationFrame(() => {
+      raf2 = requestAnimationFrame(() => {
+        setArmed({ id: pendingId, armedAt: performance.now() })
+      })
+    })
+    return () => {
+      cancelAnimationFrame(raf1)
+      cancelAnimationFrame(raf2)
+    }
+  }, [pendingId])
+  const armedAt = armed?.armedAt
+  useEffect(() => {
+    if (armedAt === undefined) return
     const timer = setTimeout(() => setTick((n) => n + 1), confirmDelayMs + 20)
     return () => clearTimeout(timer)
-  }, [pendingAt])
+  }, [armedAt])
 
   const title = useMemo(() => {
     const name = path.split('/').pop() ?? path
@@ -257,26 +297,70 @@ function FlaecheViewer({ path, active }: { path: string; active: boolean }) {
   // resolveWorkspacePath already gates the protocol handler).
   return (
     <div className="flex h-full w-full flex-col">
-      <div className="flex shrink-0 items-center gap-2 border-b border-border bg-background px-3 py-1.5">
-        <p className="min-w-0 flex-1 truncate text-sm font-medium text-foreground">{title}</p>
-        <button
-          type="button"
-          onClick={() => window.dispatchEvent(new CustomEvent('rowboat:show-in-graph', { detail: { path } }))}
-          className="shrink-0 rounded-md border border-border bg-background px-2.5 py-1 text-xs font-medium text-foreground hover:bg-accent"
-        >
-          Im Graphen zeigen
-        </button>
-        <button
-          type="button"
-          onClick={() => {
-            void source.open({ path })
-          }}
-          className="inline-flex shrink-0 items-center gap-1.5 rounded-md border border-border bg-background px-2.5 py-1 text-xs font-medium text-foreground hover:bg-accent"
-        >
-          <ExternalLinkIcon className="size-3.5" />
-          In neuem Fenster öffnen
-        </button>
-      </div>
+      {/* Fixed-height row: the normal header, or (while a request is pending) the confirmation. The
+          height never changes, so the page does not move, and the buttons never sit over page pixels. */}
+      {pending ? (
+        <div key={pending.id} className="flex h-10 shrink-0 items-center gap-2 border-b border-border bg-muted px-3 text-xs text-foreground">
+          <p className="min-w-0 flex-1 overflow-hidden whitespace-nowrap">
+            <span className="font-medium">{pending.kind === 'link' ? 'Link öffnen?' : 'Notiz öffnen?'}</span>{' '}
+            {pending.kind === 'link' ? (
+              hostFitsRow(pendingHost) ? (
+                <span className="font-semibold">{pendingHost}</span>
+              ) : (
+                <span>(Adresse unten)</span>
+              )
+            ) : (
+              <span>(Pfad unten)</span>
+            )}
+          </p>
+          <button
+            type="button"
+            disabled={!canConfirm(pending, armed, performance.now())}
+            onClick={() => {
+              if (!canConfirm(pending, armed, performance.now())) return
+              const { kind, value } = pending
+              setPending((p) => nextPendingRequest(p, { type: 'open' }))
+              if (kind === 'link') {
+                // Same path the rest of the renderer uses: the main window-open handler sends it to the system browser.
+                window.open(value, '_blank', 'noopener,noreferrer')
+              } else {
+                window.dispatchEvent(new CustomEvent('rowboat:open-note', { detail: { path: value } }))
+              }
+            }}
+            className="shrink-0 rounded-md border border-border bg-background px-2.5 py-1 font-medium hover:bg-accent disabled:opacity-50"
+          >
+            Öffnen
+          </button>
+          <button
+            type="button"
+            onClick={() => setPending((p) => nextPendingRequest(p, { type: 'cancel' }))}
+            className="shrink-0 rounded-md border border-border bg-background px-2.5 py-1 font-medium hover:bg-accent"
+          >
+            Abbrechen
+          </button>
+        </div>
+      ) : (
+        <div className="flex h-10 shrink-0 items-center gap-2 border-b border-border bg-background px-3">
+          <p className="min-w-0 flex-1 truncate text-sm font-medium text-foreground">{title}</p>
+          <button
+            type="button"
+            onClick={() => window.dispatchEvent(new CustomEvent('rowboat:show-in-graph', { detail: { path } }))}
+            className="shrink-0 rounded-md border border-border bg-background px-2.5 py-1 text-xs font-medium text-foreground hover:bg-accent"
+          >
+            Im Graphen zeigen
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              void source.open({ path })
+            }}
+            className="inline-flex shrink-0 items-center gap-1.5 rounded-md border border-border bg-background px-2.5 py-1 text-xs font-medium text-foreground hover:bg-accent"
+          >
+            <ExternalLinkIcon className="size-3.5" />
+            In neuem Fenster öffnen
+          </button>
+        </div>
+      )}
       {hinweise.length > 0 && (
         <ul className="shrink-0 space-y-0.5 border-b border-border bg-amber-50 px-3 py-1.5 text-xs text-amber-900 dark:bg-amber-950 dark:text-amber-200">
           {hinweise.map((h, i) => (
@@ -286,43 +370,11 @@ function FlaecheViewer({ path, active }: { path: string; active: boolean }) {
       )}
       <div className="relative min-h-0 flex-1">
         {pending && (
-          // Overlay on top of the frame (never in the flow): the page content does not move when the
-          // strip appears or changes. Keyed by the request so no focus carries over; nothing here
-          // takes focus by itself, and "Öffnen" is locked for confirmDelayMs.
-          <div
-            key={pending.at}
-            className="absolute inset-x-0 top-0 z-10 flex items-start gap-3 border-b border-border bg-muted px-3 py-2 text-xs text-foreground shadow-md"
-          >
-            <div className="min-w-0 flex-1">
-              <p className="font-medium">{pending.kind === 'link' ? 'Link öffnen?' : 'Notiz öffnen?'}</p>
-              {pending.kind === 'link' && pendingHost && <p className="break-all text-sm font-semibold">{pendingHost}</p>}
-              <p className="max-h-24 overflow-y-auto break-all text-muted-foreground">{pending.value}</p>
-            </div>
-            <button
-              type="button"
-              disabled={!canConfirm(pending, Date.now())}
-              onClick={() => {
-                if (!canConfirm(pending, Date.now())) return
-                const { kind, value } = pending
-                setPending((p) => nextPendingRequest(p, { type: 'open' }))
-                if (kind === 'link') {
-                  // Same path the rest of the renderer uses: the main window-open handler sends it to the system browser.
-                  window.open(value, '_blank', 'noopener,noreferrer')
-                } else {
-                  window.dispatchEvent(new CustomEvent('rowboat:open-note', { detail: { path: value } }))
-                }
-              }}
-              className="shrink-0 rounded-md border border-border bg-background px-2.5 py-1 font-medium hover:bg-accent disabled:opacity-50"
-            >
-              Öffnen
-            </button>
-            <button
-              type="button"
-              onClick={() => setPending((p) => nextPendingRequest(p, { type: 'cancel' }))}
-              className="shrink-0 rounded-md border border-border bg-background px-2.5 py-1 font-medium hover:bg-accent"
-            >
-              Abbrechen
-            </button>
+          // Detail overlay at the top of the frame: full address / path, NO clickable control (the
+          // buttons live in the header row). It does not take part in the layout, so the page does not move.
+          <div className="absolute inset-x-0 top-0 z-10 border-b border-border bg-muted px-3 py-2 text-xs text-foreground shadow-md">
+            {pending.kind === 'link' && pendingHost && <p className="break-all text-sm font-semibold">{pendingHost}</p>}
+            <p className="max-h-24 overflow-y-auto break-all text-muted-foreground">{pending.value}</p>
           </div>
         )}
         {state.kind === 'loaded' && (

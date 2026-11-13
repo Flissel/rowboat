@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest'
 import {
   cacheBustedUrl,
+  canAcceptRequest,
   canConfirm,
+  hostFitsRow,
   konzeptHinweise,
   konzeptPathFromTool,
   linkOpenRequest,
@@ -118,29 +120,46 @@ describe('konzept-flaeche', () => {
     expect(cacheBustedUrl('app://workspace/k.html?x=1', 3)).toBe('app://workspace/k.html?x=1&v=3')
   })
 
+  const req = (id: number, now: number, kind: 'link' | 'note' = 'link', value = 'https://a.example/') =>
+    ({ type: 'request', id, kind, value, now }) as const
+
   it('führt die Rückfrage durch ihre Zustände (Link und Notiz zusammen)', () => {
-    const a = nextPendingRequest(null, { type: 'request', kind: 'link', value: 'https://a.example/', now: 1000 })
-    expect(a).toEqual({ kind: 'link', value: 'https://a.example/', at: 1000 })
-    // zweite Anfrage (egal welcher Art) innerhalb von 10 s ersetzt nicht
-    expect(nextPendingRequest(a, { type: 'request', kind: 'note', value: 'knowledge/n.md', now: 5000 })).toBe(a)
-    expect(nextPendingRequest(a, { type: 'request', kind: 'link', value: 'https://b.example/', now: 11000 })).toBe(a)
-    // älter als 10 s: ersetzt, Zeitpunkt neu
-    expect(nextPendingRequest(a, { type: 'request', kind: 'note', value: 'knowledge/n.md', now: 11001 })).toEqual({ kind: 'note', value: 'knowledge/n.md', at: 11001 })
+    const a = nextPendingRequest(null, req(1, 1000))
+    expect(a).toEqual({ id: 1, kind: 'link', value: 'https://a.example/', at: 1000 })
+    expect(nextPendingRequest(a, req(2, 5000, 'note', 'knowledge/n.md'))).toBe(a)
+    expect(nextPendingRequest(a, req(2, 11000, 'link', 'https://b.example/'))).toBe(a)
+    expect(nextPendingRequest(a, req(2, 11001, 'note', 'knowledge/n.md'))).toEqual({ id: 2, kind: 'note', value: 'knowledge/n.md', at: 11001 })
     expect(nextPendingRequest(a, { type: 'cancel' })).toBeNull()
     expect(nextPendingRequest(a, { type: 'open' })).toBeNull()
     expect(nextPendingRequest(a, { type: 'reset' })).toBeNull()
     expect(nextPendingRequest(null, { type: 'cancel' })).toBeNull()
   })
 
-  it('sperrt "Öffnen" 700 ms nach Erscheinen oder Inhaltswechsel', () => {
-    const a = nextPendingRequest(null, { type: 'request', kind: 'link', value: 'https://a.example/', now: 1000 })
-    expect(canConfirm(null, 5000)).toBe(false)
-    expect(canConfirm(a, 1000)).toBe(false)
-    expect(canConfirm(a, 1699)).toBe(false)
-    expect(canConfirm(a, 1700)).toBe(true)
-    // nach 10 s ersetzter Inhalt: wieder gesperrt
-    const b = nextPendingRequest(a, { type: 'request', kind: 'link', value: 'https://b.example/', now: 20000 })
-    expect(canConfirm(b, 20100)).toBe(false)
-    expect(canConfirm(b, 20700)).toBe(true)
+  it('nimmt höchstens eine Anfrage zur Zeit an', () => {
+    const a = nextPendingRequest(null, req(1, 1000))
+    expect(canAcceptRequest(null, false, 1000)).toBe(true)
+    expect(canAcceptRequest(null, true, 1000)).toBe(false)
+    expect(canAcceptRequest(a, false, 5000)).toBe(false)
+    expect(canAcceptRequest(a, false, 11000)).toBe(false)
+    expect(canAcceptRequest(a, false, 11001)).toBe(true)
+    expect(canAcceptRequest(a, true, 20000)).toBe(false)
+  })
+
+  it('sperrt "Öffnen" 700 ms ab dem gemalten Bild dieser Anfrage', () => {
+    const a = nextPendingRequest(null, req(7, 1000))
+    expect(canConfirm(null, { id: 7, armedAt: 0 }, 5000)).toBe(false)
+    expect(canConfirm(a, null, 5000)).toBe(false) // noch nicht gemalt
+    expect(canConfirm(a, { id: 7, armedAt: 100 }, 799)).toBe(false)
+    expect(canConfirm(a, { id: 7, armedAt: 100 }, 800)).toBe(true)
+    // Bild einer anderen (älteren) Anfrage schaltet die neue nicht frei
+    expect(canConfirm(a, { id: 6, armedAt: 0 }, 5000)).toBe(false)
+    // spätes Bild: Sperre zählt ab dem Bild, nicht ab der Anfrage
+    expect(canConfirm(a, { id: 7, armedAt: 4000 }, 4500)).toBe(false)
+  })
+
+  it('zeigt den Host in der Kopfzeile nur, wenn er sicher passt', () => {
+    expect(hostFitsRow('example.com')).toBe(true)
+    expect(hostFitsRow('')).toBe(false)
+    expect(hostFitsRow('a.b.c.d.e.f.g.h.i.j.k.l.m.n.o.p.example.com')).toBe(false)
   })
 })
