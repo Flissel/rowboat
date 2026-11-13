@@ -255,7 +255,7 @@ const definitions: SkillDefinition[] = [
   {
     id: "konzept",
     title: "Konzepte (HTML-Seiten)",
-    summary: "Write a clickable single-file HTML concept into knowledge/Konzepte/ that opens in a pane next to the chat. Load for a Konzept, Design, Canvas, \"als Seite\" or Videokonzept request. Video concepts use a built-in page template. Ordinary notes stay with doc-collab.",
+    summary: "Write a clickable single-file HTML concept into knowledge/Konzepte/ that opens in a pane next to the chat. Load for a Konzept, Videokonzept, \"als Seite\", HTML-Seite or Konzept-Canvas request (not whiteboard drawing, not design questions about code). Video concepts use a built-in page template. Ordinary notes stay with doc-collab.",
     content: konzeptSkill,
     tools: ["file-writeText", "file-editText", "file-mkdir"],
   },

@@ -73,6 +73,11 @@ describe('Videokonzept-Vorlage im Dokument', () => {
     expect(document.querySelector('.warnung')?.textContent).toContain('fehlt oder ist nicht lesbar')
   })
 
+  it('eine Stufe ohne Namen bekommt die neutrale Bezeichnung Stufe N', () => {
+    zeige(seiteMit({ ...VIDEO, stufen: [{ szenen: VIDEO.stufen[0].szenen }] }))
+    expect(document.querySelector('summary')?.textContent).toBe('1. Stufe 1 (8 Szenen)')
+  })
+
   it('bleibt bei falsch geformten Daten nicht halb gezeichnet stehen', () => {
     zeige(seiteMit({ ...VIDEO, stufen: 'keine Liste' }))
     expect(document.querySelector('.warnung')?.textContent).toContain('konnte nicht gezeichnet werden')

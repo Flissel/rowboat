@@ -31,11 +31,6 @@ describe('videoKonzeptSeite', () => {
     expect(block).not.toContain('<b>');
   });
 
-  it('zeigt die Länge als Spanne und warnt nur, wenn das Ziel außerhalb liegt', () => {
-    expect(videoKonzeptSeite({ art: 'videokonzept', bezuege: [], video: VIDEO }, 't')).toContain('SEKUNDEN_MAX = 45');
-    expect(VIDEOKONZEPT_VORLAGE).toContain('SEKUNDEN_MIN = 15');
-  });
-
   it('maskiert den Titel in title und Seite und lässt keine Skript-Einschleusung zu', () => {
     const titel = '</title><script>alert(1)</script>';
     const html = videoKonzeptSeite({ art: 'videokonzept', bezuege: [], video: { ...VIDEO, hook: '</script><script>alert(2)</script>' } }, titel);

@@ -160,7 +160,7 @@ button:hover, button:focus-visible { background: var(--akzent); color: var(--akz
       var d = el('details');
       d.open = true;
       var anzahl = st.szenen.length;
-      d.appendChild(el('summary', null, (i + 1) + '. ' + st.name + ' (' + anzahl + (anzahl === 1 ? ' Szene)' : ' Szenen)')));
+      d.appendChild(el('summary', null, (i + 1) + '. ' + (typeof st.name === 'string' && st.name.trim() ? st.name : 'Stufe ' + (i + 1)) + ' (' + anzahl + (anzahl === 1 ? ' Szene)' : ' Szenen)')));
       var box = el('div', 'szenen');
       st.szenen.forEach(function (sz) {
         nr += 1;

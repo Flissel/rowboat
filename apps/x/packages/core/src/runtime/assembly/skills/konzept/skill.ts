@@ -5,7 +5,7 @@ import { VIDEOKONZEPT_VORLAGE } from './vorlage.js';
 export const skill = `
 # Concepts (single-file HTML pages)
 
-Load this skill when the user asks for a **Konzept, Design, Canvas, "als Seite"** or a **Videokonzept** — a clickable page that lays out an idea, plan, structure or video concept visually. Writing ordinary notes stays with \`doc-collab\`.
+Load this skill when the user asks for a **Konzept, Videokonzept, "als Seite", HTML-Seite or Konzept-Canvas** — a clickable page that lays out an idea, plan, structure or video concept visually. Writing ordinary notes stays with \`doc-collab\`.
 
 A concept is ONE self-contained \`.html\` file in the knowledge folder. Rowboat shows it in a pane next to the chat and reloads it whenever the file changes. It is also a node in the knowledge graph, searchable and versioned.
 
@@ -39,7 +39,7 @@ Every concept carries exactly one data block, right after \`<title>\`:
 The page cannot navigate. It asks the viewer, which shows a confirmation the user must click. The page gets no answer.
 
 - **Note:** \`parent.postMessage({ type: 'rowboat:notiz-oeffnen', pfad: 'knowledge/Marke/Marke.md' }, '*')\` — path under \`knowledge/\`, with extension. Add a button for every note in \`bezuege\`; turn \`[[Marke/Marke]]\` into \`knowledge/Marke/Marke.md\` (keep \`.html\`/\`.htm\`/\`.xhtml\` when the entry already has it).
-- **Web address (http/https only):** \`parent.postMessage({ type: 'rowboat:link-oeffnen', url: 'https://…' }, '*')\` from a button or link whose click handler sends it. Show the address as visible text so the user knows where it goes. Use web addresses only when the user gave them or they are well known.
+- **Web address (http/https only):** \`parent.postMessage({ type: 'rowboat:link-oeffnen', url: 'https://…' }, '*')\` from a real \`<button>\` whose click handler sends it. Show the address as visible text so the user knows where it goes. Use web addresses only when the user gave them or they are well known.
 
 Build these elements with a \`click\` listener, never with \`href\`.
 
@@ -61,7 +61,7 @@ Limits (the app checks them):
 - \`thema\` 3–300 characters; \`zielgruppe\`; \`minuten\` 3–5 (a number); \`hook\`; \`kernaussage\`; \`abschluss\`; \`auftrag\` always \`null\`.
 - \`stufen\`: at most 8, each \`{ "name", "szenen": [...] }\`. Scenes **8 to 15 in total** across all stages.
 - Scene: \`kurz\` (at most 300 characters), \`bildart\` one of \`slide\`, \`avatar_slide\`, \`avatar_gross\`, \`clip\`, optional \`notiz\` (free text shown under the scene — NOT a reference; a \`[[…]]\` in it stays plain text, so put notes that should be clickable into \`bezuege\`).
-- A scene carries 35–110 spoken words (about 15–45 seconds). Plan roughly two scenes per minute: 3 min ≈ 8 scenes, 4 min ≈ 8–10, 5 min ≈ 10–12, never outside 8–15. The page shows the possible range against \`minuten\` and warns when the target is outside it.
+- A scene stands for 35–110 spoken words (about 15–45 seconds) that the video pipeline writes LATER — that length is only the planning basis, the words are not part of the concept. \`kurz\` stays a one-to-two sentence summary of at most 300 characters saying what the scene shows and says; never put the script into it. Plan roughly two scenes per minute: 3 min ≈ 8 scenes, 4 min ≈ 8–10, 5 min ≈ 10–12, never outside 8–15. The page shows the possible range against \`minuten\` and warns when the target is outside it.
 - If the user wants more (over 15 scenes, over 8 stages, or longer than 5 minutes), stay inside the limits — merge scenes or stages — and name in your one sentence what you cut.
 
 How to write it:
@@ -86,7 +86,7 @@ Replace the title text and the JSON between the data-block tags; adapt \`bezuege
 
 - [ ] File is \`knowledge/Konzepte/<Name>.html\`, not under \`knowledge/Kanal/\`, one file under 1 MB.
 - [ ] Order: \`<title>\` → data block → \`<style>\` → content → \`<script>\`.
-- [ ] Data block: \`art\`, \`bezuege\` with \`[[…]]\` for every note used, valid JSON, \`</script\` escaped.
+- [ ] Data block: \`art\`, \`bezuege\` with \`[[…]]\` for every note used, valid JSON, \`</script\` escaped, at most 20,000 characters (counted as written, including escapes).
 - [ ] Nothing external (no http(s) resource, no font, no image URL); images only as \`data:\`.
 - [ ] Links and note references are click handlers with \`postMessage\`, no \`href\`/\`target\`.
 - [ ] Video concept: template used, only the data block changed, 8–15 scenes, 3–5 minutes, at most 8 stages.
