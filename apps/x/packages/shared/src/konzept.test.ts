@@ -79,6 +79,57 @@ describe('konzept', () => {
     expect(frameNavigationDecision('app://workspace/knowledge/a.html', 'app://workspace/knowledge/b.html')).toBe('block')
     expect(frameNavigationDecision('https://www.youtube.com/embed/x', 'https://www.youtube.com/y')).toBe('allow')
   })
+  it('Pfade: Backslash, führender Slash, //, ., .. und Groß/Klein', () => {
+    expect(isKnowledgeHtmlPath('\\knowledge\\a.html')).toBe(true)
+    expect(isKnowledgeHtmlPath('/Knowledge/a.html')).toBe(true)
+    expect(isKnowledgeHtmlPath('knowledge//./a.html')).toBe(true)
+    expect(isKnowledgeHtmlPath('knowledge/../config/x.html')).toBe(false)
+    expect(isKnowledgeHtmlPath('knowledge/a.txt')).toBe(false)
+    expect(isKanalPath('knowledge//Kanal/x.html')).toBe(true)
+    expect(isKanalPath('knowledge/./Kanal/x.html')).toBe(true)
+    expect(isKanalPath('\\Knowledge\\KANAL\\x.html')).toBe(true)
+    expect(isKanalPath('/knowledge/kanal./x.html')).toBe(true)
+    expect(isKanalPath('knowledge/a/../Kanal/x.html')).toBe(true)
+    expect(isKanalPath('knowledge/Konzepte/x.html')).toBe(false)
+  })
+  it('Titel stammt nicht aus Script, Style oder Kommentar', () => {
+    expect(htmlTitle('<script>x="<title>fake</title>"</script><title>real</title>')).toBe('real')
+    expect(htmlTitle('<!-- <title>fake</title> --><style>/*<title>f</title>*/</style><title>real</title>')).toBe('real')
+    expect(htmlTitle('<script>x="<title>fake</title>"</script>')).toBeNull()
+  })
+  it('Block in Kommentar, Style oder fremdem Attribut gilt nicht', () => {
+    const json = JSON.stringify({ art: 'konzept', bezuege: [] })
+    const echt = `<script type="application/json" id="rowboat-konzept">${json}</script>`
+    const falsch = `<script type="application/json" id="rowboat-konzept">{"art":"videokonzept","bezuege":[]}</script>`
+    expect(readKonzept(`<!-- ${falsch} -->${echt}`).daten?.art).toBe('konzept')
+    expect(readKonzept(`<style>${falsch}</style>${echt}`).daten?.art).toBe('konzept')
+    expect(readKonzept(`<script data-x=" id=rowboat-konzept" type="application/json">${falsch}</script>`).daten).toBeNull()
+    expect(readKonzept(`<script data-x="a>b" id="rowboat-konzept" type="application/json">${json}</script>`).daten?.art).toBe('konzept')
+    expect(readKonzept(`<script id="rowboat-konzept">${json}</script>`).daten).toBeNull() // ohne type
+  })
+  it('Einträge ohne [[...]] geben Hinweis und behalten die Daten', () => {
+    const r = readKonzept(SEITE(JSON.stringify({ art: 'konzept', bezuege: ['[[A/B]]', 'Marke'] })))
+    expect(r.daten?.bezuege).toEqual(['[[A/B]]', 'Marke'])
+    expect(r.fehler).toHaveLength(1)
+  })
+  it('HTML-Köpfe und Navigation: Schreibweisen, Query, Fragment, Kodierung, Endpunkt', () => {
+    for (const p of ['knowledge/a.HTML', 'knowledge/a.html?x=1', 'knowledge/a.html#y', 'knowledge/a%2Ehtml', 'knowledge/a.html.', 'knowledge/a.html ']) {
+      expect(workspaceHtmlHeaders(p)?.['Content-Security-Policy'], p).toBe(WORKSPACE_HTML_CSP)
+      expect(frameNavigationDecision(`app://workspace/${p}`, 'https://example.com/'), p).toBe('block')
+    }
+    expect(frameNavigationDecision('APP://Workspace/knowledge/a.html', 'x')).toBe('block')
+    expect(frameNavigationDecision('app://workspace/knowledge/a.png?f=a.html', 'x')).toBe('allow')
+    expect(workspaceHtmlHeaders('knowledge/a.md')).toBeNull()
+  })
+  it('hostile Eingaben bleiben linear schnell', () => {
+    for (const eingabe of ['<'.repeat(200_000), '<script '.repeat(50_000), '<!--'.repeat(100_000), '<a title="'.repeat(50_000)]) {
+      const t0 = Date.now()
+      htmlTitle(eingabe)
+      htmlVisibleText(eingabe)
+      readKonzept(eingabe)
+      expect(Date.now() - t0).toBeLessThan(1000)
+    }
+  })
   it('liest höchstens KONZEPT_LESE_MAX Zeichen', () => {
     const html = '<title>t</title>' + 'x'.repeat(KONZEPT_LESE_MAX + 10) + '<p>ende</p>'
     expect(htmlVisibleText(html).endsWith('ende')).toBe(false)

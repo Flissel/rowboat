@@ -25,8 +25,14 @@ export type VideoKonzept = {
 }
 export type KonzeptDaten = { art: 'konzept' | 'videokonzept'; bezuege: string[]; video?: VideoKonzept }
 
-function normPath(relPath: string): string {
-  return relPath.replace(/\\/g, '/').replace(/^\/+/, '')
+/** Pfad in Segmente zerlegen: Trenner `\` und `/`, leere und `.`-Segmente entfallen. */
+function segmente(relPath: string): string[] {
+  return relPath.replace(/\\/g, '/').split('/').filter((s) => s !== '' && s !== '.')
+}
+
+/** Windows ignoriert Punkte und Leerzeichen am Segmentende. */
+function segName(s: string): string {
+  return s.replace(/[. ]+$/, '').toLowerCase()
 }
 
 export function isHtmlPath(relPath: string): boolean {
@@ -34,20 +40,31 @@ export function isHtmlPath(relPath: string): boolean {
 }
 
 export function isKnowledgeHtmlPath(relPath: string): boolean {
-  const p = normPath(relPath)
-  return p.startsWith('knowledge/') && isHtmlPath(p)
+  const segs = segmente(relPath)
+  if (segs.includes('..')) return false
+  return segs.length >= 2 && segName(segs[0]) === 'knowledge' && isHtmlPath(segs[segs.length - 1])
 }
 
+/** Quarantäne-Ordner `knowledge/Kanal/`. Bei `..` im Pfad wird sicherheitshalber `true` geliefert. */
 export function isKanalPath(relPath: string): boolean {
-  return normPath(relPath).toLowerCase().startsWith('knowledge/kanal/')
+  const segs = segmente(relPath)
+  if (segs.includes('..')) return true
+  return segs.length >= 2 && segName(segs[0]) === 'knowledge' && segName(segs[1]) === 'kanal'
+}
+
+function codepoint(n: number, roh: string): string {
+  return n >= 1 && n <= 0x10ffff && !(n >= 0xd800 && n <= 0xdfff) ? String.fromCodePoint(n) : roh
 }
 
 function decodeEntities(s: string): string {
   return s
+    .replace(/&#(\d{1,7});/g, (m, d: string) => codepoint(parseInt(d, 10), m))
+    .replace(/&#x([0-9a-f]{1,6});/gi, (m, h: string) => codepoint(parseInt(h, 16), m))
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&apos;/g, "'")
     .replace(/&lt;/g, '<')
     .replace(/&gt;/g, '>')
     .replace(/&quot;/g, '"')
-    .replace(/&#39;/g, "'")
     .replace(/&amp;/g, '&')
 }
 
@@ -55,42 +72,161 @@ function begrenzt(html: string): string {
   return html.length > KONZEPT_LESE_MAX ? html.slice(0, KONZEPT_LESE_MAX) : html
 }
 
+type Token =
+  | { k: 'text'; v: string }
+  | { k: 'open' | 'close'; name: string; attrs: Record<string, string> }
+  | { k: 'raw'; name: string; attrs: Record<string, string>; body: string }
+
+const WS = /\s/
+
+/** Liest ein Tag ab `start` (zeigt auf `<`). Liefert null, wenn es nicht abgeschlossen ist. Linear. */
+function parseTag(
+  h: string,
+  start: number,
+): { closing: boolean; name: string; attrs: Record<string, string>; end: number } | null {
+  const n = h.length
+  let j = start + 1
+  const closing = h[j] === '/'
+  if (closing) j++
+  const ns = j
+  while (j < n && !WS.test(h[j]) && h[j] !== '/' && h[j] !== '>') j++
+  const name = h.slice(ns, j).toLowerCase()
+  const attrs: Record<string, string> = {}
+  for (;;) {
+    while (j < n && (WS.test(h[j]) || h[j] === '/')) j++
+    if (j >= n) return null
+    if (h[j] === '>') return { closing, name, attrs, end: j + 1 }
+    const as = j
+    j++ // mindestens ein Zeichen (auch ein führendes `=`)
+    while (j < n && !WS.test(h[j]) && h[j] !== '=' && h[j] !== '>' && h[j] !== '/') j++
+    const an = h.slice(as, j).toLowerCase()
+    let k = j
+    while (k < n && WS.test(h[k])) k++
+    let wert = ''
+    if (h[k] === '=') {
+      k++
+      while (k < n && WS.test(h[k])) k++
+      if (k >= n) return null
+      const q = h[k]
+      if (q === '"' || q === "'") {
+        const e = h.indexOf(q, k + 1)
+        if (e === -1) return null
+        wert = h.slice(k + 1, e)
+        j = e + 1
+      } else {
+        const vs = k
+        while (k < n && !WS.test(h[k]) && h[k] !== '>') k++
+        wert = h.slice(vs, k)
+        j = k
+      }
+    }
+    if (!Object.prototype.hasOwnProperty.call(attrs, an)) attrs[an] = wert
+  }
+}
+
+/**
+ * Ein linearer Durchlauf über höchstens KONZEPT_LESE_MAX Zeichen. Kommentare entfallen,
+ * script/style kommen als `raw`-Token mit Inhalt. Nicht abgeschlossene Konstrukte beenden den Lauf.
+ */
+function scan(html: string): Token[] {
+  const h = begrenzt(html)
+  const n = h.length
+  const out: Token[] = []
+  let textStart = 0
+  let i = 0
+  const flush = (end: number) => {
+    if (end > textStart) out.push({ k: 'text', v: h.slice(textStart, end) })
+  }
+  while (i < n) {
+    const lt = h.indexOf('<', i)
+    if (lt === -1) break
+    const c = h[lt + 1]
+    if (h.startsWith('<!--', lt)) {
+      flush(lt)
+      const e = h.indexOf('-->', lt + 4)
+      if (e === -1) return out
+      i = textStart = e + 3
+    } else if (c === '!' || c === '?') {
+      flush(lt)
+      const e = h.indexOf('>', lt + 2)
+      if (e === -1) return out
+      i = textStart = e + 1
+    } else if (c !== undefined && (c === '/' || /[A-Za-z]/.test(c))) {
+      flush(lt)
+      const t = parseTag(h, lt)
+      if (t === null) return out
+      i = textStart = t.end
+      if (t.closing) {
+        out.push({ k: 'close', name: t.name, attrs: t.attrs })
+      } else if (t.name === 'script' || t.name === 'style') {
+        const re = new RegExp(`</${t.name}(?=[\\s/>])`, 'gi')
+        re.lastIndex = t.end
+        const m = re.exec(h)
+        if (m === null) {
+          out.push({ k: 'raw', name: t.name, attrs: t.attrs, body: h.slice(t.end) })
+          return out
+        }
+        out.push({ k: 'raw', name: t.name, attrs: t.attrs, body: h.slice(t.end, m.index) })
+        const e = h.indexOf('>', m.index)
+        if (e === -1) return out
+        i = textStart = e + 1
+      } else {
+        out.push({ k: 'open', name: t.name, attrs: t.attrs })
+      }
+    } else {
+      i = lt + 1 // einzelnes `<` ist Text
+    }
+  }
+  flush(n)
+  return out
+}
+
 export function htmlTitle(html: string): string | null {
-  const m = /<title\b[^>]*>([\s\S]*?)<\/title\s*>/i.exec(begrenzt(html))
-  if (!m) return null
-  const t = decodeEntities(m[1]).trim()
-  return t === '' ? null : t
+  const toks = scan(html)
+  for (let i = 0; i < toks.length; i++) {
+    const t = toks[i]
+    if (t.k === 'open' && t.name === 'title') {
+      let text = ''
+      for (let j = i + 1; j < toks.length; j++) {
+        const u = toks[j]
+        if (u.k !== 'text') break
+        text += u.v
+      }
+      const r = decodeEntities(text).trim()
+      return r === '' ? null : r
+    }
+  }
+  return null
 }
 
 export function htmlVisibleText(html: string): string {
-  const ohne = begrenzt(html)
-    .replace(/<!--[\s\S]*?(?:-->|$)/g, ' ')
-    .replace(/<script\b[^>]*>[\s\S]*?(?:<\/script\s*>|$)/gi, ' ')
-    .replace(/<style\b[^>]*>[\s\S]*?(?:<\/style\s*>|$)/gi, ' ')
-    .replace(/<[^>]*>/g, ' ')
-  return decodeEntities(ohne).replace(/\s+/g, ' ').trim()
+  const teile: string[] = []
+  for (const t of scan(html)) if (t.k === 'text') teile.push(t.v)
+  return decodeEntities(teile.join(' ')).replace(/\s+/g, ' ').trim()
 }
 
 function isRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === 'object' && v !== null && !Array.isArray(v)
 }
 
-/** Rohtext des ersten Blocks mit der Id, oder null. */
+/** Rohtext des ersten Blocks (`<script type="application/json" id="rowboat-konzept">`) in Dokumentreihenfolge. */
 function findBlock(html: string): string | null {
-  const re = /<script\b([^>]*)>([\s\S]*?)<\/script\s*>/gi
-  const idRe = new RegExp(
-    `(?:^|\\s)id\\s*=\\s*(?:"${KONZEPT_BLOCK_ID}"|'${KONZEPT_BLOCK_ID}'|${KONZEPT_BLOCK_ID}(?=\\s|$))`,
-    'i',
-  )
-  let m: RegExpExecArray | null
-  while ((m = re.exec(html)) !== null) {
-    if (idRe.test(m[1])) return m[2]
+  for (const t of scan(html)) {
+    if (t.k !== 'raw' || t.name !== 'script' || t.attrs.id !== KONZEPT_BLOCK_ID) continue
+    const typ = (t.attrs.type ?? '').split(';')[0].trim().toLowerCase()
+    if (typ === 'application/json') return t.body
   }
   return null
 }
 
+/**
+ * Liest den ersten Datenblock. Ein unbrauchbarer Block liefert `daten: null` und genau einen Satz.
+ * `bezuege` darf beliebige Zeichenketten enthalten; Einträge ohne `[[...]]` ergeben nur einen Hinweis
+ * in `fehler` (bei weiterhin gesetztem `daten`). Bei `videokonzept` wird `video` UNGEPRÜFT durchgereicht
+ * (nur als Objekt bestätigt); Verbraucher müssen es mit `checkVideoKonzept` prüfen.
+ */
 export function readKonzept(html: string): { daten: KonzeptDaten | null; fehler: string[] } {
-  const roh = findBlock(begrenzt(html))
+  const roh = findBlock(html)
   if (roh === null) return { daten: null, fehler: [] }
   const fehler = (satz: string) => ({ daten: null, fehler: [satz] })
   if (roh.length > BLOCK_MAX_ZEICHEN) {
@@ -115,7 +251,13 @@ export function readKonzept(html: string): { daten: KonzeptDaten | null; fehler:
     if (!isRecord(parsed.video)) return fehler('Beim Videokonzept fehlt im Datenblock das Objekt "video".')
     daten.video = parsed.video as unknown as VideoKonzept
   }
-  return { daten, fehler: [] }
+  const hinweise: string[] = []
+  if (!bezuege.every((b) => /^\[\[[\s\S]+\]\]$/.test(b.trim()))) {
+    hinweise.push(
+      'Mindestens ein Eintrag in "bezuege" steht nicht in doppelten eckigen Klammern, z. B. "[[Marke/Marke]]", und ergibt keine Verknüpfung.',
+    )
+  }
+  return { daten, fehler: hinweise }
 }
 
 function textLaenge(v: unknown, min: number, max: number): boolean {
@@ -168,8 +310,22 @@ export function checkVideoKonzept(v: unknown): string[] {
   return f
 }
 
+/** Pfadteil einer URL oder eines Pfads: ohne `?`/`#`, prozent-dekodiert, ohne Punkte/Leerzeichen am Ende. */
+function istHtmlNamentlich(pfadOderUrl: string): boolean {
+  const ohneRest = pfadOderUrl.split(/[?#]/)[0]
+  let dekodiert = ohneRest
+  try {
+    dekodiert = decodeURIComponent(ohneRest)
+  } catch {
+    // ungültige Kodierung: Rohform prüfen
+  }
+  const trim = (x: string) => x.replace(/[. ]+$/, '')
+  return isHtmlPath(trim(ohneRest)) || isHtmlPath(trim(dekodiert))
+}
+
+/** Im Zweifel (Query, Fragment, Kodierung, Endpunkt) gilt eine Datei als HTML und bekommt die Regel. */
 export function workspaceHtmlHeaders(relPath: string): Record<string, string> | null {
-  if (!isHtmlPath(relPath)) return null
+  if (!istHtmlNamentlich(relPath)) return null
   return {
     'Content-Type': 'text/html; charset=utf-8',
     'Content-Security-Policy': WORKSPACE_HTML_CSP,
@@ -179,7 +335,7 @@ export function workspaceHtmlHeaders(relPath: string): Record<string, string> | 
 
 export function frameNavigationDecision(frameUrl: string, targetUrl: string): 'allow' | 'block' {
   void targetUrl
-  if (!frameUrl.startsWith('app://workspace/')) return 'allow'
-  const pfad = frameUrl.split(/[?#]/)[0]
-  return isHtmlPath(pfad) ? 'block' : 'allow'
+  const praefix = 'app://workspace/'
+  if (frameUrl.slice(0, praefix.length).toLowerCase() !== praefix) return 'allow'
+  return istHtmlNamentlich(frameUrl.slice(praefix.length)) ? 'block' : 'allow'
 }
