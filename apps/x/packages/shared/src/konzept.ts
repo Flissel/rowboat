@@ -343,15 +343,15 @@ function mimeOhneParameter(contentType: string | null): string {
 
 /**
  * Entscheidung für eine Arbeitsverzeichnis-Antwort: Regel anwenden, wenn EINER der Namen
- * der angefragte Pfad (URL-artig: Query, Fragment, Prozent-Kodierung gelten) oder einer der
- * aufgelösten Dateisystempfade (reine Namen: nur das letzte Segment zählt, `#`, `?`, `%` sind
- * gewöhnliche Zeichen) nach HTML aussieht, oder der Content-Type HTML/XHTML ist.
+ * einer der Pfade nach HTML aussieht oder der Content-Type HTML/XHTML ist. Die Pfade sind REINE
+ * Namen (bereits dekodierter Anfragepfad ohne Query/Fragment, aufgelöster Dateisystempfad): nur das
+ * letzte Segment zählt, `#`, `?`, `%` sind gewöhnliche Zeichen. Für rohe URLs gibt es
+ * {@link workspaceHtmlHeaders} und {@link frameNavigationDecision}.
  */
-export function shouldApplyHtmlHeaders(relPath: string, resolvedPaths: string[], contentType: string | null): boolean {
+export function shouldApplyHtmlHeaders(plainPaths: string[], contentType: string | null): boolean {
   const mime = mimeOhneParameter(contentType)
   if (mime === 'text/html' || mime === 'application/xhtml+xml') return true
-  if (relPath !== '' && istHtmlNamentlich(relPath)) return true
-  return resolvedPaths.some((p) => {
+  return plainPaths.some((p) => {
     const segs = p.split(/[\\/]/)
     return isHtmlPath(segs[segs.length - 1].replace(/[. ]+$/, ''))
   })

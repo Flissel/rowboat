@@ -245,13 +245,13 @@ async function listSpaceAssets(orgId: string, spaceId: string): Promise<Array<{ 
  * Quelle (file:// oder Fern-Server) geschickt hat. Rumpf, Status und Range-Verhalten bleiben;
  * Fehlerantworten (404/403 ...) gehen unveraendert durch.
  */
-function withWorkspaceHtmlHeaders(res: Response, relPath: string, resolvedPaths: string[]): Response {
+function withWorkspaceHtmlHeaders(res: Response, plainPaths: string[]): Response {
   const contentType = res.headers.get("content-type");
   // Fehlerantworten: Namen zaehlen nicht (404-Text bleibt Text), aber HTML-Typ (z. B. Proxy-Fehlerseite)
   // bekommt die Regel.
   const isHtml = res.ok
-    ? shouldApplyHtmlHeaders(relPath, resolvedPaths, contentType)
-    : shouldApplyHtmlHeaders("", [], contentType);
+    ? shouldApplyHtmlHeaders(plainPaths, contentType)
+    : shouldApplyHtmlHeaders([], contentType);
   let extra: Record<string, string> | null = null;
   if (isHtml) {
     extra = htmlResponseHeaders();
@@ -295,8 +295,7 @@ async function handleAppRequest(request: Request): Promise<Response> {
             if (range) headers.set("range", range);
             return withWorkspaceHtmlHeaders(
               await fetch(`${baseUrl}/workspace/${relPath.split("/").map(encodeURIComponent).join("/")}`, { headers }),
-              relPath,
-              [],
+              [relPath],
             );
           }
           const absPath = resolveWorkspacePath(relPath);
@@ -308,7 +307,7 @@ async function handleAppRequest(request: Request): Promise<Response> {
           if (realTarget !== realRoot && !realTarget.startsWith(realRoot + path.sep)) {
             return new Response("Forbidden", { status: 403 });
           }
-          return withWorkspaceHtmlHeaders(await net.fetch(pathToFileURL(realTarget).toString()), relPath, [realTarget]);
+          return withWorkspaceHtmlHeaders(await net.fetch(pathToFileURL(realTarget).toString()), [relPath, realTarget]);
         } catch {
           return new Response("Forbidden", { status: 403 });
         }

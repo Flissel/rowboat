@@ -131,22 +131,25 @@ describe('konzept', () => {
     expect(workspaceHtmlHeaders('knowledge/a.xhtml')?.['Content-Security-Policy']).toBe(WORKSPACE_HTML_CSP)
     expect(frameNavigationDecision('app://workspace/knowledge/a.xhtml', 'https://example.com/')).toBe('block')
   })
-  it('shouldApplyHtmlHeaders: angefragter Pfad, Dateisystempfade, Content-Type', () => {
+  it('shouldApplyHtmlHeaders: reine Pfadnamen (letztes Segment) und Content-Type', () => {
     const f = shouldApplyHtmlHeaders
-    expect(f('knowledge/x.txt', ['/ws/knowledge/y.html'], 'text/plain')).toBe(true) // Verknüpfung
-    expect(f('x.txt', [], 'Text/HTML; charset=utf-8')).toBe(true)
-    expect(f('x', [], 'application/xhtml+xml')).toBe(true)
-    expect(f('a.HTM', [], null)).toBe(true)
-    expect(f('knowledge/a%2Ehtml?x=1', [], 'text/plain')).toBe(true)
-    // Dateisystempfade: nur das letzte Segment zählt, # ? % sind gewöhnlich
-    expect(f('n.txt', ['C:\ws\page.html#d\notes.txt'], 'text/plain')).toBe(false)
-    expect(f('n.txt', ['/home/u/a.html?x/notes.txt'], 'text/plain')).toBe(false)
-    expect(f('n.txt', ['C:\ws\C#proj\y.html'], 'text/plain')).toBe(true)
-    expect(f('n.txt', ['/home/u/100%/y.HTM.'], 'text/plain')).toBe(true)
-    expect(f('n.txt', ['/home/u/a?b/y.md'], 'text/plain')).toBe(false)
-    expect(f('x.txt', ['y.md'], 'text/plain')).toBe(false)
-    expect(f('a.png', [], 'image/png')).toBe(false)
-    expect(f('a.mp4', [], 'video/mp4')).toBe(false)
+    expect(f(['knowledge/x.txt', '/ws/knowledge/y.html'], 'text/plain')).toBe(true) // Verknüpfung
+    expect(f(['x.txt'], 'Text/HTML; charset=utf-8')).toBe(true)
+    expect(f(['x'], 'application/xhtml+xml')).toBe(true)
+    expect(f(['a.HTM'], null)).toBe(true)
+    expect(f(['knowledge/a.html'], 'text/plain')).toBe(true)
+    // Dateisystem- und dekodierte Anfragepfade: nur das letzte Segment zählt, # ? % sind gewöhnlich
+    expect(f(['C:\\ws\\page.html#d\\notes.txt'], 'text/plain')).toBe(false)
+    expect(f(['/home/u/a.html?x/notes.txt'], 'text/plain')).toBe(false)
+    expect(f(['page.html#d/notes.txt'], 'text/plain')).toBe(false)
+    expect(f(['a.html?x/notes.txt'], 'text/plain')).toBe(false)
+    expect(f(['knowledge/a%2Ehtml'], 'text/plain')).toBe(false) // wörtlicher Name, nicht .html
+    expect(f(['C:\\ws\\C#proj\\y.html'], 'text/plain')).toBe(true)
+    expect(f(['/home/u/100%/y.HTM.'], 'text/plain')).toBe(true)
+    expect(f(['/home/u/a?b/y.md'], 'text/plain')).toBe(false)
+    expect(f(['x.txt', 'y.md'], 'text/plain')).toBe(false)
+    expect(f(['a.png'], 'image/png')).toBe(false)
+    expect(f(['a.mp4'], 'video/mp4')).toBe(false)
     expect(htmlResponseHeaders()['Content-Security-Policy']).toBe(WORKSPACE_HTML_CSP)
   })
   it('needsNosniffOnly: fehlend oder generisch', () => {

@@ -54,7 +54,7 @@ export function createWorkspaceRoutes(resolveWorkspacePath: (relPath: string) =>
       const type = CONTENT_TYPES[path.extname(absPath).toLowerCase()] ?? 'application/octet-stream';
       // HTML aus dem Arbeitsverzeichnis: Typ, Kein-Netz-Regel und nosniff. Entscheidung ueber
       // beide Namen (angefragt, aufgeloester Symlink) und den abgeleiteten Content-Type.
-      const htmlHeaders = shouldApplyHtmlHeaders(relPath, [realTarget], type) ? htmlResponseHeaders() : null;
+      const htmlHeaders = shouldApplyHtmlHeaders([relPath, realTarget], type) ? htmlResponseHeaders() : null;
       return c.body(new Uint8Array(data), 200, {
         'Content-Type': type,
         'Content-Length': String(stats.size),

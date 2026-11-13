@@ -103,4 +103,35 @@ describe('workspace route: HTML delivery', () => {
       fs.rmSync(eltern, { recursive: true, force: true });
     }
   });
+
+  it('liefert Textdateien in Ordnern mit html-artigem Namen ohne HTML-Kopf, echtes HTML auch kodiert', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ws-'));
+    const angelegt: string[] = [];
+    try {
+      for (const d of ['page.html#d', 'a.html?x']) {
+        try {
+          fs.mkdirSync(path.join(dir, d));
+          fs.writeFileSync(path.join(dir, d, 'notes.txt'), 'hi');
+          angelegt.push(d);
+        } catch {
+          // Dateisystem erlaubt den Namen nicht (z. B. ? unter Windows)
+        }
+      }
+      const sApp = createWorkspaceRoutes((rel) => path.join(dir, rel));
+      for (const d of angelegt) {
+        const res = await sApp.request(`/workspace/${encodeURIComponent(d)}/notes.txt`);
+        expect(res.status, d).toBe(200);
+        expect(res.headers.get('content-security-policy'), d).toBeNull();
+        expect(res.headers.get('content-type'), d).toBe('text/plain; charset=utf-8');
+      }
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+    for (const p of ['/workspace/knowledge/a.html', '/workspace/knowledge/a%2Ehtml']) {
+      const res = await app.request(p);
+      expect(res.status, p).toBe(200);
+      expect(res.headers.get('content-security-policy'), p).toBe(WORKSPACE_HTML_CSP);
+      expect(res.headers.get('content-type'), p).toBe('text/html; charset=utf-8');
+    }
+  });
 });
