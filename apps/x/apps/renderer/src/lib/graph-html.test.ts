@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { konzept } from '@x/shared'
-import { canCreateWikiTarget, escapeHtml, graphHtmlData, graphLabelHtml, graphNodeLabel, knowledgeHtmlFiles, resolveWikiTarget } from './graph-html'
+import { canCreateWikiTarget, escapeHtml, graphHtmlData, graphHtmlNode, graphLabelHtml, graphNodeLabel, knowledgeHtmlFiles, resolveWikiTarget } from './graph-html'
 import { buildHierarchyGraph } from './graph-hierarchy'
 import { toKnowledgePath, wikiLabel } from './wiki-links'
 
@@ -46,6 +46,20 @@ describe('graph-html', () => {
     const nodes = new Set(['knowledge/Marke/Marke.md', 'knowledge/Notiz.md', 'knowledge/k.html'])
     const { edges } = buildHierarchyGraph([{ path: 'knowledge/k.html', data: graphHtmlData(html) }], nodes, toKnowledgePath)
     expect(edges).toHaveLength(2)
+  })
+
+  it('graphHtmlNode: Name aus dem rohen Titel, Kanten aus bezuege', () => {
+    const html = '<title>Mein Konzept</title><script type="application/json" id="rowboat-konzept">{"art":"konzept","bezuege":["[[Marke/Marke]]"]}</script>'
+    const node = graphHtmlNode('knowledge/Konzepte/k.html', html)
+    expect(node.label).toBe('Mein Konzept')
+    const nodes = new Set(['knowledge/Marke/Marke.md', 'knowledge/Konzepte/k.html'])
+    const { edges } = buildHierarchyGraph([{ path: 'knowledge/Konzepte/k.html', data: node.data }], nodes, toKnowledgePath)
+    expect(edges).toHaveLength(1)
+  })
+
+  it('graphHtmlNode: Titel aus Entitaeten im Text zaehlt nicht', () => {
+    const node = graphHtmlNode('knowledge/Konzepte/k.html', '<p>&lt;title&gt;X&lt;/title&gt;</p>')
+    expect(node.label).toBe('k')
   })
 
   it('escaped Knotennamen für HTML-Senken', () => {

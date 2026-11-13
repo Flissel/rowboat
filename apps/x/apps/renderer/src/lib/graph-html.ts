@@ -21,6 +21,15 @@ export function graphNodeLabel(path: string, data: string): string {
   return wikiLabel(path) || path
 }
 
+/**
+ * Eine HTML-Datei für den Graphen: Link-Text (graphHtmlData) und Name zusammen aus dem ROHEN, gekappten HTML.
+ * Der Name kommt nie aus dem tag-losen Link-Text (dort wären entschlüsselte Entitäten als <title> lesbar).
+ */
+export function graphHtmlNode(path: string, raw: string): { data: string; label: string } {
+  const capped = raw.length > konzept.KONZEPT_LESE_MAX ? raw.slice(0, konzept.KONZEPT_LESE_MAX) : raw
+  return { data: graphHtmlData(capped), label: graphNodeLabel(path, capped) }
+}
+
 /** HTML-Dateien unter knowledge/ aus der Baumliste, ohne Präfix und mit Endung (damit [[…x.html]] auflöst). */
 export function knowledgeHtmlFiles(treePaths: string[]): string[] {
   return Array.from(new Set(

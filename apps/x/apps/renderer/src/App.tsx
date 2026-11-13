@@ -94,7 +94,7 @@ import { matchBillingError, type BillingErrorMatch } from "@/lib/billing-error"
 import { dispatchCreditExhausted, dispatchCreditReplenished } from "@/lib/credit-status"
 import { ensureMarkdownExtension, normalizeWikiPath, splitWikiFragment, stripKnowledgePrefix, toKnowledgePath, wikiLabel } from '@/lib/wiki-links'
 import { buildHierarchyGraph, graphFileData, parseVaultMap, vaultMapNodeId, type NodeInfo } from '@/lib/graph-hierarchy'
-import { canCreateWikiTarget, graphHtmlData, graphNodeLabel, knowledgeHtmlFiles, resolveWikiTarget } from '@/lib/graph-html'
+import { canCreateWikiTarget, graphHtmlNode, graphNodeLabel, knowledgeHtmlFiles, resolveWikiTarget } from '@/lib/graph-html'
 import { splitFrontmatter, joinFrontmatter } from '@/lib/frontmatter'
 import { extractConferenceLink } from '@/lib/calendar-event'
 import { OnboardingModal } from '@/components/onboarding'
@@ -7006,12 +7006,10 @@ function App() {
     }
 
     // Extensionless link without x.md: exactly one x.html/.htm/.xhtml wins.
-    const byLower = new Map(knowledgeGraphFiles.map((f) => {
-      const p = toKnowledgePath(f)
-      return [p ? p.toLowerCase() : '', p] as const
-    }))
-    const htmlHit = resolveWikiTarget(basePath, (p) => byLower.has(p.toLowerCase()))
-    if (htmlHit && htmlHit !== toKnowledgePath(basePath)) return byLower.get(htmlHit.toLowerCase()) ?? htmlHit
+    // Exact-case comparison, same as the graph edges (nodeSet.has).
+    const known = new Set(knowledgeGraphFiles.map((f) => toKnowledgePath(f)))
+    const htmlHit = resolveWikiTarget(basePath, (p) => known.has(p))
+    if (htmlHit && htmlHit !== toKnowledgePath(basePath)) return htmlHit
 
     return toKnowledgePath(basePath)
   }, [knowledgeGraphFiles])
@@ -7087,10 +7085,14 @@ function App() {
           try {
             const result = await window.ipc.invoke('workspace:readFile', { path })
             const data = graphFileData(result)
-            return { path, data: konzept.isHtmlPath(path) ? graphHtmlData(data) : data }
+            if (konzept.isHtmlPath(path)) {
+              const node = graphHtmlNode(path, data)
+              return { path, data: node.data, label: node.label }
+            }
+            return { path, data, label: graphNodeLabel(path, data) }
           } catch (err) {
             console.error('Failed to read file for graph:', path, err)
-            return { path, data: '' }
+            return { path, data: '', label: graphNodeLabel(path, '') }
           }
         })
       )
@@ -7141,7 +7143,7 @@ function App() {
         }
       }
 
-      const contentByPath = new Map(contents.map((c) => [c.path, c.data]))
+      const labelByPath = new Map(contents.map((c) => [c.path, c.label]))
       const nodes = graphFilePaths.map((path) => {
         const degree = degreeMap.get(path) ?? 0
         const radius = 6 + Math.min(18, degree * 2)
@@ -7153,7 +7155,7 @@ function App() {
         const colors = getNodeColors(groupIndex, depth)
         return {
           id: path,
-          label: graphNodeLabel(path, contentByPath.get(path) ?? ''),
+          label: labelByPath.get(path) ?? graphNodeLabel(path, ''),
           degree,
           radius,
           group,
