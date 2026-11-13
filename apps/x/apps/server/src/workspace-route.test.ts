@@ -82,4 +82,25 @@ describe('workspace route: HTML delivery', () => {
       fs.rmSync(sonder, { recursive: true, force: true });
     }
   });
+
+  it('behandelt eine Textdatei im Arbeitsordner page.html#d nicht als HTML', async () => {
+    const eltern = fs.mkdtempSync(path.join(os.tmpdir(), 'ws-'));
+    const sonder = path.join(eltern, 'page.html#d');
+    try {
+      fs.mkdirSync(sonder);
+      fs.writeFileSync(path.join(sonder, 'notes.txt'), 'hi');
+    } catch {
+      fs.rmSync(eltern, { recursive: true, force: true });
+      return; // Dateisystem erlaubt den Namen nicht
+    }
+    try {
+      const sApp = createWorkspaceRoutes((rel) => path.join(sonder, rel));
+      const res = await sApp.request('/workspace/notes.txt');
+      expect(res.status).toBe(200);
+      expect(res.headers.get('content-security-policy')).toBeNull();
+      expect(res.headers.get('content-type')).toBe('text/plain; charset=utf-8');
+    } finally {
+      fs.rmSync(eltern, { recursive: true, force: true });
+    }
+  });
 });

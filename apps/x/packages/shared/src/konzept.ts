@@ -343,14 +343,18 @@ function mimeOhneParameter(contentType: string | null): string {
 
 /**
  * Entscheidung für eine Arbeitsverzeichnis-Antwort: Regel anwenden, wenn EINER der Namen
- * (angefragter Pfad, aufgelöster Verknüpfungs-Pfad) nach HTML aussieht oder der Content-Type
- * HTML/XHTML ist (z. B. aus der MIME-Erkennung bei Dateien mit ungewöhnlichem Namen).
+ * der angefragte Pfad (URL-artig: Query, Fragment, Prozent-Kodierung gelten) oder einer der
+ * aufgelösten Dateisystempfade (reine Namen: nur das letzte Segment zählt, `#`, `?`, `%` sind
+ * gewöhnliche Zeichen) nach HTML aussieht, oder der Content-Type HTML/XHTML ist.
  */
-export function shouldApplyHtmlHeaders(names: string[], contentType: string | null): boolean {
+export function shouldApplyHtmlHeaders(relPath: string, resolvedPaths: string[], contentType: string | null): boolean {
   const mime = mimeOhneParameter(contentType)
   if (mime === 'text/html' || mime === 'application/xhtml+xml') return true
-  // Namen auch als reine Dateinamen pruefen: absolute Pfade koennen # ? % im Ordnernamen haben.
-  return names.some((n) => istHtmlNamentlich(n) || isHtmlPath(n.replace(/[. ]+$/, '')))
+  if (relPath !== '' && istHtmlNamentlich(relPath)) return true
+  return resolvedPaths.some((p) => {
+    const segs = p.split(/[\\/]/)
+    return isHtmlPath(segs[segs.length - 1].replace(/[. ]+$/, ''))
+  })
 }
 
 /** Die drei Köpfe für eine Antwort, die {@link shouldApplyHtmlHeaders} bejaht hat. */
