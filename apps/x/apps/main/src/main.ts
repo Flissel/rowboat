@@ -52,6 +52,7 @@ import container, { registerBrowserControlService, registerNotificationService, 
 import { forwardRpc } from "./rpc-forwarder.js";
 import { bounceAllLive, getClient as getSpaceClient, listOrgs as listSpaceOrgs } from "@x/core/dist/spaces/orgs.js";
 import { parseOrgUrl } from "@x/shared/dist/spaces.js";
+import { frameNavigationDecision, workspaceHtmlHeaders } from "@x/shared/dist/konzept.js";
 import type { CodeModeManager } from "@x/core/dist/code-mode/acp/manager.js";
 import type { ISessions } from "@x/core/dist/runtime/sessions/index.js";
 import { browserViewManager, BROWSER_PARTITION } from "./browser/view.js";
@@ -234,6 +235,19 @@ async function listSpaceAssets(orgId: string, spaceId: string): Promise<Array<{ 
   return entries;
 }
 
+/**
+ * HTML aus dem Arbeitsverzeichnis bekommt Typ, Kein-Netz-Regel und nosniff, egal was die
+ * Quelle (file:// oder Fern-Server) geschickt hat. Rumpf, Status und Range-Verhalten bleiben;
+ * Fehlerantworten (404/403 ...) gehen unveraendert durch.
+ */
+function withWorkspaceHtmlHeaders(res: Response, relPath: string): Response {
+  const extra = workspaceHtmlHeaders(relPath);
+  if (!extra || !res.ok) return res;
+  const headers = new Headers(res.headers);
+  for (const [name, value] of Object.entries(extra)) headers.set(name, value);
+  return new Response(res.body, { status: res.status, statusText: res.statusText, headers });
+}
+
 // VibeMind-Einbettung: der app://-Rumpf als eigene Funktion, damit der Einbettungszugang
 // dieselben Inhalte ausliefern kann (serveApp). Rumpf unveraendert.
 async function handleAppRequest(request: Request): Promise<Response> {
@@ -262,7 +276,10 @@ async function handleAppRequest(request: Request): Promise<Response> {
             const headers = new Headers({ authorization: `Bearer ${key}` });
             const range = request.headers.get("range");
             if (range) headers.set("range", range);
-            return fetch(`${baseUrl}/workspace/${relPath.split("/").map(encodeURIComponent).join("/")}`, { headers });
+            return withWorkspaceHtmlHeaders(
+              await fetch(`${baseUrl}/workspace/${relPath.split("/").map(encodeURIComponent).join("/")}`, { headers }),
+              relPath,
+            );
           }
           const absPath = resolveWorkspacePath(relPath);
           // Parity with the server's /workspace route: `..` is guarded above,
@@ -273,7 +290,7 @@ async function handleAppRequest(request: Request): Promise<Response> {
           if (realTarget !== realRoot && !realTarget.startsWith(realRoot + path.sep)) {
             return new Response("Forbidden", { status: 403 });
           }
-          return net.fetch(pathToFileURL(realTarget).toString());
+          return withWorkspaceHtmlHeaders(await net.fetch(pathToFileURL(realTarget).toString()), relPath);
         } catch {
           return new Response("Forbidden", { status: 403 });
         }
@@ -586,6 +603,13 @@ function createWindow(options: { startHidden?: boolean } = {}) {
   win.webContents.on("will-frame-navigate", (event) => {
     if (event.isMainFrame) return;
     if (!event.frame?.url.startsWith("app://workspace/") && !event.frame?.url.startsWith("app://space-document/")) return;
+    // Konzept-Flaeche: ein Skript in einer app://workspace/-HTML-Seite darf den Rahmen nicht
+    // wegnavigieren (Seitenwechsel, meta refresh, Formular). Der erste Ladevorgang des Rahmens
+    // ist davon nicht betroffen: dort ist frame.url noch leer/about:blank (-> 'allow').
+    if (frameNavigationDecision(event.frame.url, event.url) === "block") {
+      event.preventDefault();
+      return;
+    }
     if (routeExternalNavigation(event.url)) event.preventDefault();
   });
 
