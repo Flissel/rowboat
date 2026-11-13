@@ -118,7 +118,7 @@ button:hover, button:focus-visible { background: var(--akzent); color: var(--akz
     var szenen = [];
     var zaehler = {};
     v.stufen.forEach(function (st, i) {
-      if (!ist(st) || !Array.isArray(st.szenen)) throw new Error('Stufe ' + (i + 1) + ' braucht einen Namen und eine Liste "szenen".');
+      if (!ist(st) || !Array.isArray(st.szenen)) throw new Error('Stufe ' + (i + 1) + ' braucht eine Liste "szenen".');
       st.szenen.forEach(function (sz, j) {
         if (!ist(sz)) throw new Error('Szene ' + (j + 1) + ' in Stufe ' + (i + 1) + ' ist kein Objekt.');
         szenen.push(sz);

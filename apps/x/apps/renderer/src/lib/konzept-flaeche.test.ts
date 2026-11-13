@@ -6,6 +6,7 @@ import {
   eventTime,
   konzeptHinweise,
   konzeptPathFromTool,
+  konzeptSchreibvorgaenge,
   linkOpenRequest,
   nextPendingRequest,
   noteOpenRequest,
@@ -28,13 +29,62 @@ describe('konzept-flaeche', () => {
     expect(konzeptPathFromTool(fertig('deck-create', 'knowledge/k.html'))).toBeNull()
   })
 
-  it('öffnet nur beim ersten Schreiben eines Laufs', () => {
+  it('öffnet nur beim ersten Schreiben eines Zugs', () => {
     const seen = new Set<string>()
-    expect(shouldAutoOpen({ path: 'knowledge/k.html', openedThisRun: seen, currentPath: null })).toBe(true)
+    expect(shouldAutoOpen({ path: 'knowledge/k.html', openedThisTurn: seen, currentPath: null })).toBe(true)
     seen.add('knowledge/k.html')
-    expect(shouldAutoOpen({ path: 'knowledge/k.html', openedThisRun: seen, currentPath: 'knowledge/n.md' })).toBe(false)
-    expect(shouldAutoOpen({ path: 'knowledge/j.html', openedThisRun: seen, currentPath: 'knowledge/j.html' })).toBe(false)
-    expect(shouldAutoOpen({ path: 'knowledge/j.html', openedThisRun: seen, currentPath: 'knowledge/n.md' })).toBe(true)
+    expect(shouldAutoOpen({ path: 'knowledge/k.html', openedThisTurn: seen, currentPath: 'knowledge/n.md' })).toBe(false)
+    expect(shouldAutoOpen({ path: 'knowledge/j.html', openedThisTurn: seen, currentPath: 'knowledge/j.html' })).toBe(false)
+    expect(shouldAutoOpen({ path: 'knowledge/j.html', openedThisTurn: seen, currentPath: 'knowledge/n.md' })).toBe(true)
+  })
+
+  describe('konzeptSchreibvorgaenge: Erinnerung je Zug (R41)', () => {
+    const nutzer = (id: string) => ({ id, role: 'user', content: 'x' })
+    const schreib = (id: string, rel: string, status = 'completed') => ({ id, ...fertig('file-writeText', rel), status })
+    const k = 'knowledge/Konzepte/k.html'
+
+    it('öffnet im Zug einmal; spätere Schreibvorgänge im selben Zug laden nur neu', () => {
+      const processed = new Set<string>()
+      const memory = { turn: null, opened: new Set<string>() }
+      const items = [nutzer('t1:user'), schreib('a', k), schreib('b', k), schreib('c', k)]
+      expect(konzeptSchreibvorgaenge(items, processed, memory, null)).toEqual([
+        { path: k, open: true },
+        { path: k, open: false },
+        { path: k, open: false },
+      ])
+    })
+
+    it('neuer Zug -> öffnet wieder, wenn Felix die Fläche geschlossen hat', () => {
+      const processed = new Set<string>()
+      const memory = { turn: null, opened: new Set<string>() }
+      const items = [nutzer('t1:user'), schreib('a', k)]
+      expect(konzeptSchreibvorgaenge(items, processed, memory, null)).toEqual([{ path: k, open: true }])
+      // Felix schließt die Fläche (zeigt eine Notiz); im selben Zug schreibt der Agent nochmal: bleibt zu
+      items.push(schreib('b', k))
+      expect(konzeptSchreibvorgaenge(items, processed, memory, 'knowledge/n.md')).toEqual([{ path: k, open: false }])
+      // nächste Nutzernachricht ("füge eine Szene ein"), der Agent schreibt: geht wieder auf
+      items.push(nutzer('t2:user'), schreib('c', k))
+      expect(konzeptSchreibvorgaenge(items, processed, memory, 'knowledge/n.md')).toEqual([{ path: k, open: true }])
+    })
+
+    it('nicht, wenn die Datei schon angezeigt wird; ein Zug ohne Nutzertext zählt nach dem Verbrauchseintrag für sich', () => {
+      const processed = new Set<string>()
+      const memory = { turn: null, opened: new Set<string>() }
+      const items = [nutzer('t1:user'), schreib('a', k), { id: 't1:usage', kind: 'turn-usage' }]
+      expect(konzeptSchreibvorgaenge(items, processed, memory, k)).toEqual([{ path: k, open: false }])
+      items.push(schreib('b', k))
+      expect(konzeptSchreibvorgaenge(items, processed, memory, null)).toEqual([{ path: k, open: true }])
+    })
+
+    it('schon verarbeitete (beim Sitzungswechsel vorgemerkte) und laufende Aufrufe werden nicht abgespielt', () => {
+      const processed = new Set<string>(['a'])
+      const memory = { turn: null, opened: new Set<string>() }
+      const items = [nutzer('t1:user'), schreib('a', k), schreib('b', k, 'running'), schreib('c', 'knowledge/Kanal/x.html')]
+      expect(konzeptSchreibvorgaenge(items, processed, memory, null)).toEqual([])
+      expect(processed.has('b')).toBe(false)
+      items[2] = schreib('b', k)
+      expect(konzeptSchreibvorgaenge(items, processed, memory, null)).toEqual([{ path: k, open: true }])
+    })
   })
 
   it('bündelt mit 300 ms', () => {

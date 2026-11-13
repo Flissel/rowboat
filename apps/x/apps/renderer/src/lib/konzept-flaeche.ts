@@ -22,10 +22,57 @@ export function konzeptPathFromTool(tool: { name: string; status: string; result
   return rel
 }
 
-/** Von selbst öffnen nur beim ersten Schreiben eines Pfads im Lauf und nur, wenn er nicht schon angezeigt wird. */
-export function shouldAutoOpen(args: { path: string; openedThisRun: Set<string>; currentPath: string | null }): boolean {
-  if (args.openedThisRun.has(args.path)) return false
+/** Von selbst öffnen nur beim ersten Schreiben eines Pfads im Zug und nur, wenn er nicht schon angezeigt wird. */
+export function shouldAutoOpen(args: { path: string; openedThisTurn: Set<string>; currentPath: string | null }): boolean {
+  if (args.openedThisTurn.has(args.path)) return false
   return args.currentPath !== args.path
+}
+
+/** Was sich die Fläche je Chat merkt: der Zug der zuletzt gesehenen Schreibaufrufe und die darin schon geöffneten Pfade. */
+export type ZugGedaechtnis = { turn: string | null; opened: Set<string> }
+
+type GespraechsEintrag = { id: string; role?: unknown; kind?: unknown; name?: unknown; status?: unknown; result?: unknown }
+
+/**
+ * Geht die Unterhaltung in Reihenfolge durch. Ein Zug beginnt mit jeder Nutzernachricht (auch einer nachgereichten)
+ * und nach dem Verbrauchseintrag (`turn-usage`), der einen Zug abschließt -- so zählt auch ein Zug ohne Nutzertext
+ * für sich. Für jeden noch nicht verarbeiteten, abgeschlossenen Schreibaufruf eines Wissens-HTMLs (nicht Kanal):
+ * Pfad und ob die Fläche aufgehen soll -- nur beim ersten Schreiben dieses Pfads im Zug und nur, wenn er nicht schon
+ * angezeigt wird (spec 5.4: geschlossen bleibt sie zu, bis der Agent das nächste Mal schreibt). `processed` und
+ * `memory` werden fortgeschrieben.
+ */
+export function konzeptSchreibvorgaenge(
+  items: readonly GespraechsEintrag[],
+  processed: Set<string>,
+  memory: ZugGedaechtnis,
+  currentPath: string | null,
+): Array<{ path: string; open: boolean }> {
+  const out: Array<{ path: string; open: boolean }> = []
+  let turn = ''
+  for (const item of items) {
+    if (item.role === 'user') {
+      turn = item.id
+      continue
+    }
+    if (item.kind === 'turn-usage') {
+      turn = `${item.id}:danach`
+      continue
+    }
+    if (typeof item.name !== 'string' || typeof item.status !== 'string') continue
+    if (processed.has(item.id)) continue
+    if (item.status !== 'completed') continue
+    processed.add(item.id)
+    const path = konzeptPathFromTool({ name: item.name, status: item.status, result: item.result })
+    if (!path) continue
+    if (memory.turn !== turn) {
+      memory.turn = turn
+      memory.opened = new Set()
+    }
+    const open = shouldAutoOpen({ path, openedThisTurn: memory.opened, currentPath })
+    memory.opened.add(path)
+    out.push({ path, open })
+  }
+  return out
 }
 
 /** Notiz-Anfrage der Seite: `{ type: 'rowboat:notiz-oeffnen', pfad }` mit einer Datei unter `knowledge/` (nicht Kanal), sonst null. */

@@ -145,7 +145,7 @@ import * as analytics from '@/lib/analytics'
 import { playAckCue, playAlertCue, playPopCue } from '@/lib/call-sounds'
 import { useTheme } from '@/contexts/theme-context'
 import { isMac } from '@/lib/shortcut'
-import { konzeptPathFromTool, shouldAutoOpen } from '@/lib/konzept-flaeche'
+import { konzeptSchreibvorgaenge, type ZugGedaechtnis } from '@/lib/konzept-flaeche'
 
 type DirEntry = z.infer<typeof workspace.DirEntry>
 type RunEventType = z.infer<typeof RunEvent>
@@ -6081,12 +6081,13 @@ function App() {
   }, [sessionChat.chatState?.conversation, runId, navigateToView])
 
   // Flaeche: when the assistant writes an HTML concept under knowledge/ (not Kanal), open it next to
-  // the chat on the FIRST write of that path in this run -- and only if it is not already shown, so
-  // a user who has moved on is not pulled back. Every write also tells an open viewer to reload.
-  // Same seeding semantics as the deck effect above.
+  // the chat on the FIRST write of that path in each agent turn -- and only if it is not already
+  // shown. Later writes in the same turn only reload, so a user who closed the pane is not pulled
+  // back until the agent writes again in a later turn (spec 5.4). Every write also tells an open
+  // viewer to reload. Same seeding semantics as the deck effect above (no replay on session switch).
   const processedKonzeptToolsRef = useRef<{ key: string | null; ids: Set<string> }>({ key: null, ids: new Set() })
-  // Per run, surviving chat-tab switches: a concept already opened in a run never pulls the user back.
-  const konzeptOpenedByRunRef = useRef<Map<string, Set<string>>>(new Map())
+  // Per chat, surviving chat-tab switches: the turn of the last concept write and the paths opened in it.
+  const konzeptTurnByRunRef = useRef<Map<string, ZugGedaechtnis>>(new Map())
   useEffect(() => {
     if (!LOCAL_RUNTIME) return // the Flaeche is desktop-only; the web build must not move the chat or open files
     const conversation = sessionChat.chatState?.conversation
@@ -6100,24 +6101,20 @@ function App() {
       return
     }
     const runKey = runId ?? ''
-    let openedSet = konzeptOpenedByRunRef.current.get(runKey)
-    if (!openedSet) {
-      openedSet = new Set()
-      konzeptOpenedByRunRef.current.set(runKey, openedSet)
+    let memory = konzeptTurnByRunRef.current.get(runKey)
+    if (!memory) {
+      memory = { turn: null, opened: new Set() }
+      konzeptTurnByRunRef.current.set(runKey, memory)
     }
+    const view = currentViewStateRef.current
+    const writes = konzeptSchreibvorgaenge(
+      conversation,
+      processedKonzeptToolsRef.current.ids,
+      memory,
+      view.type === 'file' ? view.path : null,
+    )
     let movedChat = false
-    for (const tool of completed) {
-      if (processedKonzeptToolsRef.current.ids.has(tool.id)) continue
-      processedKonzeptToolsRef.current.ids.add(tool.id)
-      const konzeptPath = konzeptPathFromTool(tool)
-      if (!konzeptPath) continue
-      const view = currentViewStateRef.current
-      const openIt = shouldAutoOpen({
-        path: konzeptPath,
-        openedThisRun: openedSet,
-        currentPath: view.type === 'file' ? view.path : null,
-      })
-      openedSet.add(konzeptPath)
+    for (const { path: konzeptPath, open: openIt } of writes) {
       if (openIt) {
         if (!movedChat && isFullScreenChat && assistantLayout.assistant) {
           movedChat = true

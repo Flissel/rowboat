@@ -362,7 +362,10 @@ async function readHtmlHead(filePath: string): Promise<string | null> {
   let handle: fsp.FileHandle | undefined;
   try {
     handle = await fsp.open(filePath, 'r');
-    const buf = Buffer.alloc(konzept.KONZEPT_LESE_MAX);
+    // Sized from the file (not a fixed 1 MiB per file per query), not zero-filled: only the
+    // bytesRead prefix is decoded. The cap here is bytes; the shared scanner caps characters.
+    const { size } = await handle.stat();
+    const buf = Buffer.allocUnsafe(Math.min(size, konzept.KONZEPT_LESE_MAX));
     const { bytesRead } = await handle.read(buf, 0, buf.length, 0);
     // stream: a multi-byte character cut at the byte limit is not an error
     return new TextDecoder('utf-8', { fatal: true }).decode(buf.subarray(0, bytesRead), { stream: true });

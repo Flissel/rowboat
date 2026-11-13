@@ -2,6 +2,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { KONZEPT_LESE_MAX } from '@x/shared/dist/konzept.js';
 
 let workDir: string;
 let search: typeof import('./search.js').search;
@@ -23,6 +24,8 @@ beforeAll(async () => {
   put('Konzepte/ohne-titel.HTM', '<p>Walrosswort hier</p>');
   put('Konzepte/kaputt.html', Buffer.from([0xff, 0xfe, 0x00, 0x80, 0xc3, 0x28]));
   put('Konzepte/gross.html', '<p>x</p>' + ' '.repeat(2_000_000) + '<p>Hinterwort</p>');
+  put('Konzepte/leer.html', '');
+  put('Konzepte/knapp.html', '<p>' + ' '.repeat(KONZEPT_LESE_MAX - 30) + 'Randwort</p>');
   ({ search } = await import('./search.js'));
 });
 
@@ -61,6 +64,13 @@ describe('search in HTML-Dateien', () => {
 
   it('liest je Datei hoechstens KONZEPT_LESE_MAX Zeichen', async () => {
     expect((await search('Hinterwort', 20, ['knowledge'])).results).toHaveLength(0);
+  });
+
+  it('liest kleine und leere Dateien ganz (Puffer nach Dateigroesse)', async () => {
+    expect((await search('Randwort', 20, ['knowledge'])).results.map((r) => r.title)).toEqual(['knapp.html']);
+    expect((await search('leer', 20, ['knowledge'])).results.map((r) => r.title)).toEqual(['leer.html']); // Dateiname
+    const { results } = await search('walrosswort', 20, ['knowledge']);
+    expect(results[0].preview).toBe('Walrosswort hier');
   });
 
   it('HTML-Treffer teilen sich das Limit', async () => {
