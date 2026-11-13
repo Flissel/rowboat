@@ -39,6 +39,7 @@ export function noteOpenRequest(msg: unknown): string | null {
   const segs = raw.replace(/\\/g, '/').split('/').filter((s) => s !== '' && s !== '.')
   if (segs.includes('..')) return null
   if (segs.length < 2 || segs[0] !== 'knowledge') return null
+  if (segs.some((seg) => seg.startsWith('.'))) return null
   if (!/\.[A-Za-z0-9]{1,8}$/.test(segs[segs.length - 1])) return null
   const norm = segs.join('/')
   if (konzept.isKanalPath(norm)) return null
@@ -101,4 +102,46 @@ export function workspaceEventTouches(event: unknown, path: string): boolean {
 export function cacheBustedUrl(url: string, version: number): string {
   if (version <= 0) return url
   return `${url}${url.includes('?') ? '&' : '?'}v=${version}`
+}
+
+/** Eine offene Link-Rückfrage der Seite (Bestätigungsstreifen in der Kopfzeile). */
+export type PendingLink = { url: string; at: number }
+export const pendingLinkMaxAgeMs = 10_000
+
+/**
+ * Zustandsübergänge der Link-Rückfrage. Eine neue Anfrage ersetzt die offene nur, wenn keine offen ist oder
+ * die offene älter als 10 s ist. Abbrechen, Öffnen und Zurücksetzen (Neuladen, Ansicht verborgen) leeren sie.
+ */
+export function nextPendingLink(
+  state: PendingLink | null,
+  event: { type: 'request'; url: string; now: number } | { type: 'cancel' | 'open' | 'reset' },
+): PendingLink | null {
+  if (event.type !== 'request') return null
+  if (state === null || event.now - state.at > pendingLinkMaxAgeMs) return { url: event.url, at: event.now }
+  return state
+}
+
+export const noteActionCooldownMs = 1000
+
+/**
+ * Darf eine Notiz-Anfrage der Seite die Notiz öffnen? Nur wenn der Klick wirklich im Rahmen stattfand:
+ * Nachricht vom Rahmen, Ansicht sichtbar, Aktivierung aktiv, der Rahmen hat den Fokus, und seit der Rahmen den
+ * Fokus bekam, gab es keine Eingabe im Hauptfenster (Tippen im Chat hält die Aktivierung auch am Leben).
+ * Zeiten in ms (gleiche Uhr); null = noch nie.
+ */
+export function acceptNoteMessage(f: {
+  fromFrame: boolean
+  visible: boolean
+  activationActive: boolean
+  frameIsActiveElement: boolean
+  frameFocusedAt: number | null
+  lastParentInputAt: number | null
+  lastActionAt: number | null
+  now: number
+}): boolean {
+  if (!f.fromFrame || !f.visible || !f.activationActive || !f.frameIsActiveElement) return false
+  if (f.frameFocusedAt === null) return false
+  if (f.lastParentInputAt !== null && f.lastParentInputAt >= f.frameFocusedAt) return false
+  if (f.lastActionAt !== null && f.now - f.lastActionAt < noteActionCooldownMs) return false
+  return true
 }

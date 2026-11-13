@@ -6084,7 +6084,9 @@ function App() {
   // the chat on the FIRST write of that path in this run -- and only if it is not already shown, so
   // a user who has moved on is not pulled back. Every write also tells an open viewer to reload.
   // Same seeding semantics as the deck effect above.
-  const processedKonzeptToolsRef = useRef<{ key: string | null; ids: Set<string>; openedThisRun: Set<string> }>({ key: null, ids: new Set(), openedThisRun: new Set() })
+  const processedKonzeptToolsRef = useRef<{ key: string | null; ids: Set<string> }>({ key: null, ids: new Set() })
+  // Per run, surviving chat-tab switches: a concept already opened in a run never pulls the user back.
+  const konzeptOpenedByRunRef = useRef<Map<string, Set<string>>>(new Map())
   useEffect(() => {
     const conversation = sessionChat.chatState?.conversation
     if (!conversation) return
@@ -6093,9 +6095,16 @@ function App() {
         isToolCall(item) && (item.name === 'file-writeText' || item.name === 'file-editText') && item.status === 'completed'
     )
     if (processedKonzeptToolsRef.current.key !== runId) {
-      processedKonzeptToolsRef.current = { key: runId, ids: new Set(completed.map((t) => t.id)), openedThisRun: new Set() }
+      processedKonzeptToolsRef.current = { key: runId, ids: new Set(completed.map((t) => t.id)) }
       return
     }
+    const runKey = runId ?? ''
+    let openedSet = konzeptOpenedByRunRef.current.get(runKey)
+    if (!openedSet) {
+      openedSet = new Set()
+      konzeptOpenedByRunRef.current.set(runKey, openedSet)
+    }
+    let movedChat = false
     for (const tool of completed) {
       if (processedKonzeptToolsRef.current.ids.has(tool.id)) continue
       processedKonzeptToolsRef.current.ids.add(tool.id)
@@ -6104,12 +6113,15 @@ function App() {
       const view = currentViewStateRef.current
       const openIt = shouldAutoOpen({
         path: konzeptPath,
-        openedThisRun: processedKonzeptToolsRef.current.openedThisRun,
+        openedThisRun: openedSet,
         currentPath: view.type === 'file' ? view.path : null,
       })
-      processedKonzeptToolsRef.current.openedThisRun.add(konzeptPath)
+      openedSet.add(konzeptPath)
       if (openIt) {
-        if (isFullScreenChat && assistantLayout.assistant) moveAssistantChat(assistantLayout.assistant, 'sidebar')
+        if (!movedChat && isFullScreenChat && assistantLayout.assistant) {
+          movedChat = true
+          moveAssistantChat(assistantLayout.assistant, 'sidebar')
+        }
         void navigateToView({ type: 'file', path: konzeptPath })
       }
       window.dispatchEvent(new CustomEvent('rowboat:html-touched', { detail: { path: konzeptPath } }))

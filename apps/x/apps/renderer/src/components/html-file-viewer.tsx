@@ -1,15 +1,19 @@
 import { useFileViewerSource } from './file-viewer-source'
+import { LegacyHtmlFileViewer } from './html-file-viewer-legacy'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { konzept } from '@x/shared'
 import { LOCAL_RUNTIME } from '@/lib/feature-flags'
 import {
+  acceptNoteMessage,
   cacheBustedUrl,
   konzeptHinweise,
   linkOpenRequest,
+  nextPendingLink,
   noteOpenRequest,
   reloadDebounceMs,
   userActivationActive,
   workspaceEventTouches,
+  type PendingLink,
 } from '@/lib/konzept-flaeche'
 import { AlertCircleIcon, ExternalLinkIcon, FileTextIcon, Loader2Icon } from 'lucide-react'
 
@@ -28,10 +32,18 @@ interface HtmlFileViewerProps {
   active?: boolean
 }
 
-/** Minimum gap between two actions (note/link) that a single click in the page may trigger. */
-const ACTION_COOLDOWN_MS = 1000
-
+/**
+ * The Flaeche (header, hints, reload, message bridge) applies only to workspace files in the desktop
+ * app. Every other source (web build, Spaces documents, local previews) keeps the view as it was
+ * before: LegacyHtmlFileViewer, untouched.
+ */
 export function HtmlFileViewer({ path, active = true }: HtmlFileViewerProps) {
+  const source = useFileViewerSource()
+  if (!LOCAL_RUNTIME || !source.workspace) return <LegacyHtmlFileViewer path={path} />
+  return <FlaecheViewer path={path} active={active} />
+}
+
+function FlaecheViewer({ path, active }: { path: string; active: boolean }) {
   const source = useFileViewerSource()
   const [state, setState] = useState<ViewerState>({ kind: 'loading' })
   const [iframeLoaded, setIframeLoaded] = useState(false)
@@ -42,17 +54,13 @@ export function HtmlFileViewer({ path, active = true }: HtmlFileViewerProps) {
   const [stale, setStale] = useState(false)
   const [fileText, setFileText] = useState<string | null>(null)
   const [fileSize, setFileSize] = useState(0)
+  const [pendingLink, setPendingLink] = useState<PendingLink | null>(null)
   const iframeRef = useRef<HTMLIFrameElement | null>(null)
   const lastPathRef = useRef<string | null>(null)
-  const lastActionRef = useRef(0)
+  const lastActionRef = useRef<number | null>(null)
+  const lastParentInputRef = useRef<number | null>(null)
+  const frameFocusedRef = useRef<number | null>(null)
   const iframeSrc = useMemo(() => cacheBustedUrl(source.url(path), version), [path, source, version])
-  // The web app (2026-10-12) has no protocol to serve a document's folder from,
-  // and a sandboxed frame without allow-same-origin isn't controlled by its
-  // service worker. So the document goes in as srcdoc, in the same sandbox:
-  // HTML and inline styles render, relative files don't, and a script can't
-  // reach the page. The page's CSP, which srcdoc inherits, also blocks inline
-  // script in production.
-  const [srcdoc, setSrcdoc] = useState<string | null>(null)
 
   useEffect(() => {
     let cancelled = false
@@ -82,21 +90,15 @@ export function HtmlFileViewer({ path, active = true }: HtmlFileViewerProps) {
           setState({ kind: 'empty' })
           return
         }
-        if (!LOCAL_RUNTIME) {
+        // Title and hints come from the file text, read here once per (re)load -- never from inside the frame.
+        // (The read API has no length limit, so a reload re-reads up to 5 MB.)
+        try {
           const doc = await source.read({ path, encoding: 'utf8' })
           if (cancelled) return
-          setSrcdoc(doc.data)
           setFileText(doc.data)
-        } else {
-          // Title and hints come from the file text, read here once per (re)load -- never from inside the frame.
-          try {
-            const doc = await source.read({ path, encoding: 'utf8' })
-            if (cancelled) return
-            setFileText(doc.data)
-          } catch {
-            if (cancelled) return
-            setFileText(null)
-          }
+        } catch {
+          if (cancelled) return
+          setFileText(null)
         }
         setState({ kind: 'loaded' })
       } catch (err) {
@@ -131,7 +133,7 @@ export function HtmlFileViewer({ path, active = true }: HtmlFileViewerProps) {
     let stop: (() => void) | undefined
     if (source.subscribe) {
       stop = source.subscribe(schedule)
-    } else if (source.workspace && typeof window.ipc?.on === 'function') {
+    } else if (typeof window.ipc?.on === 'function') {
       stop = window.ipc.on('workspace:didChange', (event) => {
         if (workspaceEventTouches(event, path)) schedule()
       })
@@ -146,41 +148,92 @@ export function HtmlFileViewer({ path, active = true }: HtmlFileViewerProps) {
   useEffect(() => {
     if (!stale || !active) return
     setStale(false)
+    setPendingLink((p) => nextPendingLink(p, { type: 'reset' }))
     setVersion((v) => v + 1)
   }, [stale, active])
 
-  // Links out of the page arrive as messages (the frame has no allow-popups, so scripts cannot open
-  // anything themselves). One listener per visible viewer; accepted only from this frame and only
-  // inside a real click (transient user activation). A hidden viewer has no listener at all.
+  // A hidden viewer shows no confirmation strip and has no listener (below).
   useEffect(() => {
-    if (!active || !LOCAL_RUNTIME) return
+    if (!active) setPendingLink((p) => nextPendingLink(p, { type: 'reset' }))
+  }, [active])
+
+  // Track where the user's input happens. Events inside the cross-origin frame never reach these
+  // capture listeners; typing in the chat or clicking the app does. The frame "took focus" when the
+  // parent window blurs while the iframe is the active element.
+  useEffect(() => {
+    if (!active) return
+    const onInput = () => {
+      lastParentInputRef.current = performance.now()
+    }
+    const onBlur = () => {
+      if (iframeRef.current && document.activeElement === iframeRef.current) frameFocusedRef.current = performance.now()
+    }
+    window.addEventListener('pointerdown', onInput, true)
+    window.addEventListener('keydown', onInput, true)
+    window.addEventListener('blur', onBlur)
+    return () => {
+      window.removeEventListener('pointerdown', onInput, true)
+      window.removeEventListener('keydown', onInput, true)
+      window.removeEventListener('blur', onBlur)
+    }
+  }, [active])
+
+  // Requests from the page arrive as messages (the frame has no allow-popups, so scripts cannot open
+  // anything themselves). One listener per visible viewer, only from this frame's own window.
+  //  - Web link: never opens on a message alone; it only shows the confirmation strip. "Öffnen" opens it.
+  //  - Note: opens directly, but only after a real click inside the frame (acceptNoteMessage), and only
+  //    if the target file exists.
+  useEffect(() => {
+    if (!active) return
     const onMessage = (e: MessageEvent) => {
       const frameWindow = iframeRef.current?.contentWindow
       if (!frameWindow || e.source !== frameWindow) return
-      const note = noteOpenRequest(e.data)
-      const link = note ? null : linkOpenRequest(e.data)
-      if (!note && !link) return
-      if (!userActivationActive(navigator)) return
-      const now = Date.now()
-      if (now - lastActionRef.current < ACTION_COOLDOWN_MS) return
-      lastActionRef.current = now
-      if (note) {
-        window.dispatchEvent(new CustomEvent('rowboat:open-note', { detail: { path: note } }))
-      } else if (link) {
-        // Same path the rest of the renderer uses: the main window-open handler sends it to the system browser.
-        window.open(link, '_blank', 'noopener,noreferrer')
+      const link = linkOpenRequest(e.data)
+      if (link) {
+        const now = Date.now()
+        setPendingLink((p) => nextPendingLink(p, { type: 'request', url: link, now }))
+        return
       }
+      const note = noteOpenRequest(e.data)
+      if (!note) return
+      const now = performance.now()
+      const ok = acceptNoteMessage({
+        fromFrame: true,
+        visible: active,
+        activationActive: userActivationActive(navigator),
+        frameIsActiveElement: document.activeElement === iframeRef.current,
+        frameFocusedAt: frameFocusedRef.current,
+        lastParentInputAt: lastParentInputRef.current,
+        lastActionAt: lastActionRef.current,
+        now,
+      })
+      if (!ok) return
+      lastActionRef.current = now
+      source
+        .stat({ path: note })
+        .then((st) => {
+          if (st.kind === 'file') window.dispatchEvent(new CustomEvent('rowboat:open-note', { detail: { path: note } }))
+        })
+        .catch(() => {})
     }
     window.addEventListener('message', onMessage)
     return () => window.removeEventListener('message', onMessage)
-  }, [active])
+  }, [active, source])
 
   const title = useMemo(() => {
     const name = path.split('/').pop() ?? path
     return (fileText ? konzept.htmlTitle(fileText) : null) || name
   }, [fileText, path])
   const hinweise = useMemo(() => (fileText ? konzeptHinweise(fileText, fileSize) : []), [fileText, fileSize])
-  const canShowInGraph = source.workspace && konzept.isKnowledgeHtmlPath(path)
+  const canShowInGraph = konzept.isKnowledgeHtmlPath(path)
+  const pendingHost = useMemo(() => {
+    if (!pendingLink) return ''
+    try {
+      return new URL(pendingLink.url).host
+    } catch {
+      return ''
+    }
+  }, [pendingLink])
 
   if (state.kind === 'error') {
     return (
@@ -252,6 +305,34 @@ export function HtmlFileViewer({ path, active = true }: HtmlFileViewerProps) {
           In neuem Fenster öffnen
         </button>
       </div>
+      {pendingLink && (
+        <div className="flex shrink-0 items-start gap-3 border-b border-border bg-muted px-3 py-2 text-xs text-foreground">
+          <div className="min-w-0 flex-1">
+            <p className="font-medium">Link öffnen?</p>
+            {pendingHost && <p className="text-sm font-semibold">{pendingHost}</p>}
+            <p className="break-all text-muted-foreground">{pendingLink.url}</p>
+          </div>
+          <button
+            type="button"
+            onClick={() => {
+              const url = pendingLink.url
+              setPendingLink((p) => nextPendingLink(p, { type: 'open' }))
+              // Same path the rest of the renderer uses: the main window-open handler sends it to the system browser.
+              window.open(url, '_blank', 'noopener,noreferrer')
+            }}
+            className="shrink-0 rounded-md border border-border bg-background px-2.5 py-1 font-medium hover:bg-accent"
+          >
+            Öffnen
+          </button>
+          <button
+            type="button"
+            onClick={() => setPendingLink((p) => nextPendingLink(p, { type: 'cancel' }))}
+            className="shrink-0 rounded-md border border-border bg-background px-2.5 py-1 font-medium hover:bg-accent"
+          >
+            Abbrechen
+          </button>
+        </div>
+      )}
       {hinweise.length > 0 && (
         <ul className="shrink-0 space-y-0.5 border-b border-border bg-amber-50 px-3 py-1.5 text-xs text-amber-900 dark:bg-amber-950 dark:text-amber-200">
           {hinweise.map((h, i) => (
@@ -264,10 +345,10 @@ export function HtmlFileViewer({ path, active = true }: HtmlFileViewerProps) {
           <iframe
             key={`${path}#${version}`}
             ref={iframeRef}
-            {...(LOCAL_RUNTIME ? { src: iframeSrc } : { srcDoc: srcdoc ?? '' })}
+            src={iframeSrc}
             // No `allow-popups` and no `allow-same-origin`: the doc stays origin-isolated and a
             // script cannot open a window (Electron would send it to the system browser).
-            // Notes and web links reach the viewer as postMessage and open only after a real click.
+            // Web links ask for confirmation in the viewer; notes open only after a click in the frame.
             sandbox="allow-scripts"
             className="h-full w-full border-0 bg-white"
             title="HTML preview"

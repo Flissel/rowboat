@@ -1,9 +1,11 @@
 import { describe, expect, it } from 'vitest'
 import {
+  acceptNoteMessage,
   cacheBustedUrl,
   konzeptHinweise,
   konzeptPathFromTool,
   linkOpenRequest,
+  nextPendingLink,
   noteOpenRequest,
   reloadDebounceMs,
   shouldAutoOpen,
@@ -51,6 +53,9 @@ describe('konzept-flaeche', () => {
     expect(noteOpenRequest(msg('Knowledge/kanal/x.md'))).toBeNull()
     expect(noteOpenRequest(msg('knowledge/Kanal./x.html'))).toBeNull()
     expect(noteOpenRequest(msg('knowledge/a\u0000.md'))).toBeNull()
+    expect(noteOpenRequest(msg('knowledge/.git/hooks/x.md'))).toBeNull()
+    expect(noteOpenRequest(msg('knowledge/.assets/a.png'))).toBeNull()
+    expect(noteOpenRequest(msg('knowledge/Ordner/.versteckt.md'))).toBeNull()
     expect(noteOpenRequest(msg(42))).toBeNull()
     expect(noteOpenRequest({ type: 'rowboat:andere', pfad: 'knowledge/x.md' })).toBeNull()
     expect(noteOpenRequest('rowboat:notiz-oeffnen')).toBeNull()
@@ -120,5 +125,53 @@ describe('konzept-flaeche', () => {
     expect(userActivationActive({ userActivation: {} })).toBe(false)
     expect(userActivationActive({})).toBe(false)
     expect(userActivationActive(undefined)).toBe(false)
+  })
+
+  it('führt die Link-Rückfrage durch ihre Zustände', () => {
+    const a = nextPendingLink(null, { type: 'request', url: 'https://a.example/', now: 1000 })
+    expect(a).toEqual({ url: 'https://a.example/', at: 1000 })
+    // zweite Anfrage innerhalb von 10 s ersetzt nicht
+    expect(nextPendingLink(a, { type: 'request', url: 'https://b.example/', now: 5000 })).toBe(a)
+    expect(nextPendingLink(a, { type: 'request', url: 'https://b.example/', now: 11000 })).toBe(a)
+    // älter als 10 s: ersetzt
+    expect(nextPendingLink(a, { type: 'request', url: 'https://b.example/', now: 11001 })).toEqual({ url: 'https://b.example/', at: 11001 })
+    expect(nextPendingLink(a, { type: 'cancel' })).toBeNull()
+    expect(nextPendingLink(a, { type: 'open' })).toBeNull()
+    expect(nextPendingLink(a, { type: 'reset' })).toBeNull()
+    expect(nextPendingLink(null, { type: 'cancel' })).toBeNull()
+  })
+
+  describe('acceptNoteMessage', () => {
+    const base = {
+      fromFrame: true,
+      visible: true,
+      activationActive: true,
+      frameIsActiveElement: true,
+      frameFocusedAt: 500,
+      lastParentInputAt: 100 as number | null,
+      lastActionAt: null as number | null,
+      now: 2000,
+    }
+    it('nimmt: Klick in der Seite, dann Nachricht', () => {
+      expect(acceptNoteMessage(base)).toBe(true)
+      expect(acceptNoteMessage({ ...base, lastParentInputAt: null })).toBe(true)
+    })
+    it('lehnt ab: Nutzer tippt im Chat, während die Seite sendet', () => {
+      expect(acceptNoteMessage({ ...base, lastParentInputAt: 1500, frameIsActiveElement: false })).toBe(false)
+      // Fokus liegt (noch) am Rahmen, aber es gab Eingabe im Hauptfenster danach
+      expect(acceptNoteMessage({ ...base, lastParentInputAt: 1500 })).toBe(false)
+      expect(acceptNoteMessage({ ...base, lastParentInputAt: 500 })).toBe(false)
+    })
+    it('lehnt ab: fremdes Fenster, verborgen, keine Aktivierung, Rahmen ohne Fokus, nie fokussiert', () => {
+      expect(acceptNoteMessage({ ...base, fromFrame: false })).toBe(false)
+      expect(acceptNoteMessage({ ...base, visible: false })).toBe(false)
+      expect(acceptNoteMessage({ ...base, activationActive: false })).toBe(false)
+      expect(acceptNoteMessage({ ...base, frameIsActiveElement: false })).toBe(false)
+      expect(acceptNoteMessage({ ...base, frameFocusedAt: null })).toBe(false)
+    })
+    it('hält die Wartezeit von 1 s ein', () => {
+      expect(acceptNoteMessage({ ...base, lastActionAt: 1500 })).toBe(false)
+      expect(acceptNoteMessage({ ...base, lastActionAt: 1000 })).toBe(true)
+    })
   })
 })
