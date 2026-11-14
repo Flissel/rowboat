@@ -52,8 +52,32 @@ describe('Fähigkeit konzept: Übergabe an die Werkbank (Bestätigung in Sales)'
   it('fehler, Zeitüberschreitung, fehlendes Werkzeug: nichts behaupten, auf Sales verweisen', () => {
     expect(abschnitt).toMatch(/On \`fehler\`, show the user the sentence/);
     expect(abschnitt).toMatch(/not available, say so/);
-    expect(abschnitt).toMatch(/times out[^.]*result is unknown[^.]*Sales page/);
+    expect(abschnitt).toMatch(/times out[^.]*result is unknown/);
     expect(abschnitt).toMatch(/never claim a handover happened/);
+  });
+
+  it('unklare Antwort gilt als unbekannt: nichts behaupten, auf die Werkbank-Seite in Sales verweisen', () => {
+    expect(abschnitt).toMatch(/neither \`\{ "status": "vorbereitet"[^}]*\}\` nor \`\{ "fehler" \}\`/);
+    expect(abschnitt).toMatch(/without a usable link/);
+    expect(abschnitt).toMatch(/say the result is unclear/);
+    expect(abschnitt).toMatch(/do not claim a handover was prepared/);
+    expect(abschnitt).toMatch(/look at the Werkbank page in Sales/);
+  });
+
+  it('ohne URL kein Link-Versprechen: Ort in Worten nennen', () => {
+    expect(abschnitt).toMatch(/do not promise a link/);
+    expect(abschnitt).toContain('Marketing → Werkbank, Abschnitt „Übergaben aus Rowboat"');
+  });
+
+  it('Bestätigen bleibt allein beim Nutzer: die Sales-Seite nie selbst öffnen', () => {
+    expect(abschnitt).toMatch(/Never open the Sales page yourself to confirm a handover/);
+    expect(abschnitt).toMatch(/no browser tool, no other route/);
+    expect(abschnitt).toMatch(/confirming is the user's act alone/);
+  });
+
+  it('Datenschutz-Absatz: bis zur Entscheidung nicht vorbereiten', () => {
+    expect(abschnitt).toMatch(/do not prepare a handover until the user has decided/);
+    expect(abschnitt).not.toMatch(/do not hand over until/);
   });
 
   it('weist auf einen vorhandenen Auftrag hin, bevor erneut vorbereitet wird', () => {
