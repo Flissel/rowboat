@@ -1,4 +1,4 @@
-// Modified for VibeMind (Flissel/rowboat vibemind): SendMessageConfig.channel pass-through (Teil E).
+// Modified for VibeMind (Flissel/rowboat vibemind): SendMessageConfig.channel pass-through (Teil E), herkunft pass-through (Konzept-Fläche Teil B).
 import { projectSessionComposition } from '../../code-mode/sessions/composition.js';
 import { describe, expect, it } from "vitest";
 import type { z } from "zod";
@@ -1573,6 +1573,65 @@ describe("pending queue (sendOrQueueMessage, steering, promotion)", () => {
         expect(fake.createTurnInputs[1]).toMatchObject({
             input: user("after you finish"),
             origin: { ...origin, messageId: "msg-2" },
+        });
+    });
+
+    // VibeMind Konzept-Fläche Teil B: the agent mark rides per message.
+    it("carries herkunft onto the turn a message starts and onto the steer drain", async () => {
+        const { sessions, fake } = makeSessions();
+        fake.script = () => ({
+            pending: new Promise<TurnOutcome>(() => {}),
+        });
+        const sessionId = await sessions.createSession();
+        await sessions.sendMessage(sessionId, user("vom Agenten"), {
+            agent: { agentId: "copilot" },
+            herkunft: "agent",
+        });
+        expect(fake.createTurnInputs[0].config).toMatchObject({ herkunft: "agent" });
+        await sessions.sendOrQueueMessage(sessionId, user("noch einer"), {
+            agent: { agentId: "copilot" },
+            herkunft: "agent",
+        });
+        await sessions.sendOrQueueMessage(sessionId, user("von Felix"), {
+            agent: { agentId: "copilot" },
+        });
+        const takeInputs = fake.advanceCalls[0].takeInputs;
+        expect(await takeInputs!()).toEqual([
+            { message: user("noch einer"), herkunft: "agent" },
+            { message: user("von Felix") },
+        ]);
+
+        const other = await sessions.createSession();
+        await sessions.sendMessage(other, user("von Felix"), { agent: { agentId: "copilot" } });
+        expect(fake.createTurnInputs[1].config).not.toHaveProperty("herkunft");
+    });
+
+    it("a promoted queue entry keeps its own herkunft, not the live turn's", async () => {
+        const { sessions, fake } = makeSessions();
+        const sessionId = await sessions.createSession();
+        let settle!: (outcome: TurnOutcome) => void;
+        fake.script = () => ({
+            pending: new Promise<TurnOutcome>((resolve) => {
+                settle = resolve;
+            }),
+        });
+        const { turnId } = await sessions.sendMessage(sessionId, user("von Felix"), {
+            agent: { agentId: "copilot" },
+        });
+        await sessions.sendOrQueueMessage(sessionId, user("vom Agenten"), {
+            agent: { agentId: "copilot" },
+            herkunft: "agent",
+        });
+        fake.script = undefined;
+        fake.setLog(turnId, turnLog(turnId, sessionId, "completed"));
+        settle(completedOutcome());
+        await flush();
+        await flush();
+        expect(fake.createTurnInputs).toHaveLength(2);
+        expect(fake.createTurnInputs[0].config).not.toHaveProperty("herkunft");
+        expect(fake.createTurnInputs[1]).toMatchObject({
+            input: user("vom Agenten"),
+            config: { herkunft: "agent" },
         });
     });
 

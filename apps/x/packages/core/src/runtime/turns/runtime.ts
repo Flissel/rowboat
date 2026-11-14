@@ -1,8 +1,17 @@
 // Modified for VibeMind (Flissel/rowboat vibemind): channel-origin turns are
 // restricted by the channel-run guard (tool snapshot filter, call-time guard,
-// no classifier) — Teil E.
+// no classifier) — Teil E. Strict tools (Konzept-Fläche Teil B) only run after
+// a human's yes in the app: never classified, never in channel, humanless or
+// agent-marked turns, executed with the request's {pfad, stand}.
 import { z } from "zod";
 import type { TurnAnalytics } from "@x/shared/dist/analytics.js";
+import {
+    ABSAGE_ABGELEHNT,
+    ABSAGE_OHNE_JA,
+    istStrengeAnfrage,
+    KonzeptUebergabe,
+    turnVonAgent,
+} from "@x/shared/dist/strenge-freigabe.js";
 import {
     DEFAULT_MAX_MODEL_CALLS,
     MODEL_CALL_LIMIT_ERROR_CODE,
@@ -64,6 +73,7 @@ import type { ITurnRepo } from "./repo.js";
 import { HotStream } from "./stream.js";
 import type { IToolRegistry, RuntimeTool, SyncRuntimeTool } from "./tool-registry.js";
 import { CHANNEL_RUN_INSTRUCTIONS, ChannelRunGuard, type IChannelRunGuard } from "./channel-run-guard.js";
+import { RealStrengeFreigabe, strengerAufruf, type IStrengeFreigabe } from "./strenge-freigabe.js";
 
 type TEvent = z.infer<typeof TurnEvent>;
 
@@ -86,6 +96,9 @@ export interface TurnRuntimeDependencies {
     // Optional: defaults to the real guard. Registered in the DI container
     // (PROXY injection resolves every destructured name).
     channelRunGuard?: IChannelRunGuard;
+    // Optional: defaults to the real one (reads the concept from WorkDir).
+    // Registered in the DI container like channelRunGuard.
+    strengeFreigabe?: IStrengeFreigabe;
 }
 
 // Immutable dependency container: holds no mutable per-turn state. All active
@@ -104,6 +117,7 @@ export class TurnRuntime implements ITurnRuntime {
     private readonly turnEventBus: ITurnEventBus;
     private readonly usageReporter: IUsageReporter;
     private readonly channelRunGuard: IChannelRunGuard;
+    private readonly strengeFreigabe: IStrengeFreigabe;
 
     constructor({
         turnRepo,
@@ -119,8 +133,10 @@ export class TurnRuntime implements ITurnRuntime {
         turnEventBus,
         usageReporter,
         channelRunGuard,
+        strengeFreigabe,
     }: TurnRuntimeDependencies) {
         this.channelRunGuard = channelRunGuard ?? new ChannelRunGuard();
+        this.strengeFreigabe = strengeFreigabe ?? new RealStrengeFreigabe();
         this.turnRepo = turnRepo;
         this.idGenerator = idGenerator;
         this.clock = clock;
@@ -211,6 +227,9 @@ export class TurnRuntime implements ITurnRuntime {
                 ...(input.config.sandbox === undefined
                     ? {}
                     : { sandbox: input.config.sandbox }),
+                ...(input.config.herkunft === undefined
+                    ? {}
+                    : { herkunft: input.config.herkunft }),
             },
         });
         await this.turnRepo.create(event);
@@ -358,6 +377,7 @@ export class TurnRuntime implements ITurnRuntime {
             permissionClassifier: this.permissionClassifier,
             turnEventBus: this.turnEventBus,
             channelRunGuard: this.channelRunGuard,
+            strengeFreigabe: this.strengeFreigabe,
         });
         try {
             return await withUseCase(
@@ -417,6 +437,7 @@ class TurnAdvance {
     private readonly permissionClassifier: IPermissionClassifier;
     private readonly turnEventBus: ITurnEventBus;
     private readonly channelRunGuard: IChannelRunGuard;
+    private readonly strengeFreigabe: IStrengeFreigabe;
 
     // Checker "allowed" outcomes are deliberately not durable: after a crash
     // the checker is simply re-consulted.
@@ -443,6 +464,7 @@ class TurnAdvance {
         permissionClassifier: IPermissionClassifier;
         turnEventBus: ITurnEventBus;
         channelRunGuard: IChannelRunGuard;
+        strengeFreigabe: IStrengeFreigabe;
     }) {
         this.turnId = init.turnId;
         this.events = init.events;
@@ -460,10 +482,31 @@ class TurnAdvance {
         this.permissionClassifier = init.permissionClassifier;
         this.turnEventBus = init.turnEventBus;
         this.channelRunGuard = init.channelRunGuard;
+        this.strengeFreigabe = init.strengeFreigabe;
     }
 
     private get definition(): TurnState["definition"] {
         return this.state.definition;
+    }
+
+    // Strenges Ja: no yes can count in a turn without a human, from a
+    // channel, or marked as coming from an agent (turn or any steered input).
+    private strengOhneJa(): boolean {
+        return (
+            !this.definition.config.humanAvailable ||
+            this.definition.config.channel !== undefined ||
+            turnVonAgent(this.state)
+        );
+    }
+
+    // A strict call is recognised by its durable request and, independently,
+    // by the live tool's routing identity — either one is enough.
+    private istStreng(tc: ToolCallState): boolean {
+        if (istStrengeAnfrage(tc.permission?.required.request)) {
+            return true;
+        }
+        const tool = this.toolsByName.get(tc.toolName);
+        return tool !== undefined && strengerAufruf(tool.descriptor.toolId, tc.input) !== null;
     }
 
     // Deltas ride the execution stream and the process-wide bus, never storage.
@@ -636,13 +679,14 @@ class TurnAdvance {
         }
         await this.appendWith(() => {
             const base = this.state.addedInputs.length;
-            return inputs.map(({ message, origin }, i) => ({
+            return inputs.map(({ message, origin, herkunft }, i) => ({
                 type: "input_added" as const,
                 turnId: this.turnId,
                 ts: this.now(),
                 inputIndex: base + i + 1,
                 message,
                 ...(origin === undefined ? {} : { origin }),
+                ...(herkunft === undefined ? {} : { herkunft }),
             }));
         });
     }
@@ -662,6 +706,26 @@ class TurnAdvance {
                     throw new TurnInputError(
                         `no pending permission for tool call ${input.toolCallId}`,
                     );
+                }
+                if (this.istStreng(tc)) {
+                    // Strenges Ja: a yes counts only on the human path of an
+                    // unmarked turn; otherwise it is recorded as a refusal.
+                    if (input.decision === "allow" && this.strengOhneJa()) {
+                        await this.append(
+                            resolvedEvent(this.turnId, this.now(), tc.toolCallId, "deny", "human_unavailable"),
+                        );
+                        await this.append(
+                            runtimeResultEvent(this.turnId, this.now(), tc, { output: ABSAGE_OHNE_JA, isError: true }),
+                        );
+                        return undefined;
+                    }
+                    if (input.decision === "deny") {
+                        await this.append(resolvedEvent(this.turnId, this.now(), tc.toolCallId, "deny", "human"));
+                        await this.append(
+                            runtimeResultEvent(this.turnId, this.now(), tc, { output: ABSAGE_ABGELEHNT, isError: true }),
+                        );
+                        return undefined;
+                    }
                 }
                 await this.append({
                     type: "tool_permission_resolved",
@@ -785,6 +849,29 @@ class TurnAdvance {
                 );
                 continue;
             }
+            // Strenges Ja: decided before the channel guard, the checker and
+            // the classifier, none of which may ever let this call through.
+            const streng = strengerAufruf(tool.descriptor.toolId, tc.input);
+            if (streng) {
+                if (this.strengOhneJa()) {
+                    await this.append(
+                        runtimeResultEvent(this.turnId, this.now(), tc, { output: ABSAGE_OHNE_JA, isError: true }),
+                    );
+                    continue;
+                }
+                let anfrage;
+                try {
+                    anfrage = await this.strengeFreigabe.anfrage(streng);
+                } catch (error) {
+                    anfrage = { ok: false as const, fehler: errorMessage(error) };
+                }
+                await this.append(
+                    anfrage.ok
+                        ? permissionRequiredEvent(this.turnId, this.now(), tc, anfrage.request)
+                        : runtimeResultEvent(this.turnId, this.now(), tc, { output: anfrage.fehler, isError: true }),
+                );
+                continue;
+            }
             if (
                 tool.descriptor.requiresHuman &&
                 !this.definition.config.humanAvailable
@@ -905,7 +992,9 @@ class TurnAdvance {
                 !tc.permission.classification &&
                 !tc.permission.classificationFailed &&
                 tc.permission.required.checkerError === undefined &&
-                !tc.result,
+                !tc.result &&
+                // Strict calls are never sent to the classifier.
+                !this.istStreng(tc),
         );
         if (candidates.length === 0) {
             return;
@@ -1058,6 +1147,45 @@ class TurnAdvance {
                 );
                 continue;
             }
+            if (this.istStreng(tc)) {
+                // Strenges Ja: only a human's allow on an unmarked turn with a
+                // valid, runtime-built request counts. The call then runs with
+                // the request's {pfad, stand}, never the model's arguments.
+                const request = tc.permission?.required.request;
+                const uebergabe = KonzeptUebergabe.safeParse(
+                    typeof request === "object" && request !== null && !Array.isArray(request)
+                        ? request.uebergabe
+                        : undefined,
+                );
+                if (
+                    tc.permission?.resolved?.decision !== "allow" ||
+                    tc.permission.resolved.source !== "human" ||
+                    this.strengOhneJa() ||
+                    !istStrengeAnfrage(request) ||
+                    !uebergabe.success
+                ) {
+                    await this.append(
+                        runtimeResultEvent(this.turnId, this.now(), tc, { output: ABSAGE_OHNE_JA, isError: true }),
+                    );
+                    continue;
+                }
+                const ziel = request as { serverName?: unknown; toolName: string };
+                await this.append(
+                    invocationEvent(this.turnId, this.now(), tc, tool.descriptor),
+                );
+                started.push({
+                    tc,
+                    tool: this.strengesWerkzeug(
+                        tool,
+                        {
+                            serverName: typeof ziel.serverName === "string" ? ziel.serverName : "",
+                            toolName: ziel.toolName,
+                        },
+                        uebergabe.data,
+                    ),
+                });
+                continue;
+            }
             await this.append(
                 invocationEvent(this.turnId, this.now(), tc, tool.descriptor),
             );
@@ -1085,6 +1213,20 @@ class TurnAdvance {
         if (rejected) {
             throw rejected.reason;
         }
+    }
+
+    // The strict call's stand-in: same descriptor (so the durable invocation
+    // and result look like any MCP call), but it executes the approved
+    // request through IStrengeFreigabe instead of the model's arguments.
+    private strengesWerkzeug(
+        tool: RuntimeTool,
+        ziel: { serverName: string; toolName: string },
+        uebergabe: KonzeptUebergabe,
+    ): SyncRuntimeTool {
+        return {
+            descriptor: tool.descriptor as SyncRuntimeTool["descriptor"],
+            execute: (_input, context) => this.strengeFreigabe.ausfuehren(ziel, uebergabe, context.signal),
+        };
     }
 
     private async executeSyncTool(

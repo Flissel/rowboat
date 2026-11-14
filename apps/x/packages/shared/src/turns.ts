@@ -10,6 +10,7 @@ import {
 import { ReasoningEffort } from "./models.js";
 import { TurnAnalytics } from "./analytics.js";
 import { InputOrigin } from "./origins.js";
+import { Herkunft } from "./strenge-freigabe.js";
 
 // Durable turn contract for the turn runtime (see
 // packages/core/docs/turn-runtime-design.md). This module is the
@@ -217,6 +218,11 @@ export const TurnCreated = z.object({
                 readDirs: z.array(z.string()).optional(),
             })
             .optional(),
+        // Modified for VibeMind (Flissel/rowboat vibemind): "agent" when the
+        // turn's first input came through the rowboat-ui agent access
+        // (sessions:sendMessage herkunft). Immutable for the turn; the strict
+        // tools (strenge-freigabe.ts) are refused in such a turn.
+        herkunft: Herkunft.optional(),
     }),
 });
 
@@ -458,6 +464,10 @@ export const InputAdded = z.object({
     // The steered message's origin, when it had one (a queued space mention
     // merged into a live turn). Same contract as turn_created.origin.
     origin: InputOrigin.optional(),
+    // Modified for VibeMind (Flissel/rowboat vibemind): a steered message
+    // from the rowboat-ui agent access marks the whole turn (see
+    // turn_created.config.herkunft and strenge-freigabe.ts turnVonAgent).
+    herkunft: Herkunft.optional(),
 });
 
 export const TurnSuspended = z.object({

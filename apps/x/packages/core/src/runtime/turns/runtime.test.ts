@@ -1,4 +1,4 @@
-// Modified for VibeMind (Flissel/rowboat vibemind): channel-run tests (Teil E).
+// Modified for VibeMind (Flissel/rowboat vibemind): channel-run tests (Teil E), strenges Ja (Konzept-Fläche Teil B).
 import { describe, expect, it, vi } from "vitest";
 import type { z } from "zod";
 import {
@@ -36,6 +36,7 @@ import type {
 import { composeModelRequest } from "./compose-model-request.js";
 import { TurnRuntime } from "./runtime.js";
 import type { IChannelRunGuard } from "./channel-run-guard.js";
+import type { IStrengeFreigabe, StrengerAufruf } from "./strenge-freigabe.js";
 import { quarantineMode } from "../tools/channel-quarantine.js";
 import { getCurrentUseCase } from "../../analytics/use_case.js";
 import type {
@@ -337,6 +338,7 @@ function makeRuntime(opts: {
     modelRegistry?: IModelRegistry;
     toolRegistry?: IToolRegistry;
     channelRunGuard?: IChannelRunGuard;
+    strengeFreigabe?: IStrengeFreigabe;
 } = {}) {
     const repo = opts.repo ?? new InMemoryTurnRepo();
     const models = new FakeModelRegistry(opts.models ?? []);
@@ -359,6 +361,7 @@ function makeRuntime(opts: {
         turnEventBus,
         usageReporter: usage,
         ...(opts.channelRunGuard ? { channelRunGuard: opts.channelRunGuard } : {}),
+        ...(opts.strengeFreigabe ? { strengeFreigabe: opts.strengeFreigabe } : {}),
     });
     return { runtime, repo, models, checker, classifier, bus, turnEventBus, usage };
 }
@@ -3830,5 +3833,374 @@ describe("channel runs (VibeMind Teil E)", () => {
         const log = await persisted(repo, turnId);
         expect(resultFor(log, "G")).toMatchObject({ source: "runtime", result: { isError: true } });
         expect(executed).toEqual([]);
+    });
+});
+// ---------------------------------------------------------------------------
+// VibeMind Konzept-Fläche Teil B: strenges Ja für die Übergabe an die Werkbank
+// ---------------------------------------------------------------------------
+
+describe("strenges Ja (Konzept-Fläche Teil B)", () => {
+    const OHNE_JA = "Die Übergabe braucht ein Ja von Felix in der App.";
+    const ABGELEHNT = "Felix hat abgelehnt.";
+    const STAND = "a".repeat(64);
+    const d = (toolId: string, name: string): z.infer<typeof ToolDescriptor> => ({
+        toolId,
+        name,
+        description: name,
+        inputSchema: {},
+        execution: "sync",
+        requiresHuman: false,
+    });
+    const execMcp = d("builtin:executeMcpTool", "executeMcpTool");
+    const angehaengt = d("mcp:rowboat-auftraege:video_auftrag_aus_konzept", "auftrag_aus_konzept");
+    const agent: z.infer<typeof ResolvedAgent> = {
+        agentId: "copilot",
+        systemPrompt: "SYS",
+        model: { provider: "fake", model: "m" },
+        tools: [execMcp, angehaengt],
+    };
+    const strengArgs = (pfad = "knowledge/Konzepte/a.html") => ({
+        serverName: "rowboat-auftraege",
+        toolName: "video_auftrag_aus_konzept",
+        arguments: { pfad, stand: "vom-modell", extra: "x" },
+    });
+
+    function uebergabe(pfad: string) {
+        return {
+            pfad,
+            thema: "KI im Alltag",
+            minuten: 4,
+            stufen: 2,
+            szenen: 9,
+            auftrag: null,
+            stand: STAND,
+            ziel: "Laden Ivan",
+            hinweis: "Was im Konzept steht, geht an das Videomodell und kann im Video landen.",
+        };
+    }
+
+    class FakeStrenge implements IStrengeFreigabe {
+        anfragen: StrengerAufruf[] = [];
+        ausgefuehrt: Array<{ serverName: string; toolName: string; pfad: string; stand: string }> = [];
+        constructor(private readonly fehler?: string) {}
+        async anfrage(aufruf: StrengerAufruf) {
+            this.anfragen.push(aufruf);
+            if (this.fehler) return { ok: false as const, fehler: this.fehler };
+            const pfad = typeof aufruf.args.pfad === "string" ? aufruf.args.pfad : "";
+            return {
+                ok: true as const,
+                request: {
+                    kind: "mcp",
+                    serverName: aufruf.serverName,
+                    toolName: aufruf.toolName,
+                    uebergabe: uebergabe(pfad),
+                },
+            };
+        }
+        async ausfuehren(
+            aufruf: { serverName: string; toolName: string },
+            u: { pfad: string; stand: string },
+        ) {
+            this.ausgefuehrt.push({ ...aufruf, pfad: u.pfad, stand: u.stand });
+            return { output: { success: true, auftrag: "0a1b2c3d" }, isError: false };
+        }
+    }
+
+    function setup(opts: {
+        calls: Array<ReturnType<typeof toolCallPart>>;
+        strenge?: FakeStrenge;
+        checker?: FakePermissionChecker;
+        classifier?: FakePermissionClassifier;
+        extraModels?: number;
+        repo?: InMemoryTurnRepo;
+    }) {
+        const executed: string[] = [];
+        const tools = [execMcp, angehaengt].map((descriptor) =>
+            syncTool(descriptor, async (input) => {
+                executed.push(`${descriptor.name}:${JSON.stringify(input)}`);
+                return { output: { ok: true }, isError: false };
+            }),
+        );
+        const strenge = opts.strenge ?? new FakeStrenge();
+        const models = [
+            respond(completedResp(assistantCalls(...opts.calls))),
+            ...Array.from({ length: opts.extraModels ?? 1 }, () => respond(completedResp(assistantText("done")))),
+        ];
+        const made = makeRuntime({
+            agent,
+            tools,
+            models,
+            strengeFreigabe: strenge,
+            checker: opts.checker,
+            classifier: opts.classifier,
+            repo: opts.repo,
+        });
+        return { ...made, executed, strenge };
+    }
+
+    function resultFor(log: TEvent[], toolCallId: string) {
+        return log.find(
+            (e): e is Extract<TEvent, { type: "tool_result" }> =>
+                e.type === "tool_result" && e.toolCallId === toolCallId,
+        );
+    }
+    function requiredFor(log: TEvent[], toolCallId: string) {
+        return log.find(
+            (e): e is Extract<TEvent, { type: "tool_permission_required" }> =>
+                e.type === "tool_permission_required" && e.toolCallId === toolCallId,
+        );
+    }
+
+    it("persistiert herkunft auf turn_created, sonst fehlt das Feld", async () => {
+        const { runtime, repo } = makeRuntime({ models: [] });
+        const markiert = await newTurn(runtime, { config: { humanAvailable: true, herkunft: "agent" } });
+        const normal = await newTurn(runtime);
+        const a = (await persisted(repo, markiert))[0] as Extract<TEvent, { type: "turn_created" }>;
+        const b = (await persisted(repo, normal))[0] as Extract<TEvent, { type: "turn_created" }>;
+        expect(a.config.herkunft).toBe("agent");
+        expect(b.config).not.toHaveProperty("herkunft");
+    });
+
+    it("autoPermission an: beide Wege bekommen eine Karte, ohne Checker und ohne Klassifizierer", async () => {
+        const checker = new FakePermissionChecker();
+        const classifier = new FakePermissionClassifier(); // wirft, falls gerufen
+        const { runtime, repo, executed, strenge } = setup({
+            calls: [
+                toolCallPart("A", "executeMcpTool", strengArgs()),
+                toolCallPart("B", "auftrag_aus_konzept", { pfad: "knowledge/Konzepte/b.html", stand: "x" }),
+            ],
+            checker,
+            classifier,
+        });
+        const turnId = await newTurn(runtime, { config: { humanAvailable: true, autoPermission: true } });
+        const { outcome } = await advanceAndSettle(runtime, turnId);
+        expect(outcome?.status).toBe("suspended");
+        const log = await persisted(repo, turnId);
+        expect(requiredFor(log, "A")?.request).toEqual({
+            kind: "mcp",
+            serverName: "rowboat-auftraege",
+            toolName: "video_auftrag_aus_konzept",
+            uebergabe: uebergabe("knowledge/Konzepte/a.html"),
+        });
+        expect(requiredFor(log, "B")?.request).toMatchObject({
+            serverName: "rowboat-auftraege",
+            uebergabe: { pfad: "knowledge/Konzepte/b.html" },
+        });
+        expect(strenge.anfragen.map((a) => a.args.pfad)).toEqual([
+            "knowledge/Konzepte/a.html",
+            "knowledge/Konzepte/b.html",
+        ]);
+        expect(checker.calls).toEqual([]);
+        expect(classifier.batches).toEqual([]);
+        expect(log.some((e) => e.type === "tool_permission_classified")).toBe(false);
+        expect(log.some((e) => e.type === "tool_permission_resolved")).toBe(false);
+        expect(executed).toEqual([]);
+        expect(strenge.ausgefuehrt).toEqual([]);
+    });
+
+    it("Ja eines Menschen: Aufruf nur mit pfad und stand aus der Rückfrage", async () => {
+        const { runtime, repo, executed, strenge } = setup({
+            calls: [toolCallPart("A", "executeMcpTool", strengArgs())],
+        });
+        const turnId = await newTurn(runtime, { config: { humanAvailable: true, autoPermission: true } });
+        await advanceAndSettle(runtime, turnId);
+        const { outcome } = await advanceAndSettle(runtime, turnId, {
+            type: "permission_decision",
+            toolCallId: "A",
+            decision: "allow",
+        });
+        expect(outcome?.status).toBe("completed");
+        expect(strenge.ausgefuehrt).toEqual([
+            {
+                serverName: "rowboat-auftraege",
+                toolName: "video_auftrag_aus_konzept",
+                pfad: "knowledge/Konzepte/a.html",
+                stand: STAND,
+            },
+        ]);
+        // Das Werkzeug des Modells (mit stand "vom-modell") läuft nie.
+        expect(executed).toEqual([]);
+        const log = await persisted(repo, turnId);
+        expect(resultFor(log, "A")).toMatchObject({
+            source: "sync",
+            result: { output: { success: true, auftrag: "0a1b2c3d" }, isError: false },
+        });
+    });
+
+    it("Nein: kein Aufruf, das Modell erfährt „Felix hat abgelehnt.“", async () => {
+        const { runtime, repo, executed, strenge } = setup({
+            calls: [toolCallPart("A", "executeMcpTool", strengArgs())],
+        });
+        const turnId = await newTurn(runtime);
+        await advanceAndSettle(runtime, turnId);
+        const { outcome } = await advanceAndSettle(runtime, turnId, {
+            type: "permission_decision",
+            toolCallId: "A",
+            decision: "deny",
+        });
+        expect(outcome?.status).toBe("completed");
+        const log = await persisted(repo, turnId);
+        expect(resultFor(log, "A")).toMatchObject({ source: "runtime", result: { output: ABGELEHNT, isError: true } });
+        expect(strenge.ausgefuehrt).toEqual([]);
+        expect(executed).toEqual([]);
+    });
+
+    it("ungültiges Konzept: Fehlersatz an das Modell, keine Karte", async () => {
+        const strenge = new FakeStrenge("Es sind insgesamt 8 bis 15 Szenen nötig, gefunden wurden 6.");
+        const { runtime, repo, executed } = setup({
+            calls: [toolCallPart("A", "executeMcpTool", strengArgs())],
+            strenge,
+        });
+        const turnId = await newTurn(runtime);
+        const { outcome } = await advanceAndSettle(runtime, turnId);
+        expect(outcome?.status).toBe("completed");
+        const log = await persisted(repo, turnId);
+        expect(requiredFor(log, "A")).toBeUndefined();
+        expect(resultFor(log, "A")).toMatchObject({
+            source: "runtime",
+            result: { output: "Es sind insgesamt 8 bis 15 Szenen nötig, gefunden wurden 6.", isError: true },
+        });
+        expect(executed).toEqual([]);
+    });
+
+    it("Lauf ohne Menschen: Absage ohne Karte und ohne Dateizugriff", async () => {
+        const { runtime, repo, executed, strenge } = setup({
+            calls: [
+                toolCallPart("A", "executeMcpTool", strengArgs()),
+                toolCallPart("B", "auftrag_aus_konzept", { pfad: "knowledge/Konzepte/a.html" }),
+            ],
+        });
+        const turnId = await newTurn(runtime, { config: { humanAvailable: false, autoPermission: true } });
+        const { outcome } = await advanceAndSettle(runtime, turnId);
+        expect(outcome?.status).toBe("completed");
+        const log = await persisted(repo, turnId);
+        for (const id of ["A", "B"]) {
+            expect(resultFor(log, id)).toMatchObject({ source: "runtime", result: { output: OHNE_JA, isError: true } });
+        }
+        expect(log.some((e) => e.type === "tool_permission_required")).toBe(false);
+        expect(strenge.anfragen).toEqual([]);
+        expect(executed).toEqual([]);
+    });
+
+    it("Kanal-Lauf: Absage, auch wenn das Werkzeug auf der Nur-Lesen-Liste steht", async () => {
+        const { runtime, repo, executed, strenge } = setup({
+            calls: [
+                toolCallPart("A", "executeMcpTool", strengArgs()),
+                toolCallPart("B", "auftrag_aus_konzept", { pfad: "knowledge/Konzepte/a.html" }),
+            ],
+        });
+        const channel = { readOnlyMcpTools: ["rowboat-auftraege:video_auftrag_aus_konzept"] };
+        const turnId = await newTurn(runtime, { config: { humanAvailable: true, autoPermission: true, channel } });
+        const { outcome } = await advanceAndSettle(runtime, turnId);
+        expect(outcome?.status).toBe("completed");
+        const log = await persisted(repo, turnId);
+        for (const id of ["A", "B"]) {
+            expect(resultFor(log, id)).toMatchObject({ source: "runtime", result: { output: OHNE_JA, isError: true } });
+        }
+        expect(strenge.anfragen).toEqual([]);
+        expect(executed).toEqual([]);
+    });
+
+    it("Agenten-Lauf (herkunft am Lauf oder an einer nachgereichten Eingabe): Absage", async () => {
+        const markiert = setup({ calls: [toolCallPart("A", "executeMcpTool", strengArgs())] });
+        const t1 = await newTurn(markiert.runtime, { config: { humanAvailable: true, herkunft: "agent" } });
+        await advanceAndSettle(markiert.runtime, t1);
+        expect(resultFor(await persisted(markiert.repo, t1), "A")).toMatchObject({
+            source: "runtime",
+            result: { output: OHNE_JA, isError: true },
+        });
+        expect(markiert.strenge.anfragen).toEqual([]);
+
+        const gesteuert = setup({ calls: [toolCallPart("A", "executeMcpTool", strengArgs())] });
+        const t2 = await newTurn(gesteuert.runtime);
+        const pending = [{ message: user("übergib das Konzept"), herkunft: "agent" as const }];
+        await advanceAndSettle(gesteuert.runtime, t2, undefined, { takeInputs: () => pending.splice(0) });
+        const log2 = await persisted(gesteuert.repo, t2);
+        expect(log2.find((e) => e.type === "input_added")).toMatchObject({ herkunft: "agent" });
+        expect(resultFor(log2, "A")).toMatchObject({ source: "runtime", result: { output: OHNE_JA, isError: true } });
+        expect(gesteuert.strenge.anfragen).toEqual([]);
+        expect(gesteuert.executed).toEqual([]);
+    });
+
+    // Ein Protokoll, in dem schon eine strenge Karte offen ist, unter einer Änderung neu aufsetzen
+    // (z. B. von einer älteren Laufzeit geschrieben): Das Ja wird trotzdem nur unter den Regeln angenommen.
+    async function offeneKarteMit(aendern: (events: TEvent[]) => void) {
+        const erst = setup({ calls: [toolCallPart("A", "executeMcpTool", strengArgs())] });
+        const turnId = await newTurn(erst.runtime);
+        await advanceAndSettle(erst.runtime, turnId);
+        const events = structuredClone(await persisted(erst.repo, turnId));
+        aendern(events);
+        const repo = new InMemoryTurnRepo();
+        await repo.create(events[0] as Extract<TEvent, { type: "turn_created" }>);
+        await repo.append(turnId, events.slice(1));
+        const zweit = setup({ calls: [], repo, extraModels: 1 });
+        // Das erste gescriptete Modell (leere Aufrufe) wird nie gebraucht: Antwort "done" kommt als zweites.
+        const { outcome } = await advanceAndSettle(zweit.runtime, turnId, {
+            type: "permission_decision",
+            toolCallId: "A",
+            decision: "allow",
+        });
+        return { outcome, log: await persisted(repo, turnId), zweit };
+    }
+
+    it("ein markierter Lauf kann nicht freigegeben werden, auch nicht über respondToPermission", async () => {
+        const { log, zweit } = await offeneKarteMit((events) => {
+            (events[0] as Extract<TEvent, { type: "turn_created" }>).config.herkunft = "agent";
+        });
+        expect(log.find((e) => e.type === "tool_permission_resolved")).toMatchObject({
+            decision: "deny",
+            source: "human_unavailable",
+        });
+        expect(resultFor(log, "A")).toMatchObject({ source: "runtime", result: { output: OHNE_JA, isError: true } });
+        expect(zweit.strenge.ausgefuehrt).toEqual([]);
+        expect(zweit.executed).toEqual([]);
+    });
+
+    it("eine Karte ohne gültige Übergabe führt auch nach einem Ja nichts aus", async () => {
+        const { log, zweit } = await offeneKarteMit((events) => {
+            const req = events.find((e) => e.type === "tool_permission_required") as Extract<
+                TEvent,
+                { type: "tool_permission_required" }
+            >;
+            req.request = { kind: "mcp", serverName: "rowboat-auftraege", toolName: "video_auftrag_aus_konzept" };
+        });
+        expect(resultFor(log, "A")).toMatchObject({ source: "runtime", result: { output: OHNE_JA, isError: true } });
+        expect(zweit.strenge.ausgefuehrt).toEqual([]);
+        expect(zweit.executed).toEqual([]);
+    });
+
+    it("andere MCP-Werkzeuge bleiben unverändert (autoPermission an und aus)", async () => {
+        for (const autoPermission of [true, false]) {
+            const checker = new FakePermissionChecker({ executeMcpTool: { request: { kind: "mcp", serverName: "github" } } });
+            const classifier = new FakePermissionClassifier((requests) =>
+                requests.map((r) => ({ toolCallId: r.toolCallId, decision: "allow" as const, reason: "ok" })),
+            );
+            const { runtime, repo, executed } = setup({
+                calls: [
+                    toolCallPart("X", "executeMcpTool", { serverName: "github", toolName: "create_issue" }),
+                    toolCallPart("A", "executeMcpTool", strengArgs()),
+                ],
+                checker,
+                classifier,
+            });
+            const turnId = await newTurn(runtime, { config: { humanAvailable: true, autoPermission } });
+            const { outcome } = await advanceAndSettle(runtime, turnId);
+            expect(outcome?.status).toBe("suspended");
+            const log = await persisted(repo, turnId);
+            expect(checker.calls.map((c) => c.toolCallId)).toEqual(["X"]);
+            expect(requiredFor(log, "X")?.request).toEqual({ kind: "mcp", serverName: "github" });
+            if (autoPermission) {
+                expect(classifier.batches.map((b) => b.map((r) => r.toolCallId))).toEqual([["X"]]);
+                expect(resultFor(log, "X")).toMatchObject({ source: "sync", result: { isError: false } });
+                expect(executed).toEqual([
+                    'executeMcpTool:{"serverName":"github","toolName":"create_issue"}',
+                ]);
+            } else {
+                expect(classifier.batches).toEqual([]);
+                expect(resultFor(log, "X")).toBeUndefined();
+                expect(executed).toEqual([]);
+            }
+            expect(resultFor(log, "A")).toBeUndefined();
+        }
     });
 });

@@ -2,6 +2,7 @@ import { LlmStepStreamEvent } from "./llm-step-events.js";
 import { Message, ToolCallPart } from "./message.js";
 import { CodeRunEvent as CodeRunEventSchema, PermissionAsk } from "./code-mode.js";
 import { UseCase } from "./analytics.js";
+import { KonzeptUebergabe } from "./strenge-freigabe.js";
 import z from "zod";
 
 export { UseCase } from "./analytics.js";
@@ -108,6 +109,11 @@ export const ToolPermissionMetadata = z.discriminatedUnion("kind", [
         kind: z.literal("mcp"),
         serverName: z.string().optional(),
         toolName: z.string(),
+        // Modified for VibeMind (Flissel/rowboat vibemind): only on the strict
+        // tool (strenge-freigabe.ts) — what the hand-over card shows, computed
+        // by the runtime from the concept file. Declared so it survives every
+        // parse of this schema (remote mode).
+        uebergabe: KonzeptUebergabe.optional(),
     }),
     // Generic fail-closed request: a tool with no more specific policy.
     z.object({

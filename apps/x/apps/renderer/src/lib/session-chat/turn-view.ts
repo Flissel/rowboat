@@ -1,3 +1,4 @@
+// Modified for VibeMind (Flissel/rowboat vibemind): strict-tool cards always need the human (Konzept-Fläche Teil B).
 import type { z } from 'zod'
 import type {
   AskHumanRequestEvent,
@@ -15,6 +16,7 @@ import {
   type TurnStreamEvent,
 } from '@x/shared/src/turns.js'
 import type { CodeRunEvent, PermissionAsk } from '@x/shared/src/code-mode.js'
+import { istStrengeAnfrage } from '@x/shared/src/strenge-freigabe.js'
 import type {
   ChatMessage,
   ConversationItem,
@@ -482,6 +484,9 @@ function toolCallPartOf(tc: ToolCallState) {
 function permissionNeedsHuman(state: TurnState, tc: ToolCallState): boolean {
   if (!state.definition.config.humanAvailable) return false
   if (!state.definition.config.autoPermission) return true
+  // VibeMind Konzept-Fläche Teil B: strict calls are never classified; their
+  // card waits for the human even in auto mode.
+  if (istStrengeAnfrage(tc.permission?.required.request)) return true
   const permission = tc.permission
   return (
     permission?.required.checkerError !== undefined ||

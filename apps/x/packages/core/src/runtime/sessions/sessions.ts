@@ -1,4 +1,4 @@
-// Modified for VibeMind (Flissel/rowboat vibemind): SendMessageConfig.channel pass-through (Teil E).
+// Modified for VibeMind (Flissel/rowboat vibemind): SendMessageConfig.channel pass-through (Teil E), herkunft pass-through (Konzept-Fläche Teil B).
 import type { z } from "zod";
 import type { UserMessage } from "@x/shared/dist/message.js";
 import type { SessionOrigin } from "@x/shared/dist/origins.js";
@@ -444,6 +444,9 @@ export class SessionsImpl implements ISessions {
                 ...(config.channel === undefined
                     ? {}
                     : { channel: config.channel }),
+                ...(config.herkunft === undefined
+                    ? {}
+                    : { herkunft: config.herkunft }),
             },
         });
 
@@ -900,6 +903,9 @@ export class SessionsImpl implements ISessions {
             ...(entry.config.origin === undefined
                 ? {}
                 : { origin: entry.config.origin }),
+            ...(entry.config.herkunft === undefined
+                ? {}
+                : { herkunft: entry.config.herkunft }),
         }));
         this.publishQueue(sessionId);
         return inputs;

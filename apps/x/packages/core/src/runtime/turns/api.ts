@@ -1,4 +1,4 @@
-// Modified for VibeMind (Flissel/rowboat vibemind): CreateTurnInput.config.channel (Teil E).
+// Modified for VibeMind (Flissel/rowboat vibemind): CreateTurnInput.config.channel (Teil E), config.herkunft / AddedInput.herkunft (Konzept-Fläche Teil B).
 import type { z } from "zod";
 import type { TurnAnalytics } from "@x/shared/dist/analytics.js";
 import type { AssistantMessage, UserMessage } from "@x/shared/dist/message.js";
@@ -36,6 +36,9 @@ export interface CreateTurnInput {
         // VibeMind Teil E round 3: scope of the headless-run sandbox (see
         // shared turns.ts config.sandbox).
         sandbox?: TurnSandboxScope;
+        // VibeMind Konzept-Fläche Teil B: "agent" for turns started through
+        // the rowboat-ui agent access; strict tools are refused in them.
+        herkunft?: "agent";
     };
 }
 
@@ -60,6 +63,9 @@ export interface TurnSandboxScope {
 export interface AddedInput {
     message: z.infer<typeof UserMessage>;
     origin?: InputOrigin;
+    // VibeMind Konzept-Fläche Teil B: a steered message from the agent
+    // access; lands on input_added and marks the live turn for good.
+    herkunft?: "agent";
 }
 export type TakeAddedInputs = () => AddedInput[] | Promise<AddedInput[]>;
 

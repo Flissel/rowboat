@@ -1,3 +1,4 @@
+// Modified for VibeMind (Flissel/rowboat vibemind): strict tools render StrengeFreigabeKarte (Konzept-Fläche Teil B).
 "use client";
 
 import { Button } from "@/components/ui/button";
@@ -13,6 +14,8 @@ import { useState, type ComponentProps, type ReactNode } from "react";
 import { quietRowContainerClass, quietRowGlyphSlotClass, quietRowTriggerClass } from "@/components/ai-elements/tool";
 import { ToolCallPart } from "@x/shared/dist/message.js";
 import { ToolPermissionMetadata } from "@x/shared/dist/runs.js";
+import { istStrengeAnfrage } from "@x/shared/dist/strenge-freigabe.js";
+import { StrengeFreigabeKarte } from "@/components/ai-elements/strenge-freigabe-karte";
 import z from "zod";
 
 export type PermissionRequestProps = ComponentProps<"div"> & {
@@ -95,6 +98,22 @@ export const PermissionRequest = ({
   // Once a response is chosen the ask collapses to a quiet one-line row;
   // clicking it re-expands the request details.
   const [expanded, setExpanded] = useState(false);
+
+  // VibeMind Konzept-Fläche Teil B: the strict tool gets its own card — the
+  // runtime-built hand-over details as text, "Ja, übergeben" / "Nein", never
+  // a scope action.
+  if (permission?.kind === "mcp" && istStrengeAnfrage(permission)) {
+    return (
+      <StrengeFreigabeKarte
+        className={className}
+        uebergabe={permission.uebergabe}
+        onApprove={onApprove}
+        onDeny={onDeny}
+        isProcessing={isProcessing}
+        response={response}
+      />
+    );
+  }
 
   // One-line ask: "Run `npm test`?" / "Write to `~/notes/plan.md`?"
   const summary: ReactNode = command ? (
