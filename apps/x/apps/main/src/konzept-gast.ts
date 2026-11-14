@@ -173,8 +173,6 @@ function gastAbsichern(guest: WebContents, adresse: string | null): void {
     beendet.delete(id);
   });
   try {
-    guest.setWebRTCIPHandlingPolicy("disable_non_proxied_udp");
-    guest.setWindowOpenHandler(() => ({ action: "deny" }));
     // Von der Seite ausgeloest (Link, location, meta refresh, Formular) oder Umleitung: nie. Gleiche-Dokument-
     // Navigationen (Anker, pushState) loesen diese Ereignisse nicht aus und bleiben moeglich; sie laden nichts.
     guest.on("will-navigate", (event) => event.preventDefault());
@@ -192,6 +190,9 @@ function gastAbsichern(guest: WebContents, adresse: string | null): void {
       });
       if (entscheidung === "beenden") gastBeenden(guest, `Navigation zu ${event.url.slice(0, 200)}`);
     });
+    // WebRTC und Fensteroeffnen zuletzt: wirft eines davon, ist der Gast schon voll bewacht (und wird beendet).
+    guest.setWebRTCIPHandlingPolicy("disable_non_proxied_udp");
+    guest.setWindowOpenHandler(() => ({ action: "deny" }));
     guest.on("select-bluetooth-device", (event, _devices, callback) => {
       event.preventDefault();
       callback("");
