@@ -32,6 +32,8 @@ import {
   guestProtocolAllowed,
   guestNavigationAllowed,
   guestInDocumentRequest,
+  guestRequestDecision,
+  guestTripwireDecision,
   forwardableGuestMessage,
 } from './konzept.js'
 
@@ -466,6 +468,54 @@ describe('Gastbereich', () => {
     expect(guestProtocolAllowed(html)).toBe(false)
     expect(guestNavigationAllowed(html, doc)).toBe(false)
     expect(guestNavigationAllowed(svg, doc)).toBe(false)
+  })
+  it('verlangt die kanonische Gast-Adresse (wie der Betrachter sie baut)', () => {
+    for (const u of ['app://workspace/knowledge/Konzepte/k.html', 'app://workspace/knowledge/Konzepte/Mein%20Konzept%20%C3%A4.html?v=2',
+      'app://workspace/knowledge/Kanal/q.html#x', 'APP://WORKSPACE/knowledge/Kanal/q.html', 'app://workspace/knowledge/a.b/k.html'])
+      expect(guestAttachAllowed(u), u).toBe(true)
+    for (const u of ['app://workspace/knowledge/./Konzepte/k.html', 'app://workspace/knowledge/Konzepte/./k.html',
+      'app://workspace/knowledge/Konzepte/%2e/k.html', 'app://workspace/knowledge/Konzepte/%2E/k.html', 'app://workspace/knowledge/Konzepte/k%2ehtml',
+      'app://workspace/knowledge/Konzepte/.', 'app://workspace/knowledge\\Konzepte\\k.html', 'app://workspace/knowledge/Konzepte\\k.html',
+      'app://workspace/knowledge/Konzepte%2Fk.html', 'app://workspace/knowledge/Konzepte%5ck.html', 'app://workspace/./knowledge/k.html'])
+      expect(guestAttachAllowed(u), u).toBe(false)
+    // Nicht-kanonisch angehängt und daher vom Stolperdraht beim ersten Laden getötet: gibt es nicht mehr
+    expect(guestNavigationAllowed('app://workspace/knowledge/Konzepte/k.html?v=1', 'app://workspace/knowledge/./Konzepte/k.html?v=1')).toBe(false)
+    expect(guestAttachAllowed('app://workspace/knowledge/./Konzepte/k.html?v=1')).toBe(false)
+  })
+  it('entscheidet Anfragen der Gast-Sitzung nach Zustand (eine Tabelle)', () => {
+    const doc = 'app://workspace/knowledge/Konzepte/k.html?v=1'
+    const basis = { dead: false, proxyConfirmed: true, hasWebContents: true, documentUrl: doc as string | null }
+    const urls = ['app://workspace/knowledge/Konzepte/k.html?v=2', 'data:image/svg+xml,<svg width="1"></svg>', 'blob:app://workspace/1', 'about:blank',
+      'app://workspace/knowledge/Konzepte/anderes.html', 'https://example.com/', 'file:///c:/x', 'chrome://gpu']
+    const erwartet: Array<[Partial<typeof basis>, boolean[]]> = [
+      [{}, [true, true, true, true, false, false, false, false]],
+      [{ dead: true }, [false, false, false, false, false, false, false, false]],
+      [{ proxyConfirmed: false }, [false, false, false, false, false, false, false, false]],
+      [{ dead: true, proxyConfirmed: false }, [false, false, false, false, false, false, false, false]],
+      [{ hasWebContents: false }, [false, true, true, true, false, false, false, false]],
+      [{ documentUrl: null }, [false, true, true, true, false, false, false, false]],
+      [{ documentUrl: 'https://example.com/' }, [false, true, true, true, false, false, false, false]],
+    ]
+    for (const [aenderung, ergebnisse] of erwartet)
+      urls.forEach((url, i) =>
+        expect(guestRequestDecision({ ...basis, ...aenderung, url }), `${JSON.stringify(aenderung)} ${url}`).toBe(ergebnisse[i]))
+  })
+  it('Stolperdraht nach Zustand: ein beendeter Gast navigiert nie wieder', () => {
+    const src = 'app://workspace/knowledge/Konzepte/k.html?v=1'
+    const n = (url: string, o: { dead?: boolean; isMainFrame?: boolean; isSameDocument?: boolean; attachedSrc?: string | null } = {}) =>
+      guestTripwireDecision({ dead: false, isMainFrame: true, isSameDocument: false, attachedSrc: src, url, ...o })
+    expect(n(src)).toBe('erlauben')
+    expect(n('app://workspace/knowledge/Konzepte/k.html?v=7')).toBe('erlauben')
+    expect(n('https://example.com/')).toBe('beenden')
+    expect(n('about:blank')).toBe('beenden')
+    expect(n('chrome://gpu')).toBe('beenden')
+    expect(n(src, { attachedSrc: null })).toBe('beenden')
+    expect(n('https://example.com/', { isMainFrame: false })).toBe('erlauben') // Unterrahmen: will-frame-navigate sperrt
+    expect(n(`${src}#unten`, { isSameDocument: true })).toBe('erlauben')
+    expect(n(src, { dead: true })).toBe('beenden')
+    expect(n(`${src}#unten`, { dead: true, isSameDocument: true })).toBe('beenden')
+    expect(n('about:blank', { dead: true })).toBe('beenden')
+    expect(n('https://example.com/', { dead: true, isMainFrame: false })).toBe('beenden')
   })
   it('gibt ohne bekannten Gast nur Anfragen frei, die im Dokument bleiben', () => {
     for (const u of ['data:image/png;base64,AA', 'blob:app://workspace/1', 'about:blank', 'ABOUT:blank'])

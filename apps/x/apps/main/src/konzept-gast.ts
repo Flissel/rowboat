@@ -3,10 +3,9 @@ import {
   KONZEPT_PARTITION,
   WORKSPACE_HTML_CSP,
   guestAttachAllowed,
-  guestInDocumentRequest,
-  guestNavigationAllowed,
   guestProtocolAllowed,
-  guestRequestAllowed,
+  guestRequestDecision,
+  guestTripwireDecision,
   guestWebPreferences,
 } from "@x/shared/dist/konzept.js";
 
@@ -45,6 +44,8 @@ let gastPreload = "";
 const gastHosts = new WeakSet<WebContents>();
 /** Angehaengte Adresse je Gast (webContents.id), uebergeben von will-attach-webview an web-contents-created. */
 const gastAdressen = new Map<number, string>();
+/** Beendete Gaeste (webContents.id) bis zu ihrem `destroyed`: kein Laden, keine Navigation mehr. */
+const beendet = new Set<number>();
 /** Adresse des gerade angehaengten Gasts: will-attach-webview und das Erzeugen des Gasts laufen synchron hintereinander. */
 let wartendeAdresse: string | null = null;
 
@@ -52,16 +53,34 @@ function verweigern(): Response {
   return new Response("Forbidden", { status: 403 });
 }
 
-/** Gast sofort anhalten und (nach dem laufenden Ereignis) schliessen. */
+/**
+ * Gast endgueltig beenden: als tot markieren (der Anfrage-Filter bricht ab jetzt alles ab, auch data:/blob:/about:, der
+ * Stolperdraht haelt jede weitere Navigation an), seine Adresse vergessen, sofort anhalten und nach dem laufenden
+ * Ereignis den Renderer beenden (`forcefullyCrashRenderer`, das Element meldet `render-process-gone`). `close()` nur,
+ * damit das Element zusaetzlich `close` meldet; darauf verlaesst sich nichts.
+ */
 function gastBeenden(guest: WebContents, grund: string): void {
-  console.error(`[konzept] Gast beendet: ${grund}`);
+  const id = guest.id;
+  if (!beendet.has(id)) console.error(`[konzept] Gast beendet: ${grund}`);
+  beendet.add(id);
+  gastAdressen.delete(id);
   try {
     guest.stop();
   } catch {
     // schon zerstoert
   }
   setImmediate(() => {
-    if (!guest.isDestroyed()) guest.close();
+    if (guest.isDestroyed()) return;
+    try {
+      guest.forcefullyCrashRenderer();
+    } catch {
+      // kein Renderer (noch nicht geladen): der Filter haelt alles ab
+    }
+    try {
+      guest.close();
+    } catch {
+      // schon zerstoert
+    }
   });
 }
 
@@ -125,12 +144,14 @@ function sitzungEinrichten(ses: Session, serve: Vorbereitung["serve"]): void {
   ses.webRequest.onBeforeRequest((details, callback) => {
     let erlaubt = false;
     try {
-      if (proxyBestaetigt) {
-        const id = details.webContents?.id;
-        const adresse = id === undefined ? undefined : gastAdressen.get(id);
-        // Unbekannter oder fehlender Gast: nur, was im Dokument bleibt (data:, blob:, about:).
-        erlaubt = adresse === undefined ? guestInDocumentRequest(details.url) : guestRequestAllowed(details.url, adresse);
-      }
+      const id = details.webContents?.id;
+      erlaubt = guestRequestDecision({
+        dead: id !== undefined && beendet.has(id),
+        proxyConfirmed: proxyBestaetigt,
+        hasWebContents: id !== undefined,
+        url: details.url,
+        documentUrl: id === undefined ? null : gastAdressen.get(id) ?? null,
+      });
     } catch {
       erlaubt = false;
     }
@@ -146,7 +167,11 @@ function sitzungEinrichten(ses: Session, serve: Vorbereitung["serve"]): void {
 function gastAbsichern(guest: WebContents, adresse: string | null): void {
   const id = guest.id;
   if (adresse !== null) gastAdressen.set(id, adresse);
-  guest.once("destroyed", () => gastAdressen.delete(id));
+  // Aufraeumen erst beim Zerstoeren: so lange bleibt ein beendeter Gast tot, und die Mengen wachsen nicht unbegrenzt.
+  guest.once("destroyed", () => {
+    gastAdressen.delete(id);
+    beendet.delete(id);
+  });
   try {
     guest.setWebRTCIPHandlingPolicy("disable_non_proxied_udp");
     guest.setWindowOpenHandler(() => ({ action: "deny" }));
@@ -155,11 +180,17 @@ function gastAbsichern(guest: WebContents, adresse: string | null): void {
     guest.on("will-navigate", (event) => event.preventDefault());
     guest.on("will-frame-navigate", (event) => event.preventDefault());
     guest.on("will-redirect", (event) => event.preventDefault());
-    // Stolperdraht: ein Dokumentwechsel des Hauptrahmens zu etwas anderem als der angehaengten Wissens-Adresse.
+    // Stolperdraht: ein Dokumentwechsel des Hauptrahmens zu etwas anderem als der angehaengten Wissens-Adresse, oder
+    // jede Navigation eines schon beendeten Gasts.
     guest.on("did-start-navigation", (event) => {
-      if (event.isMainFrame && !event.isSameDocument && !guestNavigationAllowed(event.url, gastAdressen.get(id) ?? null)) {
-        gastBeenden(guest, `Navigation zu ${event.url.slice(0, 200)}`);
-      }
+      const entscheidung = guestTripwireDecision({
+        dead: beendet.has(id),
+        isMainFrame: event.isMainFrame,
+        isSameDocument: event.isSameDocument,
+        url: event.url,
+        attachedSrc: gastAdressen.get(id) ?? null,
+      });
+      if (entscheidung === "beenden") gastBeenden(guest, `Navigation zu ${event.url.slice(0, 200)}`);
     });
     guest.on("select-bluetooth-device", (event, _devices, callback) => {
       event.preventDefault();

@@ -651,6 +651,11 @@ export function guestAttachAllowed(src: string): boolean {
   // Dekodiert sind Leerzeichen normal (Dateinamen), Steuerzeichen nie.
   // eslint-disable-next-line no-control-regex
   if (/[\u0000-\u001f\u007f]/.test(dekodiert)) return false
+  // Nur die kanonische Form: `app` ist ein Standard-Schema, Chromium schriebe `.`-Segmente, `%2e` und `\` um, und der
+  // Stolperdraht (Vergleich mit der angehängten Adresse) beendete den Gast beim ersten Laden. Also kein `\`, kein
+  // kodiertes `.`, `/` oder `\`, kein `.`-Segment.
+  if (roh.includes('\\') || /%(2e|2f|5c)/i.test(roh)) return false
+  if (roh.split('/').some((s) => s === '.')) return false
   return [segmente(roh), segmente(dekodiert)].every(
     (segs) => !segs.includes('..') && segs.length >= 2 && segName(segs[0]) === 'knowledge',
   )
@@ -732,6 +737,40 @@ export function guestRequestAllowed(requestUrl: string, guestDocumentUrl: string
  */
 export function guestNavigationAllowed(targetUrl: string, attachedSrc: string | null): boolean {
   return attachedSrc !== null && gleichesWissensDokument(targetUrl, attachedSrc)
+}
+
+/**
+ * Entscheidung des Anfrage-Filters der Gast-Sitzung, eine Tabelle: beendeter Gast -> nie; Proxy nicht bestätigt -> nie;
+ * keine webContents oder unbekannte angehängte Adresse -> nur, was im Dokument bleibt ({@link guestInDocumentRequest});
+ * sonst {@link guestRequestAllowed} gegen die angehängte Adresse. true = durchlassen.
+ */
+export function guestRequestDecision(r: {
+  dead: boolean
+  proxyConfirmed: boolean
+  hasWebContents: boolean
+  url: string
+  documentUrl: string | null
+}): boolean {
+  if (r.dead || !r.proxyConfirmed) return false
+  if (!r.hasWebContents || r.documentUrl === null) return guestInDocumentRequest(r.url)
+  return guestRequestAllowed(r.url, r.documentUrl)
+}
+
+/**
+ * Stolperdraht (`did-start-navigation` des Gasts): ein beendeter Gast -> jede Navigation `'beenden'` (anhalten). Sonst
+ * nur Dokumentwechsel des Hauptrahmens prüfen: erlaubt ist nur die angehängte Wissens-Adresse
+ * ({@link guestNavigationAllowed}); Unterrahmen sperrt `will-frame-navigate`, Gleiche-Dokument-Navigationen laden nichts.
+ */
+export function guestTripwireDecision(n: {
+  dead: boolean
+  isMainFrame: boolean
+  isSameDocument: boolean
+  url: string
+  attachedSrc: string | null
+}): 'erlauben' | 'beenden' {
+  if (n.dead) return 'beenden'
+  if (!n.isMainFrame || n.isSameDocument) return 'erlauben'
+  return guestNavigationAllowed(n.url, n.attachedSrc) ? 'erlauben' : 'beenden'
 }
 
 export type GuestMessage = { type: 'rowboat:link-oeffnen'; url: string } | { type: 'rowboat:notiz-oeffnen'; pfad: string }

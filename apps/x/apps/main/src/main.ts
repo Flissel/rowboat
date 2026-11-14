@@ -922,6 +922,11 @@ app.whenReady().then(async () => {
   setupBrowserEventForwarding();
   setupBrowserExtensions();
 
+  // Konzept-Flaeche: Entscheidung ueber den Gastbereich abwarten (hoechstens 2 s ab Start der Einrichtung, meist
+  // laengst erledigt), BEVOR Einbettung, Schnellfrage oder Menue ein Fenster erzeugen koennen. So bekommt jedes
+  // Fenster dieselbe ganze Entscheidung (webviewTag + Kennzeichen + Gastgeber, oder nichts davon).
+  await konzeptGastFertig;
+
   // VibeMind-Einbettung (Spec 2026-10-17): nur mit --embed / ROWBOAT_EMBED=1.
   if (embedRequested()) {
     startEmbedHost({ showApp, preloadPath, serveApp: handleAppRequest }).catch((error) => {
@@ -991,8 +996,8 @@ app.whenReady().then(async () => {
     toggleMeetingNotes: toggleMeetingNotesFromMenus,
   });
 
-  await konzeptGastFertig;
-  createWindow({ startHidden: wasLaunchedAtLogin() });
+  // Ein frueherer Weg (zweiter Start, Schnellfrage, Menue) kann das Hauptfenster schon erzeugt haben: kein zweites.
+  if (!mainWindow || mainWindow.isDestroyed()) createWindow({ startHidden: wasLaunchedAtLogin() });
 
   // Menu bar icon: open the app / start-stop meeting notes without the window.
   createAppTray({
