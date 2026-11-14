@@ -621,12 +621,24 @@ export const KONZEPT_GAST_KANAL = 'konzept'
 export const KONZEPT_GAST_FELD_MAX = 4000
 
 /**
+ * Steuerzeichen oder Leerraum in einer Adresse? Chromium entfernt Tab/Zeilenumbruch beim Einlesen (aus `.\t.` wird
+ * `..`) und kodiert Leerzeichen; eine kanonische Adresse enthält keines davon. Alle Gast-Prüfungen lehnen solche
+ * Adressen vor dem Zerlegen ab.
+ */
+function hatSteuerOderLeerzeichen(url: string): boolean {
+  // eslint-disable-next-line no-control-regex
+  return /[\u0000- \u007f]/.test(url)
+}
+
+/**
  * Darf ein `<webview>` mit dieser Adresse angehängt werden? Nur ein Dokument unter `app://workspace/knowledge/`
  * (Kanal-Quarantäne eingeschlossen). Schema und Host ohne Groß/Klein; der Pfad (ohne Query/Fragment) zählt roh UND
  * prozent-dekodiert, `\` trennt wie `/`, `.`-Segmente entfallen (wie {@link isKnowledgeFrameUrl}). Anders als dort
- * gilt hier "im Zweifel nein": `..`, ungültige Kodierung, fehlender Dateiname, andere Schemata/Hosts -> false.
+ * gilt hier "im Zweifel nein": Steuerzeichen/Leerraum, `..`, ungültige Kodierung, fehlender Dateiname, andere
+ * Schemata/Hosts -> false. Die Oberfläche muss Pfadsegmente also kodieren (`encodeURIComponent`).
  */
 export function guestAttachAllowed(src: string): boolean {
+  if (hatSteuerOderLeerzeichen(src)) return false
   const m = /^app:\/\/workspace(?=[/?#]|$)/i.exec(src)
   if (m === null) return false
   const roh = src.slice(m[0].length).split(/[?#]/)[0]
@@ -636,6 +648,9 @@ export function guestAttachAllowed(src: string): boolean {
   } catch {
     return false
   }
+  // Dekodiert sind Leerzeichen normal (Dateinamen), Steuerzeichen nie.
+  // eslint-disable-next-line no-control-regex
+  if (/[\u0000-\u001f\u007f]/.test(dekodiert)) return false
   return [segmente(roh), segmente(dekodiert)].every(
     (segs) => !segs.includes('..') && segs.length >= 2 && segName(segs[0]) === 'knowledge',
   )
@@ -678,36 +693,41 @@ function dokumentSchluessel(url: string): string | null {
   }
 }
 
+/** Anfrage, die im Dokument bleibt (`data:`, `blob:`, `about:`, ohne Steuerzeichen/Leerraum)? Nie Netz, nie Datei. */
+export function guestInDocumentRequest(requestUrl: string): boolean {
+  if (hatSteuerOderLeerzeichen(requestUrl)) return false
+  const s = schema(requestUrl)
+  return s !== null && DOKUMENT_SCHEMATA.has(s)
+}
+
+/** Ist `zielUrl` dasselbe Wissens-Dokument wie `dokumentUrl` (ohne Query/Fragment, Schema/Host ohne Groß/Klein)? */
+function gleichesWissensDokument(zielUrl: string, dokumentUrl: string): boolean {
+  if (!guestAttachAllowed(zielUrl) || !guestAttachAllowed(dokumentUrl)) return false
+  const a = dokumentSchluessel(zielUrl)
+  return a !== null && a === dokumentSchluessel(dokumentUrl)
+}
+
 /**
  * Anfrage in der Gast-Sitzung erlauben? `data:`, `blob:`, `about:` bleiben im Dokument -> ja. Sonst nur das eigene
  * Hauptdokument des Gasts (ohne Query/Fragment, Schema/Host ohne Groß/Klein verglichen), und nur wenn es eine
- * Wissens-Adresse ist ({@link guestAttachAllowed}). Ist das Gast-Dokument unbekannt (`null`): nur ein Wissens-Dokument.
+ * Wissens-Adresse ist ({@link guestAttachAllowed}). `guestDocumentUrl === null` (Dokument unbekannt): nur ein
+ * Wissens-Dokument. Der Hauptprozess kennt die angehängte Adresse jedes Gasts und gibt für unbekannte Anfragen nur
+ * {@link guestInDocumentRequest} frei.
  */
 export function guestRequestAllowed(requestUrl: string, guestDocumentUrl: string | null): boolean {
-  const s = schema(requestUrl)
-  if (s !== null && DOKUMENT_SCHEMATA.has(s)) return true
-  if (!guestAttachAllowed(requestUrl)) return false
-  if (guestDocumentUrl === null) return true
-  if (!guestAttachAllowed(guestDocumentUrl)) return false
-  const a = dokumentSchluessel(requestUrl)
-  return a !== null && a === dokumentSchluessel(guestDocumentUrl)
-}
-
-/** Schema und Host klein, Rest (Pfad, Query, Fragment) unverändert. */
-function adresseNormiert(url: string): string | null {
-  const m = /^([a-z][a-z0-9+.-]*):\/\/([^/?#]*)(.*)$/is.exec(url)
-  return m === null ? null : `${m[1].toLowerCase()}://${m[2].toLowerCase()}${m[3]}`
+  if (guestInDocumentRequest(requestUrl)) return true
+  if (guestDocumentUrl === null) return guestAttachAllowed(requestUrl)
+  return gleichesWissensDokument(requestUrl, guestDocumentUrl)
 }
 
 /**
- * Darf der Gast navigieren? Nur das erste Laden: Ziel gleich der angehängten Adresse (Query eingeschlossen, Schema/Host
- * ohne Groß/Klein), solange der Gast noch kein Dokument übernommen hat, und nur für eine Wissens-Adresse. Danach nie;
- * neu geladen wird durch Neu-Einhängen des Elements (neuer Gast).
+ * Stolperdraht für Navigationen, die der Browser startet (`loadURL`, `src`-Wechsel, `reload`, Verlauf): sie lösen kein
+ * `will-navigate` aus. Erlaubt ist nur die angehängte Wissens-Adresse selbst (ohne Query/Fragment verglichen, beide
+ * müssen {@link guestAttachAllowed} bestehen). Alles andere, auch `data:`/`about:`/`file:`/`chrome:`/`devtools:`,
+ * beendet den Gast.
  */
-export function guestNavigationAllowed(targetUrl: string, attachedSrc: string | null, committed: boolean): boolean {
-  if (committed || attachedSrc === null || !guestAttachAllowed(attachedSrc)) return false
-  const ziel = adresseNormiert(targetUrl)
-  return ziel !== null && ziel === adresseNormiert(attachedSrc)
+export function guestNavigationAllowed(targetUrl: string, attachedSrc: string | null): boolean {
+  return attachedSrc !== null && gleichesWissensDokument(targetUrl, attachedSrc)
 }
 
 export type GuestMessage = { type: 'rowboat:link-oeffnen'; url: string } | { type: 'rowboat:notiz-oeffnen'; pfad: string }
@@ -723,7 +743,15 @@ function feld(v: unknown): v is string {
  */
 export function forwardableGuestMessage(data: unknown): GuestMessage | null {
   if (!isRecord(data)) return null
-  if (data.type === 'rowboat:link-oeffnen' && feld(data.url)) return { type: 'rowboat:link-oeffnen', url: data.url }
-  if (data.type === 'rowboat:notiz-oeffnen' && feld(data.pfad)) return { type: 'rowboat:notiz-oeffnen', pfad: data.pfad }
+  // Jedes Feld genau einmal lesen: ein Getter darf zwischen Prüfen und Kopieren nichts anderes liefern.
+  const type = data.type
+  if (type === 'rowboat:link-oeffnen') {
+    const url = data.url
+    return feld(url) ? { type, url } : null
+  }
+  if (type === 'rowboat:notiz-oeffnen') {
+    const pfad = data.pfad
+    return feld(pfad) ? { type, pfad } : null
+  }
   return null
 }

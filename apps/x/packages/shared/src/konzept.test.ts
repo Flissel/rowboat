@@ -31,6 +31,7 @@ import {
   guestRequestAllowed,
   guestProtocolAllowed,
   guestNavigationAllowed,
+  guestInDocumentRequest,
   forwardableGuestMessage,
 } from './konzept.js'
 
@@ -408,7 +409,9 @@ describe('Gastbereich', () => {
   it('vergleicht das eigene Dokument ohne Abfrage, Fragment und Groß/Klein von Schema und Host', () => {
     const doc = 'APP://WORKSPACE/knowledge/Konzepte/k%20k.html?v=2#oben'
     expect(guestRequestAllowed('app://workspace/knowledge/Konzepte/k%20k.html?v=9', doc)).toBe(true)
-    expect(guestRequestAllowed('app://workspace/knowledge/Konzepte/k k.html', doc)).toBe(true)
+    expect(guestRequestAllowed('app://workspace/knowledge/Konzepte/k%20k.html', 'app://workspace/knowledge/Konzepte/k k.html')).toBe(false) // roh: abgelehnt
+    expect(guestRequestAllowed('app://workspace/knowledge/Konzepte/k k.html', doc)).toBe(false)
+    expect(guestRequestAllowed('app://workspace/knowledge/Konzepte/k%20k.html#unten', doc)).toBe(true)
     expect(guestRequestAllowed('app://workspace/knowledge/konzepte/k%20k.html', doc)).toBe(false)
     // Ein Dokument außerhalb von knowledge/ gilt nie als "eigenes Dokument"
     expect(guestRequestAllowed('https://example.com/a', 'https://example.com/a')).toBe(false)
@@ -418,16 +421,40 @@ describe('Gastbereich', () => {
     expect(guestRequestAllowed('', null)).toBe(false)
     expect(guestRequestAllowed('devtools://devtools/x', doc)).toBe(false)
   })
-  it('lässt nur das erste Laden der angehängten Adresse navigieren', () => {
-    const src = 'app://workspace/knowledge/Konzepte/k.html?v=2'
-    expect(guestNavigationAllowed(src, src, false)).toBe(true)
-    expect(guestNavigationAllowed('APP://WORKSPACE/knowledge/Konzepte/k.html?v=2', src, false)).toBe(true)
-    expect(guestNavigationAllowed(src, src, true)).toBe(false)
-    expect(guestNavigationAllowed('app://workspace/knowledge/Konzepte/k.html?v=3', src, false)).toBe(false)
-    expect(guestNavigationAllowed('app://workspace/knowledge/Konzepte/k.html', src, false)).toBe(false)
-    expect(guestNavigationAllowed('https://example.com/', src, false)).toBe(false)
-    expect(guestNavigationAllowed('app://workspace/config/x.html', 'app://workspace/config/x.html', false)).toBe(false)
-    expect(guestNavigationAllowed(src, null, false)).toBe(false)
+  it('Stolperdraht: nur die angehängte Wissens-Adresse darf geladen werden', () => {
+    const src = 'app://workspace/knowledge/Konzepte/k%20k.html?v=2'
+    expect(guestNavigationAllowed(src, src)).toBe(true)
+    expect(guestNavigationAllowed('APP://WORKSPACE/knowledge/Konzepte/k%20k.html?v=2', src)).toBe(true)
+    expect(guestNavigationAllowed('app://workspace/knowledge/Konzepte/k%20k.html?v=3#x', src)).toBe(true) // ohne Query/Fragment
+    for (const u of ['app://workspace/knowledge/Konzepte/anderes.html', 'app://workspace/knowledge/konzepte/k%20k.html',
+      'file:///C:/Windows/win.ini', 'chrome://gpu', 'devtools://devtools/bundled/inspector.html', 'https://example.com/',
+      'data:text/html,<script>1</script>', 'about:blank', 'blob:app://workspace/1', 'app://-/index.html', 'javascript:1', '',
+      'app://workspace/knowledge/Konzepte/k%20k.html\t', 'app://workspace/knowledge/.\t./config/x.html'])
+      expect(guestNavigationAllowed(u, src), u).toBe(false)
+    expect(guestNavigationAllowed('app://workspace/config/x.html', 'app://workspace/config/x.html')).toBe(false)
+    expect(guestNavigationAllowed(src, null)).toBe(false)
+  })
+  it('lehnt Adressen mit Steuerzeichen oder Leerraum überall ab', () => {
+    const doc = 'app://workspace/knowledge/Konzepte/k.html'
+    for (const z of ['\t', '\n', '\r', ' ', '\u0000', '\u007f']) {
+      for (const u of [`app://workspace/knowledge/.${z}./config/x.html`, `app://workspace/knowledge/Konzepte/k${z}.html`, `${doc}${z}`]) {
+        expect(guestAttachAllowed(u), JSON.stringify(u)).toBe(false)
+        expect(guestProtocolAllowed(u), JSON.stringify(u)).toBe(false)
+        expect(guestRequestAllowed(u, doc), JSON.stringify(u)).toBe(false)
+        expect(guestRequestAllowed(u, null), JSON.stringify(u)).toBe(false)
+        expect(guestNavigationAllowed(u, doc), JSON.stringify(u)).toBe(false)
+        expect(guestNavigationAllowed(doc, u), JSON.stringify(u)).toBe(false)
+      }
+      expect(guestRequestAllowed(`data:text/plain,a${z}b`, doc), JSON.stringify(z)).toBe(false)
+      expect(guestInDocumentRequest(`about:blank${z}`), JSON.stringify(z)).toBe(false)
+    }
+    expect(guestAttachAllowed('app://workspace/knowledge/%2e%09%2e/config/x.html')).toBe(false)
+  })
+  it('gibt ohne bekannten Gast nur Anfragen frei, die im Dokument bleiben', () => {
+    for (const u of ['data:image/png;base64,AA', 'blob:app://workspace/1', 'about:blank', 'ABOUT:blank'])
+      expect(guestInDocumentRequest(u), u).toBe(true)
+    for (const u of ['app://workspace/knowledge/Konzepte/k.html', 'https://example.com/', 'file:///c:/x', 'chrome://gpu', 'devtools://x', '', 'data'])
+      expect(guestInDocumentRequest(u), u).toBe(false)
   })
   it('prüft weiterzureichende Nachrichten', () => {
     expect(forwardableGuestMessage({ type: 'rowboat:link-oeffnen', url: 'https://example.com/a' })).toEqual({ type: 'rowboat:link-oeffnen', url: 'https://example.com/a' })
@@ -441,6 +468,23 @@ describe('Gastbereich', () => {
       { type: 'rowboat:notiz-oeffnen', pfad: { toString: () => 'x' } }, { type: 'rowboat:notiz-oeffnen', pfad: 'p'.repeat(4001) },
       { type: ['rowboat:link-oeffnen'], url: 'x' }])
       expect(forwardableGuestMessage(d)).toBeNull()
+  })
+  it('liest jedes Feld nur einmal (ein Getter kann nicht nach der Prüfung tauschen)', () => {
+    let urlLesungen = 0
+    const tauscher = {
+      get type() { return 'rowboat:link-oeffnen' },
+      get url() { urlLesungen++; return urlLesungen === 1 ? 'https://example.com/a' : 'x'.repeat(5000) },
+    }
+    expect(forwardableGuestMessage(tauscher)).toEqual({ type: 'rowboat:link-oeffnen', url: 'https://example.com/a' })
+    expect(urlLesungen).toBe(1)
+    let typLesungen = 0
+    const typTauscher = {
+      get type() { typLesungen++; return typLesungen === 1 ? 'rowboat:notiz-oeffnen' : 'rowboat:link-oeffnen' },
+      pfad: 'knowledge/a.md',
+      url: 'https://example.com/',
+    }
+    expect(forwardableGuestMessage(typTauscher)).toEqual({ type: 'rowboat:notiz-oeffnen', pfad: 'knowledge/a.md' })
+    expect(typLesungen).toBe(1)
   })
   it('führt webrtc nicht mehr in der Regel', () => { expect(WORKSPACE_HTML_CSP).not.toContain('webrtc'); expect(WORKSPACE_HTML_CSP).toContain('sandbox allow-scripts') })
 })

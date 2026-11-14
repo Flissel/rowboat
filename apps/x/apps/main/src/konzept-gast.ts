@@ -3,6 +3,7 @@ import {
   KONZEPT_PARTITION,
   WORKSPACE_HTML_CSP,
   guestAttachAllowed,
+  guestInDocumentRequest,
   guestNavigationAllowed,
   guestProtocolAllowed,
   guestRequestAllowed,
@@ -14,11 +15,16 @@ import {
  * `konzept`. Nur diese Sitzung bekommt den toten Proxy, die Sperren und ein eigenes `app://`, das nur Wissens-HTML
  * mit der Kein-Netz-Regel ausliefert. Alles Entscheidende steht als reine Funktion in @x/shared/konzept; hier nur das
  * Verdrahten mit Electron. Die Standard-Sitzung bleibt unveraendert.
+ *
+ * Fail closed: Solange der tote Proxy nicht bestaetigt ist (setProxy erledigt UND resolveProxy zeigt ihn), wird kein
+ * Gast angehaengt und jede Anfrage der Sitzung abgebrochen.
  */
 
 /** Alle Schemata auf einen toten lokalen Port; `<-loopback>` noetig, sonst umgehen 127.0.0.1/localhost den Proxy. */
 const TOTER_PROXY = { mode: "fixed_servers", proxyRules: "socks5://127.0.0.1:9", proxyBypassRules: "<-loopback>" } as const;
-const PROXY_PROBEN = ["http://127.0.0.1:8765/", "https://example.com/", "ws://127.0.0.1:8765/", "wss://example.com/", "http://localhost:8765/"];
+const PROXY_PROBEN = ["https://example.com/", "http://127.0.0.1:8765/", "ws://127.0.0.1:8765/", "wss://example.com/", "http://localhost:8765/"];
+/** So lange wartet der Start hoechstens auf die Bestaetigung; danach gilt der Gastbereich als nicht verfuegbar. */
+const PROXY_WARTEZEIT_MS = 10_000;
 
 /** Tag-Attribute, die der Hauptprozess nie vom `<webview>` uebernimmt (Namen laut webview-tag.md, Electron 39). */
 const VERBOTENE_PARAMETER = [
@@ -28,22 +34,35 @@ const VERBOTENE_PARAMETER = [
 
 type Vorbereitung = { serve: (request: Request) => Promise<Response>; guestPreloadPath: string };
 
-let vorbereitet: boolean | null = null;
-let proxyBereit: Promise<void> = Promise.reject(new Error("konzept: Gastbereich nicht eingerichtet"));
-proxyBereit.catch(() => {});
-let proxyFehler = false;
+let vorbereitung: Promise<boolean> | null = null;
+let eingerichtet = false;
+let proxyBestaetigt = false;
+let gastSitzung: Session | null = null;
 let gastPreload = "";
 const gastHosts = new WeakSet<WebContents>();
-/** Hauptdokument je Gast (webContents.id): die Adresse seiner ersten Hauptrahmen-Anfrage. */
-const gastDokumente = new Map<number, string>();
-/** Gaeste, die schon ein Dokument uebernommen haben (ab dann keine Navigation mehr). */
-const gastUebernommen = new Set<number>();
+/** Angehaengte Adresse je Gast (webContents.id), uebergeben von will-attach-webview an web-contents-created. */
+const gastAdressen = new Map<number, string>();
+/** Adresse des gerade angehaengten Gasts: will-attach-webview und das Erzeugen des Gasts laufen synchron hintereinander. */
+let wartendeAdresse: string | null = null;
 
 function verweigern(): Response {
   return new Response("Forbidden", { status: 403 });
 }
 
-async function proxySetzen(ses: Session): Promise<void> {
+/** Gast sofort anhalten und (nach dem laufenden Ereignis) schliessen. */
+function gastBeenden(guest: WebContents, grund: string): void {
+  console.error(`[konzept] Gast beendet: ${grund}`);
+  try {
+    guest.stop();
+  } catch {
+    // schon zerstoert
+  }
+  setImmediate(() => {
+    if (!guest.isDestroyed()) guest.close();
+  });
+}
+
+async function proxyBestaetigen(ses: Session): Promise<void> {
   await ses.setProxy(TOTER_PROXY);
   for (const url of PROXY_PROBEN) {
     const r = await ses.resolveProxy(url);
@@ -51,17 +70,13 @@ async function proxySetzen(ses: Session): Promise<void> {
       throw new Error(`konzept: Proxy greift nicht fuer ${url}: ${r}`);
     }
   }
+  proxyBestaetigt = true;
 }
 
-/** Liefert `app://` in der Gast-Sitzung: nur Wissens-Adressen, erst nach gesetztem Proxy, nur mit der Kein-Netz-Regel. */
+/** `app://` der Gast-Sitzung: nur Wissens-Adressen, nur mit bestaetigtem Proxy, nur mit der Kein-Netz-Regel. */
 function gastProtokoll(serve: Vorbereitung["serve"]) {
   return async (request: Request): Promise<Response> => {
-    if (!guestProtocolAllowed(request.url)) return verweigern();
-    try {
-      await proxyBereit;
-    } catch {
-      return verweigern();
-    }
+    if (!proxyBestaetigt || !guestProtocolAllowed(request.url)) return verweigern();
     let res: Response;
     try {
       res = await serve(request);
@@ -100,105 +115,136 @@ function sitzungEinrichten(ses: Session, serve: Vorbereitung["serve"]): void {
   ses.on("will-download", (event) => event.preventDefault());
   ses.setSpellCheckerEnabled(false);
   ses.protocol.handle("app", gastProtokoll(serve));
+  // file: braucht die Sitzung nie. `file` ist fuer protocol.handle ein eingebautes Schema (http/https/file werden
+  // abgefangen, interceptProtocol), also je Sitzung ueberschreibbar. chrome:/devtools: lassen sich so nicht abfangen;
+  // dort sind onBeforeRequest und der Stolperdraht (did-start-navigation) die Sperre.
+  ses.protocol.handle("file", () => verweigern());
   ses.webRequest.onBeforeRequest((details, callback) => {
     let erlaubt = false;
     try {
-      const id = details.webContents?.id;
-      let dokument = id === undefined ? null : gastDokumente.get(id) ?? null;
-      erlaubt = guestRequestAllowed(details.url, dokument);
-      // Die erste Hauptrahmen-Anfrage eines Gasts ist das Laden seiner angehaengten Adresse: sie wird sein Dokument.
-      if (erlaubt && id !== undefined && dokument === null && details.resourceType === "mainFrame") {
-        dokument = details.url;
-        gastDokumente.set(id, dokument);
+      if (proxyBestaetigt) {
+        const id = details.webContents?.id;
+        const adresse = id === undefined ? undefined : gastAdressen.get(id);
+        // Unbekannter oder fehlender Gast: nur, was im Dokument bleibt (data:, blob:, about:).
+        erlaubt = adresse === undefined ? guestInDocumentRequest(details.url) : guestRequestAllowed(details.url, adresse);
       }
     } catch {
       erlaubt = false;
     }
     callback(erlaubt ? {} : { cancel: true });
   });
-  proxyBereit = proxySetzen(ses);
-  proxyBereit.catch((error: unknown) => {
-    proxyFehler = true;
-    console.error("[konzept] Proxy der Gast-Sitzung nicht gesetzt, Gaeste werden verweigert:", error);
-  });
 }
 
-/** Guest-Ereignisse: WebRTC nur ueber den Proxy, keine Fenster, keine Navigation nach dem ersten Laden, keine Gaeste. */
-function gastAbsichern(guest: WebContents): void {
+/**
+ * Haertung jedes Konzept-Gasts, gesetzt beim Erzeugen (vor dem Anhaengen und vor jedem Laden): WebRTC nur ueber den
+ * Proxy, keine Fenster, keine von der Seite ausgeloeste Navigation, Stolperdraht fuer vom Browser gestartete
+ * Navigationen (loadURL, src-Wechsel, Verlauf), keine Geraetewahl. Faellt etwas aus, wird der Gast beendet.
+ */
+function gastAbsichern(guest: WebContents, adresse: string | null): void {
   const id = guest.id;
-  guest.setWebRTCIPHandlingPolicy("disable_non_proxied_udp");
-  guest.setWindowOpenHandler(() => ({ action: "deny" }));
-  const darf = (url: string, isMainFrame: boolean) =>
-    isMainFrame && guestNavigationAllowed(url, gastDokumente.get(id) ?? null, gastUebernommen.has(id));
-  guest.on("will-navigate", (event) => {
-    if (!darf(event.url, event.isMainFrame)) event.preventDefault();
-  });
-  guest.on("will-frame-navigate", (event) => {
-    if (!darf(event.url, event.isMainFrame)) event.preventDefault();
-  });
-  guest.on("will-redirect", (event) => {
-    if (!darf(event.url, event.isMainFrame)) event.preventDefault();
-  });
-  guest.on("did-navigate", () => gastUebernommen.add(id));
-  guest.on("select-bluetooth-device", (event, _devices, callback) => {
-    event.preventDefault();
-    callback("");
-  });
-  guest.once("destroyed", () => {
-    gastDokumente.delete(id);
-    gastUebernommen.delete(id);
-  });
+  if (adresse !== null) gastAdressen.set(id, adresse);
+  guest.once("destroyed", () => gastAdressen.delete(id));
+  try {
+    guest.setWebRTCIPHandlingPolicy("disable_non_proxied_udp");
+    guest.setWindowOpenHandler(() => ({ action: "deny" }));
+    // Von der Seite ausgeloest (Link, location, meta refresh, Formular) oder Umleitung: nie. Gleiche-Dokument-
+    // Navigationen (Anker, pushState) loesen diese Ereignisse nicht aus und bleiben moeglich; sie laden nichts.
+    guest.on("will-navigate", (event) => event.preventDefault());
+    guest.on("will-frame-navigate", (event) => event.preventDefault());
+    guest.on("will-redirect", (event) => event.preventDefault());
+    // Stolperdraht: ein Dokumentwechsel des Hauptrahmens zu etwas anderem als der angehaengten Wissens-Adresse.
+    guest.on("did-start-navigation", (event) => {
+      if (event.isMainFrame && !event.isSameDocument && !guestNavigationAllowed(event.url, gastAdressen.get(id) ?? null)) {
+        gastBeenden(guest, `Navigation zu ${event.url.slice(0, 200)}`);
+      }
+    });
+    guest.on("select-bluetooth-device", (event, _devices, callback) => {
+      event.preventDefault();
+      callback("");
+    });
+  } catch (error) {
+    gastBeenden(guest, `Haertung fehlgeschlagen: ${String(error)}`);
+  }
 }
 
 /** Waechter fuer jede Ansicht der App: nur registrierte Fenster duerfen Gaeste anhaengen, und nur Wissens-Dokumente. */
 function anhaengenPruefen(wc: WebContents): void {
   wc.on("will-attach-webview", (event, webPreferences, params) => {
-    if (!gastHosts.has(wc) || vorbereitet !== true || proxyFehler || !guestAttachAllowed(params.src ?? "")) {
+    wartendeAdresse = null;
+    const src = params.src ?? "";
+    if (!gastHosts.has(wc) || !konzeptGastBereit() || !guestAttachAllowed(src)) {
       event.preventDefault();
       return;
     }
+    // Nur zulassen, was hier gesetzt wird: alle Felder (auch zoomFactor aus webpreferences="...") verwerfen.
     const prefs = webPreferences as Record<string, unknown>;
-    for (const key of Object.keys(prefs)) {
-      if (key !== "zoomFactor") delete prefs[key];
-    }
+    for (const key of Object.keys(prefs)) delete prefs[key];
     Object.assign(webPreferences, guestWebPreferences(), {
       preload: gastPreload,
+      devTools: false,
       webSecurity: true,
       allowRunningInsecureContent: false,
       experimentalFeatures: false,
       enableWebSQL: false,
       spellcheck: false,
       navigateOnDragDrop: false,
+      zoomFactor: wc.zoomFactor,
     });
     prefs.disablePopups = true;
     for (const key of VERBOTENE_PARAMETER) delete params[key];
     params.partition = KONZEPT_PARTITION;
+    wartendeAdresse = src;
   });
 }
 
-/**
- * Richtet die Gast-Sitzung einmal je Prozess ein (vor dem ersten Fenster). true, wenn alles ohne Fehler lief; dann
- * bekommt das App-Fenster `webviewTag` und das Kennzeichen. Der Proxy wird asynchron gesetzt und geprueft; bis dahin
- * liefert das Gast-`app://` nichts aus, schlaegt er fehl, werden Gaeste verweigert.
- */
-export function prepareKonzeptGast(deps: Vorbereitung): boolean {
-  if (vorbereitet !== null) return vorbereitet;
-  vorbereitet = false;
-  try {
-    // Zuerst der Waechter: ab jetzt haengt keine Ansicht einen Gast an, die nicht ausdruecklich Gastgeber ist.
-    app.on("web-contents-created", (_event, wc) => anhaengenPruefen(wc));
-    gastPreload = deps.guestPreloadPath;
-    sitzungEinrichten(session.fromPartition(KONZEPT_PARTITION), deps.serve);
-    vorbereitet = true;
-  } catch (error) {
-    console.error("[konzept] Gastbereich nicht eingerichtet:", error);
+/** Fuer jede neue Ansicht: Anhaenge-Waechter; ist es ein Gast der Partition `konzept`, sofort die Haertung. */
+function ansichtErzeugt(wc: WebContents): void {
+  anhaengenPruefen(wc);
+  if (wc.getType() === "webview" && gastSitzung !== null && wc.session === gastSitzung) {
+    const adresse = wartendeAdresse;
+    wartendeAdresse = null;
+    gastAbsichern(wc, adresse);
   }
-  return vorbereitet;
 }
 
-/** Macht das App-Fenster zum Gastgeber fuer Konzept-Gaeste (nur nach erfolgreichem {@link prepareKonzeptGast}). */
+/** Gastbereich eingerichtet und toter Proxy bestaetigt? Nur dann bekommt ein Fenster `webviewTag` und das Kennzeichen. */
+export function konzeptGastBereit(): boolean {
+  return eingerichtet && proxyBestaetigt;
+}
+
+/**
+ * Richtet die Gast-Sitzung einmal je Prozess ein (nach app ready, vor dem ersten Fenster) und wartet zeitlich begrenzt
+ * auf die Bestaetigung des toten Proxys. Liefert {@link konzeptGastBereit}; lehnt nie ab.
+ */
+export function prepareKonzeptGast(deps: Vorbereitung): Promise<boolean> {
+  if (vorbereitung !== null) return vorbereitung;
+  vorbereitung = (async () => {
+    try {
+      // Zuerst der Waechter: ab jetzt haengt keine Ansicht einen Gast an, die nicht ausdruecklich Gastgeber ist.
+      app.on("web-contents-created", (_event, wc) => ansichtErzeugt(wc));
+      gastPreload = deps.guestPreloadPath;
+      const ses = session.fromPartition(KONZEPT_PARTITION);
+      gastSitzung = ses;
+      sitzungEinrichten(ses, deps.serve);
+      eingerichtet = true;
+      let zeitgeber: NodeJS.Timeout | undefined;
+      const frist = new Promise<never>((_, reject) => {
+        zeitgeber = setTimeout(() => reject(new Error("konzept: Proxy nicht rechtzeitig bestaetigt")), PROXY_WARTEZEIT_MS);
+      });
+      try {
+        await Promise.race([proxyBestaetigen(ses), frist]);
+      } finally {
+        clearTimeout(zeitgeber);
+      }
+    } catch (error) {
+      console.error("[konzept] Gastbereich nicht verfuegbar, Gaeste werden verweigert:", error);
+    }
+    return konzeptGastBereit();
+  })();
+  return vorbereitung;
+}
+
+/** Macht das App-Fenster zum Gastgeber fuer Konzept-Gaeste (nur wenn {@link konzeptGastBereit}). */
 export function setupKonzeptGast(win: BrowserWindow): void {
-  if (vorbereitet !== true) return;
-  gastHosts.add(win.webContents);
-  win.webContents.on("did-attach-webview", (_event, guest) => gastAbsichern(guest));
+  if (konzeptGastBereit()) gastHosts.add(win.webContents);
 }

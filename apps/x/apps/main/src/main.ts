@@ -91,7 +91,7 @@ import { setupZoomShortcuts } from "./zoom.js";
 import { initMeetingPopup, showMeetingPopup } from "./meeting-popup.js";
 import { initQuickAsk, onAppWindowClosed } from "./quick-ask.js";
 import { embedRequested, startEmbedHost, stopEmbedHost } from "./embed-host.js";
-import { prepareKonzeptGast, setupKonzeptGast } from "./konzept-gast.js";
+import { konzeptGastBereit, prepareKonzeptGast, setupKonzeptGast } from "./konzept-gast.js";
 
 // Captured as early as possible so it reflects actual process start. Used to
 // gate grace-eligible notifications (e.g. the burst of background-task
@@ -279,7 +279,7 @@ function wasServedAsKnowledgeHtml(url: string): boolean {
  * unveraendert durch, wie vor der Konzept-Flaeche. `relPaths`: angefragter Pfad und, lokal, das
  * aufgeloeste Ziel relativ zur aufgeloesten Wurzel. Rumpf, Status und Range-Verhalten bleiben.
  */
-function withWorkspaceHtmlHeaders(res: Response, relPaths: string[], documentUrl: string): Response {
+function withWorkspaceHtmlHeaders(res: Response, relPaths: string[], documentUrl: string, remember = true): Response {
   const decision = workspaceResponseDecision({
     relPaths,
     contentType: res.headers.get("content-type"),
@@ -295,13 +295,16 @@ function withWorkspaceHtmlHeaders(res: Response, relPaths: string[], documentUrl
   }
   const extra = decision === "konzept" ? htmlResponseHeaders() : { "X-Content-Type-Options": "nosniff" };
   for (const [name, value] of Object.entries(extra)) headers.set(name, value);
-  if (decision === "konzept" && res.ok) rememberKnowledgeHtml(documentUrl);
+  if (decision === "konzept" && res.ok && remember) rememberKnowledgeHtml(documentUrl);
   return new Response(res.body, { status: res.status, statusText: res.statusText, headers });
 }
 
 // VibeMind-Einbettung: der app://-Rumpf als eigene Funktion, damit der Einbettungszugang
 // dieselben Inhalte ausliefern kann (serveApp). Rumpf unveraendert.
-async function handleAppRequest(request: Request): Promise<Response> {
+// Konzept-Gaeste (Partition `konzept`) rufen ihn mit `rememberKnowledgeHtml: false` auf: ihre Ladevorgaenge
+// (jedes Neu-Einhaengen mit ?v=N) duerfen das Ausgeliefert-Register der Standard-Sitzung nicht fuellen.
+async function handleAppRequest(request: Request, options: { rememberKnowledgeHtml?: boolean } = {}): Promise<Response> {
+    const remember = options.rememberKnowledgeHtml !== false;
     const url = new URL(request.url);
 
     if (url.host === 'file-preview') {
@@ -331,6 +334,7 @@ async function handleAppRequest(request: Request): Promise<Response> {
               await fetch(`${baseUrl}/workspace/${relPath.split("/").map(encodeURIComponent).join("/")}`, { headers }),
               [relPath],
               request.url,
+              remember,
             );
           }
           const absPath = resolveWorkspacePath(relPath);
@@ -346,6 +350,7 @@ async function handleAppRequest(request: Request): Promise<Response> {
             await net.fetch(pathToFileURL(realTarget).toString()),
             [relPath, path.relative(realRoot, realTarget)],
             request.url,
+            remember,
           );
         } catch {
           return new Response("Forbidden", { status: 403 });
@@ -687,9 +692,9 @@ function configureKnowledgeHtmlRequestBackstop(ses: Session): void {
 }
 
 function createWindow(options: { startHidden?: boolean } = {}) {
-  // Konzept-Flaeche: Gast-Sitzung einmal je Prozess einrichten, bevor ein Fenster Gaeste anhaengen kann. Nur wenn das
-  // gelang, bekommt das Fenster <webview> und das Kennzeichen fuer die Oberflaeche (sonst Hinweis statt Seite).
-  const konzeptGast = prepareKonzeptGast({ serve: handleAppRequest, guestPreloadPath: konzeptGastPreloadPath });
+  // Konzept-Flaeche: nur wenn die Gast-Sitzung eingerichtet und ihr toter Proxy bestaetigt ist (prepareKonzeptGast in
+  // app.whenReady), bekommt das Fenster <webview> und das Kennzeichen fuer die Oberflaeche (sonst Hinweis statt Seite).
+  const konzeptGast = konzeptGastBereit();
   const win = new BrowserWindow({
     width: 1280,
     height: 800,
@@ -840,6 +845,13 @@ app.whenReady().then(async () => {
   // serves workspace files via app://workspace/<rel-path> for media previews.
   registerAppProtocol();
 
+  // Konzept-Flaeche: Gast-Sitzung (Partition `konzept`) jetzt einrichten; vor dem ersten Fenster wird auf die
+  // Bestaetigung des toten Proxys gewartet (zeitlich begrenzt, Fehler -> kein Gastbereich).
+  const konzeptGastFertig = prepareKonzeptGast({
+    serve: (request) => handleAppRequest(request, { rememberKnowledgeHtml: false }),
+    guestPreloadPath: konzeptGastPreloadPath,
+  });
+
   // Initialize auto-updater (no-ops in dev). Update state is pushed to the
   // renderer (updater:status), which owns the restart prompt — see updater.ts.
   initUpdater();
@@ -979,6 +991,7 @@ app.whenReady().then(async () => {
     toggleMeetingNotes: toggleMeetingNotesFromMenus,
   });
 
+  await konzeptGastFertig;
   createWindow({ startHidden: wasLaunchedAtLogin() });
 
   // Menu bar icon: open the app / start-stop meeting notes without the window.
