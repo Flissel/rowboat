@@ -1,12 +1,10 @@
 import { describe, expect, it } from 'vitest'
 import {
-  cacheBustedUrl,
   canAcceptRequest,
   canConfirm,
   eventTime,
   guestAvailable,
   guestElementProps,
-  guestMountOverdue,
   guestNoticeText,
   guestSrc,
   guestMountTimeoutMs,
@@ -198,6 +196,15 @@ describe('konzept-flaeche', () => {
     it('wandelt Backslash-Pfade um', () => {
       expect(guestSrc('knowledge\\Konzepte\\k.html', 1)).toBe('app://workspace/knowledge/Konzepte/k.html?v=1')
     })
+    it('baut die Adresse für einen Namen in NFD-Form (kombinierender Umlaut)', () => {
+      expect(guestSrc('knowledge/Könzept.html', 1)).toBe('app://workspace/knowledge/Ko%CC%88nzept.html?v=1')
+    })
+    it('liefert null statt zu werfen, wenn encodeURIComponent den Namen ablehnt (einzelnes Ersatzzeichen)', () => {
+      expect(guestSrc('knowledge/a\ud800.html', 1)).toBeNull()
+    })
+    it('verlangt `knowledge` klein geschrieben (fail-closed)', () => {
+      expect(guestSrc('Knowledge/k.html', 1)).toBeNull()
+    })
     it('liefert null, wenn der Pfad nicht kanonisch werden kann', () => {
       for (const bad of ['', '/knowledge/k.html', 'knowledge', 'knowledge/', 'knowledge//k.html', 'knowledge/./k.html', 'knowledge/../k.html', 'bg-tasks/x.html', 'x/knowledge/k.html', 'knowledgex/k.html', 'knowledge/a\tb.html']) {
         expect(guestSrc(bad, 1), bad).toBeNull()
@@ -207,23 +214,14 @@ describe('konzept-flaeche', () => {
     })
   })
 
-  it('erkennt einen Gast, der nach 5 s nicht geladen hat', () => {
+  it('wartet 5 s auf das erste Laden des Gasts', () => {
     expect(guestMountTimeoutMs).toBe(5000)
-    expect(guestMountOverdue(false, 0, 4999)).toBe(false)
-    expect(guestMountOverdue(false, 0, 5000)).toBe(true)
-    expect(guestMountOverdue(true, 0, 60_000)).toBe(false)
   })
 
   it('nennt die Hinweistexte', () => {
     expect(guestNoticeText('missing')).toBe('Konzepte lassen sich hier nicht anzeigen.')
     expect(guestNoticeText('timeout')).toBe('Konzepte lassen sich hier nicht anzeigen.')
     expect(guestNoticeText('gone')).toBe('Dieses Konzept wurde angehalten.')
-  })
-
-  it('setzt den Cache-Brecher an die Adresse', () => {
-    expect(cacheBustedUrl('app://workspace/knowledge/k.html', 0)).toBe('app://workspace/knowledge/k.html')
-    expect(cacheBustedUrl('app://workspace/knowledge/k.html', 3)).toBe('app://workspace/knowledge/k.html?v=3')
-    expect(cacheBustedUrl('app://workspace/k.html?x=1', 3)).toBe('app://workspace/k.html?x=1&v=3')
   })
 
   const req = (id: number, now: number, kind: 'link' | 'note' = 'link', value = 'https://a.example/') =>

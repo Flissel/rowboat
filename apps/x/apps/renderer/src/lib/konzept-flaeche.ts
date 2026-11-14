@@ -138,12 +138,6 @@ export function workspaceEventTouches(event: unknown, path: string): boolean {
   }
 }
 
-/** Adresse mit Cache-Brecher; Version 0 lässt sie unverändert. */
-export function cacheBustedUrl(url: string, version: number): string {
-  if (version <= 0) return url
-  return `${url}${url.includes('?') ? '&' : '?'}v=${version}`
-}
-
 // ---- Gastbereich: Konzepte im <webview> der Partition `konzept` ----
 
 /** Gibt es den Gastbereich? Nur wenn der Hauptprozess ihn bestätigt hat (Kennzeichen genau `true`) und die Laufzeit lokal ist. */
@@ -167,17 +161,17 @@ export function guestSrc(rel: string, n: number): string | null {
   const segs = rel.replace(/\\/g, '/').split('/')
   if (segs.length < 2 || segs[0] !== 'knowledge') return null
   if (segs.some((s) => s === '' || s === '.' || s === '..')) return null
-  const src = `app://workspace/${segs.map(encodeURIComponent).join('/')}?v=${n}`
+  let src: string
+  try {
+    src = `app://workspace/${segs.map(encodeURIComponent).join('/')}?v=${n}`
+  } catch {
+    return null // z. B. ein einzelnes Ersatzzeichen: encodeURIComponent wirft
+  }
   return konzept.guestAttachAllowed(src) ? src : null
 }
 
 /** So lange (ms) nach dem Einhängen darf der Gast ohne `dom-ready`/`did-stop-loading` bleiben; danach gilt das Anhängen als verweigert. */
 export const guestMountTimeoutMs = 5000
-
-/** Ist die Frist für das erste Laden des Gasts abgelaufen (`loaded` = `dom-ready` oder `did-stop-loading` kam)? */
-export function guestMountOverdue(loaded: boolean, mountedAt: number, now: number): boolean {
-  return !loaded && now - mountedAt >= guestMountTimeoutMs
-}
 
 /** Hinweis statt Seite: fehlender Gastbereich und nie geladener Gast zeigen denselben Text, ein beendeter Gast einen eigenen. */
 export function guestNoticeText(kind: 'missing' | 'timeout' | 'gone'): string {

@@ -96,6 +96,9 @@ function FlaecheViewer({ path, active }: { path: string; active: boolean }) {
       cancelledAtRef.current = null
       setPending(null)
       setState({ kind: 'loading' })
+      setGone(null)
+      setLoadedKey(null)
+      setVersion(0)
       setFileText(null)
     }
 
@@ -201,13 +204,15 @@ function FlaecheViewer({ path, active }: { path: string; active: boolean }) {
       ready = true
       setLoadedKey(guestKey)
     }
-    const onGone = () => {
+    // Every removal path (event or timeout) discards a pending confirmation and late existence checks.
+    const end = (kind: 'gone' | 'timeout') => {
       generationRef.current += 1
       setPending((p) => nextPendingRequest(p, { type: 'reset' }))
-      setGone({ key: guestKey, kind: 'gone' })
+      setGone({ key: guestKey, kind })
     }
+    const onGone = () => end('gone')
     const timer = setTimeout(() => {
-      if (!ready) setGone({ key: guestKey, kind: 'timeout' })
+      if (!ready) end('timeout')
     }, guestMountTimeoutMs)
     el.addEventListener('dom-ready', onLoaded)
     el.addEventListener('did-stop-loading', onLoaded)

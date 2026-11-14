@@ -1,5 +1,5 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
-import { afterEach, expect, it } from 'vitest'
+import { afterEach, expect, it, vi } from 'vitest'
 import ansichtQuelltext from './html-file-viewer.tsx?raw'
 import { FileViewerSourceContext, type FileViewerSource } from './file-viewer-source'
 import { HtmlFileViewer } from './html-file-viewer'
@@ -48,11 +48,10 @@ it('Wissens-HTML: Gast mit Adresse und Partition statt Rahmen, Kopfzeile ohne "I
     if (!el) throw new Error('kein Gast')
     return el
   })
+  // Genau diese Attribute und nichts sonst: Adresse, Partition (nicht persistent) und Größe.
+  expect(gast.getAttributeNames().sort()).toEqual(['partition', 'src', 'style'])
   expect(gast.getAttribute('src')).toBe('app://workspace/knowledge/Konzepte/k.html?v=0')
   expect(gast.getAttribute('partition')).toBe('konzept')
-  for (const verboten of ['allowpopups', 'nodeintegration', 'preload', 'webpreferences', 'disablewebsecurity']) {
-    expect(gast.hasAttribute(verboten), verboten).toBe(false)
-  }
   expect(container.querySelector('iframe')).toBeNull()
   expect(await screen.findByText('Mein Konzept')).toBeInTheDocument()
   expect(screen.getByText('Im Graphen zeigen')).toBeInTheDocument()
@@ -91,32 +90,13 @@ it('Gast beendet: Element weg, Hinweis, "Neu laden" hängt einen neuen Gast mit 
   expect(neu).not.toBe(gast)
 })
 
-it('Gast ohne dom-ready nach 5 s: Hinweis "nicht anzeigen" mit "Neu laden"', async () => {
-  mitGast(true)
-  const { container } = zeige('knowledge/Konzepte/k.html')
-  await waitFor(() => {
-    if (!container.querySelector('webview')) throw new Error('kein Gast')
-  })
-  expect(await screen.findByText('Konzepte lassen sich hier nicht anzeigen.', {}, { timeout: 7000 })).toBeInTheDocument()
-  expect(screen.getByText('Neu laden')).toBeInTheDocument()
-  expect(container.querySelector('webview')).toBeNull()
-}, 10_000)
-
-it('dom-ready vor Ablauf der Frist: kein Hinweis', async () => {
-  mitGast(true)
-  const { container } = zeige('knowledge/Konzepte/k.html')
-  const gast = await waitFor(() => {
+function holeGast(container: HTMLElement) {
+  return waitFor(() => {
     const el = container.querySelector('webview')
     if (!el) throw new Error('kein Gast')
     return el
   })
-  act(() => {
-    gast.dispatchEvent(new Event('dom-ready'))
-  })
-  await new Promise((r) => setTimeout(r, 5300))
-  expect(container.querySelector('webview')).not.toBeNull()
-  expect(screen.queryByText('Konzepte lassen sich hier nicht anzeigen.')).not.toBeInTheDocument()
-}, 10_000)
+}
 
 function sende(gast: Element, channel: string, args: unknown[]) {
   const ev = Object.assign(new Event('ipc-message'), { channel, args })
@@ -124,6 +104,112 @@ function sende(gast: Element, channel: string, args: unknown[]) {
     gast.dispatchEvent(ev)
   })
 }
+
+const LINK = { type: 'rowboat:link-oeffnen', url: 'https://a.example/x' }
+
+it('Gast ohne dom-ready nach 5 s: Hinweis "nicht anzeigen" mit "Neu laden"', async () => {
+  vi.useFakeTimers({ shouldAdvanceTime: true })
+  try {
+    mitGast(true)
+    const { container } = zeige('knowledge/Konzepte/k.html')
+    await holeGast(container)
+    act(() => {
+      vi.advanceTimersByTime(4900)
+    })
+    expect(container.querySelector('webview')).not.toBeNull()
+    act(() => {
+      vi.advanceTimersByTime(200)
+    })
+    expect(await screen.findByText('Konzepte lassen sich hier nicht anzeigen.')).toBeInTheDocument()
+    expect(screen.getByText('Neu laden')).toBeInTheDocument()
+    expect(container.querySelector('webview')).toBeNull()
+  } finally {
+    vi.useRealTimers()
+  }
+})
+
+it('Zeitüberschreitung setzt eine offene Bestätigung zurück', async () => {
+  vi.useFakeTimers({ shouldAdvanceTime: true })
+  try {
+    mitGast(true)
+    const { container } = zeige('knowledge/Konzepte/k.html')
+    const gast = await holeGast(container)
+    sende(gast, 'konzept', [LINK])
+    expect(await screen.findByText('Link öffnen?')).toBeInTheDocument()
+    act(() => {
+      vi.advanceTimersByTime(5100)
+    })
+    expect(await screen.findByText('Konzepte lassen sich hier nicht anzeigen.')).toBeInTheDocument()
+    expect(screen.queryByText('Link öffnen?')).not.toBeInTheDocument()
+  } finally {
+    vi.useRealTimers()
+  }
+})
+
+it('dom-ready vor Ablauf der Frist: kein Hinweis', async () => {
+  vi.useFakeTimers({ shouldAdvanceTime: true })
+  try {
+    mitGast(true)
+    const { container } = zeige('knowledge/Konzepte/k.html')
+    const gast = await holeGast(container)
+    act(() => {
+      gast.dispatchEvent(new Event('dom-ready'))
+    })
+    act(() => {
+      vi.advanceTimersByTime(6000)
+    })
+    expect(container.querySelector('webview')).not.toBeNull()
+    expect(screen.queryByText('Konzepte lassen sich hier nicht anzeigen.')).not.toBeInTheDocument()
+  } finally {
+    vi.useRealTimers()
+  }
+})
+
+it('close und destroyed führen wie render-process-gone zu "angehalten"', async () => {
+  for (const name of ['close', 'destroyed']) {
+    mitGast(true)
+    const { container } = zeige('knowledge/Konzepte/k.html')
+    const gast = await holeGast(container)
+    sende(gast, 'konzept', [LINK])
+    expect(await screen.findByText('Link öffnen?')).toBeInTheDocument()
+    act(() => {
+      gast.dispatchEvent(new Event(name))
+    })
+    expect(await screen.findByText('Dieses Konzept wurde angehalten.'), name).toBeInTheDocument()
+    expect(screen.queryByText('Link öffnen?'), name).not.toBeInTheDocument()
+    expect(container.querySelector('webview'), name).toBeNull()
+    cleanup()
+  }
+})
+
+it('eine Nachricht eines alten Elements nach dem Neu-Einhängen wird ignoriert', async () => {
+  mitGast(true)
+  const { container } = zeige('knowledge/Konzepte/k.html')
+  const alt = await holeGast(container)
+  act(() => {
+    alt.dispatchEvent(new Event('close'))
+  })
+  fireEvent.click(await screen.findByText('Neu laden'))
+  const neu = await waitFor(() => {
+    const el = container.querySelector('webview')
+    if (!el || el === alt) throw new Error('noch kein neuer Gast')
+    return el
+  })
+  sende(alt, 'konzept', [LINK])
+  expect(screen.queryByText('Link öffnen?')).not.toBeInTheDocument()
+  sende(neu, 'konzept', [LINK])
+  expect(await screen.findByText('Link öffnen?')).toBeInTheDocument()
+})
+
+it('Pfad mit großem "Knowledge/": kein Gast, Hinweis (fail-closed)', async () => {
+  mitGast(true)
+  const { container } = zeige('Knowledge/Konzepte/k.html')
+  // Das Gate der Ansicht (isKnowledgeHtmlPath) lässt den Pfad durch, eine Gast-Adresse gibt es nicht.
+  expect(await screen.findByText('Konzepte lassen sich hier nicht anzeigen.')).toBeInTheDocument()
+  expect(container.querySelector('webview')).toBeNull()
+  expect(container.querySelector('iframe')).toBeNull()
+})
+
 
 it('ipc-message: nur Kanal "konzept" mit genau einem gültigen Argument zeigt die Bestätigung', async () => {
   mitGast(true)
