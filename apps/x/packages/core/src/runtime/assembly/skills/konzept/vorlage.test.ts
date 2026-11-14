@@ -22,9 +22,19 @@ describe('videoKonzeptSeite', () => {
     expect(readKonzept(html)).toEqual({ daten, fehler: [] });
     expect(checkVideoKonzept(readKonzept(html).daten!.video)).toEqual([]);
     // Die Zeile hängt nur an einem gesetzten Auftrag und steht nicht in der Liste der Warnungen.
-    expect(html).toContain("if (v.auftrag) wurzel.appendChild(el('p', 'leise', 'Übergeben als Auftrag ' + v.auftrag));");
+    expect(html).toContain("'Übergeben als Auftrag ' + v.auftrag");
     const hinweise = html.slice(html.indexOf('var hinweise = []'), html.indexOf('if (hinweise.length)'));
     expect(hinweise).not.toMatch(/auftrag/i);
+  });
+
+  it('Seite warnt wie der Check: ganze Minuten, Zielgruppe 300, Kernaussage+Abschluss 4000; Auftrag nur bei 8 Hex', () => {
+    const html = videoKonzeptSeite({ art: 'videokonzept', bezuege: [], video: VIDEO }, 't');
+    expect(html).toContain('ZIELGRUPPE_MAX = 300');
+    expect(html).toContain('KERN_ABSCHLUSS_MAX = 4000');
+    expect(html).toContain("v.minuten % 1 !== 0) hinweise.push('Die Länge soll eine ganze Zahl von Minuten sein.')");
+    expect(html).toContain("v.zielgruppe.length > ZIELGRUPPE_MAX) hinweise.push('Die Zielgruppe soll höchstens ' + ZIELGRUPPE_MAX + ' Zeichen lang sein.')");
+    expect(html).toContain("(v.kernaussage.trim() + '\\n\\n' + v.abschluss.trim()).length > KERN_ABSCHLUSS_MAX) hinweise.push('Kernaussage und Abschluss sollen zusammen höchstens ' + KERN_ABSCHLUSS_MAX + ' Zeichen lang sein.')");
+    expect(html).toContain("if (typeof v.auftrag === 'string' && /^[0-9a-f]{8}$/.test(v.auftrag)) wurzel.appendChild(el('p', 'leise', 'Übergeben als Auftrag ' + v.auftrag));");
   });
 
   it('ein </script> in den Daten bricht den Block nicht', () => {

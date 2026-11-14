@@ -99,6 +99,18 @@ describe('konzept', () => {
       expect(checkVideoKonzept({ ...VIDEO, auftrag: falsch }), String(falsch)).toHaveLength(1)
     }
   })
+  it('Grenzen wie die Sales-Annahme: ganze Minuten, Zielgruppe 300, Kernaussage+Abschluss 4000', () => {
+    expect(checkVideoKonzept({ ...VIDEO, minuten: 4.5 })).toEqual(['Die Länge muss eine ganze Zahl von Minuten sein.'])
+    expect(checkVideoKonzept({ ...VIDEO, minuten: 5 })).toEqual([])
+    expect(checkVideoKonzept({ ...VIDEO, zielgruppe: 'z'.repeat(300) })).toEqual([])
+    expect(checkVideoKonzept({ ...VIDEO, zielgruppe: 'z'.repeat(301) })).toEqual(['Die Zielgruppe darf höchstens 300 Zeichen lang sein.'])
+    expect(checkVideoKonzept({ ...VIDEO, kernaussage: 'k'.repeat(1999), abschluss: 'a'.repeat(1999) })).toEqual([])
+    expect(checkVideoKonzept({ ...VIDEO, kernaussage: 'k'.repeat(1999), abschluss: 'a'.repeat(2000) })).toEqual([
+      'Kernaussage und Abschluss dürfen zusammen höchstens 4000 Zeichen lang sein.',
+    ])
+    // jede Hälfte wird getrimmt, bevor gezählt wird
+    expect(checkVideoKonzept({ ...VIDEO, kernaussage: ` ${'k'.repeat(1999)} `, abschluss: `${'a'.repeat(1999)}  ` })).toEqual([])
+  })
   it('konzeptUebergabeAnzeige liefert genau die Felder der Rückfrage', () => {
     const daten: KonzeptDaten = { art: 'videokonzept', bezuege: [], video: { ...VIDEO, auftrag: 'a1b2c3d4' } as VideoKonzept }
     expect(konzeptUebergabeAnzeige(daten, 'knowledge/Konzepte/K.html')).toEqual({

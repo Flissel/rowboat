@@ -353,15 +353,30 @@ function textLaenge(v: unknown, min: number, max: number): boolean {
 
 const AUFTRAG_NUMMER = /^[0-9a-f]{8}$/
 
+/**
+ * Prüft das Videokonzept so streng, wie die Annahme in Sales es verlangt. Die Meldungen kommen in fester Reihenfolge
+ * (die Reihenfolge ist Teil des Vertrags mit dem Python-Nachbau): thema, zielgruppe, minuten, hook, kernaussage, abschluss,
+ * Kernaussage+Abschluss, auftrag, firma, stufen, Szenenzahl, kurz, bildart, notiz. Pro Feld höchstens eine Meldung.
+ * Längen zählen in UTF-16-Einheiten, `trim` ist `String.prototype.trim`.
+ */
 export function checkVideoKonzept(v: unknown): string[] {
   if (!isRecord(v)) return ['Das Videokonzept fehlt oder ist kein Objekt.']
   const f: string[] = []
   if (!textLaenge(v.thema, 3, 300)) f.push('Das Thema muss 3 bis 300 Zeichen lang sein.')
   if (!textLaenge(v.zielgruppe, 1, Infinity)) f.push('Die Zielgruppe fehlt.')
+  else if ((v.zielgruppe as string).length > 300) f.push('Die Zielgruppe darf höchstens 300 Zeichen lang sein.')
   if (typeof v.minuten !== 'number' || !(v.minuten >= 3 && v.minuten <= 5)) f.push('Die Länge muss zwischen 3 und 5 Minuten liegen.')
+  else if (!Number.isInteger(v.minuten)) f.push('Die Länge muss eine ganze Zahl von Minuten sein.')
   if (!textLaenge(v.hook, 1, Infinity)) f.push('Der Hook fehlt.')
   if (!textLaenge(v.kernaussage, 1, Infinity)) f.push('Die Kernaussage fehlt.')
   if (!textLaenge(v.abschluss, 1, Infinity)) f.push('Der Abschluss fehlt.')
+  if (
+    textLaenge(v.kernaussage, 1, Infinity) &&
+    textLaenge(v.abschluss, 1, Infinity) &&
+    (v.kernaussage as string).trim().length + 2 + (v.abschluss as string).trim().length > 4000 // trim + '\n\n' + trim
+  ) {
+    f.push('Kernaussage und Abschluss dürfen zusammen höchstens 4000 Zeichen lang sein.')
+  }
   if (v.auftrag !== null && !(typeof v.auftrag === 'string' && AUFTRAG_NUMMER.test(v.auftrag))) {
     f.push('Der Auftrag muss leer (null) oder eine Nummer aus genau 8 Zeichen 0-9 und a-f (klein) sein.')
   }
