@@ -57,6 +57,7 @@ import {
   createBackstopState,
   frameNavigationDecision,
   htmlResponseHeaders,
+  KONZEPT_GAST_ARG,
   isFrameChainConfined,
   isKnowledgeFrameUrl,
   konzeptDocumentKey,
@@ -90,6 +91,7 @@ import { setupZoomShortcuts } from "./zoom.js";
 import { initMeetingPopup, showMeetingPopup } from "./meeting-popup.js";
 import { initQuickAsk, onAppWindowClosed } from "./quick-ask.js";
 import { embedRequested, startEmbedHost, stopEmbedHost } from "./embed-host.js";
+import { prepareKonzeptGast, setupKonzeptGast } from "./konzept-gast.js";
 
 // Captured as early as possible so it reflects actual process start. Used to
 // gate grace-eligible notifications (e.g. the burst of background-task
@@ -217,6 +219,11 @@ const preloadPath = app.isPackaged
   ? path.join(__dirname, "../preload/dist/preload.js")
   : path.join(__dirname, "../../../preload/dist/preload.js");
 console.log("preloadPath", preloadPath);
+
+// Vorschalt-Skript der Konzept-Gaeste (<webview partition="konzept">), gebaut neben dem App-Preload.
+const konzeptGastPreloadPath = app.isPackaged
+  ? path.join(__dirname, "../preload/dist/konzept-gast.js")
+  : path.join(__dirname, "../../../preload/dist/konzept-gast.js");
 
 const rendererPath = app.isPackaged
   ? path.join(__dirname, "../renderer/dist") // Production
@@ -680,6 +687,9 @@ function configureKnowledgeHtmlRequestBackstop(ses: Session): void {
 }
 
 function createWindow(options: { startHidden?: boolean } = {}) {
+  // Konzept-Flaeche: Gast-Sitzung einmal je Prozess einrichten, bevor ein Fenster Gaeste anhaengen kann. Nur wenn das
+  // gelang, bekommt das Fenster <webview> und das Kennzeichen fuer die Oberflaeche (sonst Hinweis statt Seite).
+  const konzeptGast = prepareKonzeptGast({ serve: handleAppRequest, guestPreloadPath: konzeptGastPreloadPath });
   const win = new BrowserWindow({
     width: 1280,
     height: 800,
@@ -699,8 +709,11 @@ function createWindow(options: { startHidden?: boolean } = {}) {
       // Enable Chromium's built-in PDFium plugin so <iframe src="*.pdf">
       // renders PDFs natively (zoom/scroll/print toolbar included).
       plugins: true,
+      webviewTag: konzeptGast,
+      additionalArguments: konzeptGast ? [KONZEPT_GAST_ARG] : [],
     },
   });
+  setupKonzeptGast(win);
 
   configureSessionPermissions(session.defaultSession);
   configureAppDisplayMediaHandler(session.defaultSession);

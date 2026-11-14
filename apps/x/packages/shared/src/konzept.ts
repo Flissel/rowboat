@@ -2,10 +2,11 @@
 
 /**
  * Kein-Netz-Regel für Wissens-HTML (R40): CSP plus `sandbox allow-scripts` (das Dokument ist auch dann
- * abgeschottet, wenn das iframe-Attribut fehlt) und `webrtc 'block'`. Gilt nur für HTML unter `knowledge/` (R38).
+ * abgeschottet, wenn das iframe-Attribut fehlt). Gilt nur für HTML unter `knowledge/` (R38). `webrtc 'block'` entfiel:
+ * Chromium 142 kennt die Anweisung nicht; WebRTC sperrt der Gastbereich (Proxy der Partition plus WebRTC-Vorgabe).
  */
 export const WORKSPACE_HTML_CSP =
-  "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:; font-src data:; media-src data: blob:; form-action 'none'; base-uri 'none'; sandbox allow-scripts; webrtc 'block'"
+  "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:; font-src data:; media-src data: blob:; form-action 'none'; base-uri 'none'; sandbox allow-scripts"
 
 export const KONZEPT_BLOCK_ID = 'rowboat-konzept'
 export const KONZEPT_MAX_BYTES = 1_048_576
@@ -606,4 +607,123 @@ export function backstopDecision(r: {
   if (s !== null && UNBEKANNT_FREI.has(s)) return false
   if (r.appUrl && gleicherHost(r.url, r.appUrl)) return false
   return konzeptInAnsicht(r.confined, r.recentlyConfined, r.now)
+}
+
+// ---- Gastbereich: Konzepte in einem <webview> der Partition `konzept` (Hauptprozess, Vorschalt-Skript, Oberfläche) ----
+
+/** Nicht dauerhafte Partition (ohne `persist:`) der Konzept-Gäste; nur sie bekommt Proxy und Sperren. */
+export const KONZEPT_PARTITION = 'konzept'
+/** Zusatzargument im App-Fenster (`additionalArguments`): der Hauptprozess hat den Gastbereich eingerichtet. */
+export const KONZEPT_GAST_ARG = '--rowboat-konzept-gast'
+/** Kanal, auf dem das Vorschalt-Skript des Gasts Nachrichten an das `<webview>`-Element reicht (`sendToHost`). */
+export const KONZEPT_GAST_KANAL = 'konzept'
+/** Längstes Feld (Zeichen) einer weiterzureichenden Gast-Nachricht. */
+export const KONZEPT_GAST_FELD_MAX = 4000
+
+/**
+ * Darf ein `<webview>` mit dieser Adresse angehängt werden? Nur ein Dokument unter `app://workspace/knowledge/`
+ * (Kanal-Quarantäne eingeschlossen). Schema und Host ohne Groß/Klein; der Pfad (ohne Query/Fragment) zählt roh UND
+ * prozent-dekodiert, `\` trennt wie `/`, `.`-Segmente entfallen (wie {@link isKnowledgeFrameUrl}). Anders als dort
+ * gilt hier "im Zweifel nein": `..`, ungültige Kodierung, fehlender Dateiname, andere Schemata/Hosts -> false.
+ */
+export function guestAttachAllowed(src: string): boolean {
+  const m = /^app:\/\/workspace(?=[/?#]|$)/i.exec(src)
+  if (m === null) return false
+  const roh = src.slice(m[0].length).split(/[?#]/)[0]
+  let dekodiert: string
+  try {
+    dekodiert = decodeURIComponent(roh)
+  } catch {
+    return false
+  }
+  return [segmente(roh), segmente(dekodiert)].every(
+    (segs) => !segs.includes('..') && segs.length >= 2 && segName(segs[0]) === 'knowledge',
+  )
+}
+
+/** Darf `app://` in der Gast-Sitzung diese Adresse ausliefern? Nur Wissens-Dokumente, sonst 403. */
+export function guestProtocolAllowed(url: string): boolean {
+  return guestAttachAllowed(url)
+}
+
+/** Die Rechte, die der Hauptprozess jedem Konzept-Gast erzwingt (unabhängig von den Attributen des Tags). */
+export function guestWebPreferences(): {
+  nodeIntegration: false
+  nodeIntegrationInSubFrames: false
+  contextIsolation: true
+  sandbox: true
+  plugins: false
+  webviewTag: false
+  partition: 'konzept'
+} {
+  return {
+    nodeIntegration: false,
+    nodeIntegrationInSubFrames: false,
+    contextIsolation: true,
+    sandbox: true,
+    plugins: false,
+    webviewTag: false,
+    partition: KONZEPT_PARTITION,
+  }
+}
+
+/** Schema und Host klein, Pfad dekodiert, ohne Query und Fragment; null, wenn nicht lesbar. */
+function dokumentSchluessel(url: string): string | null {
+  const m = /^([a-z][a-z0-9+.-]*):\/\/([^/?#]*)([^?#]*)/i.exec(url)
+  if (m === null) return null
+  try {
+    return `${m[1].toLowerCase()}://${m[2].toLowerCase()}${decodeURIComponent(m[3])}`
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Anfrage in der Gast-Sitzung erlauben? `data:`, `blob:`, `about:` bleiben im Dokument -> ja. Sonst nur das eigene
+ * Hauptdokument des Gasts (ohne Query/Fragment, Schema/Host ohne Groß/Klein verglichen), und nur wenn es eine
+ * Wissens-Adresse ist ({@link guestAttachAllowed}). Ist das Gast-Dokument unbekannt (`null`): nur ein Wissens-Dokument.
+ */
+export function guestRequestAllowed(requestUrl: string, guestDocumentUrl: string | null): boolean {
+  const s = schema(requestUrl)
+  if (s !== null && DOKUMENT_SCHEMATA.has(s)) return true
+  if (!guestAttachAllowed(requestUrl)) return false
+  if (guestDocumentUrl === null) return true
+  if (!guestAttachAllowed(guestDocumentUrl)) return false
+  const a = dokumentSchluessel(requestUrl)
+  return a !== null && a === dokumentSchluessel(guestDocumentUrl)
+}
+
+/** Schema und Host klein, Rest (Pfad, Query, Fragment) unverändert. */
+function adresseNormiert(url: string): string | null {
+  const m = /^([a-z][a-z0-9+.-]*):\/\/([^/?#]*)(.*)$/is.exec(url)
+  return m === null ? null : `${m[1].toLowerCase()}://${m[2].toLowerCase()}${m[3]}`
+}
+
+/**
+ * Darf der Gast navigieren? Nur das erste Laden: Ziel gleich der angehängten Adresse (Query eingeschlossen, Schema/Host
+ * ohne Groß/Klein), solange der Gast noch kein Dokument übernommen hat, und nur für eine Wissens-Adresse. Danach nie;
+ * neu geladen wird durch Neu-Einhängen des Elements (neuer Gast).
+ */
+export function guestNavigationAllowed(targetUrl: string, attachedSrc: string | null, committed: boolean): boolean {
+  if (committed || attachedSrc === null || !guestAttachAllowed(attachedSrc)) return false
+  const ziel = adresseNormiert(targetUrl)
+  return ziel !== null && ziel === adresseNormiert(attachedSrc)
+}
+
+export type GuestMessage = { type: 'rowboat:link-oeffnen'; url: string } | { type: 'rowboat:notiz-oeffnen'; pfad: string }
+
+function feld(v: unknown): v is string {
+  return typeof v === 'string' && v.length <= KONZEPT_GAST_FELD_MAX
+}
+
+/**
+ * Form- und Längenprüfung einer Nachricht der Konzept-Seite (`parent.postMessage({ type, url | pfad }, '*')`), für das
+ * Vorschalt-Skript des Gasts und die Oberfläche. Liefert nur `{ type, url }` bzw. `{ type, pfad }` als Zeichenketten
+ * (höchstens KONZEPT_GAST_FELD_MAX Zeichen), sonst null.
+ */
+export function forwardableGuestMessage(data: unknown): GuestMessage | null {
+  if (!isRecord(data)) return null
+  if (data.type === 'rowboat:link-oeffnen' && feld(data.url)) return { type: 'rowboat:link-oeffnen', url: data.url }
+  if (data.type === 'rowboat:notiz-oeffnen' && feld(data.pfad)) return { type: 'rowboat:notiz-oeffnen', pfad: data.pfad }
+  return null
 }

@@ -23,6 +23,15 @@ import {
   noteFramesAttached,
   CONFINED_GRACE_MS,
   workspaceResponseDecision,
+  KONZEPT_PARTITION,
+  KONZEPT_GAST_ARG,
+  KONZEPT_GAST_KANAL,
+  guestAttachAllowed,
+  guestWebPreferences,
+  guestRequestAllowed,
+  guestProtocolAllowed,
+  guestNavigationAllowed,
+  forwardableGuestMessage,
 } from './konzept.js'
 
 const SEITE = (block: string) => `<!doctype html><html><head><title>Mein &amp; Konzept</title>
@@ -87,7 +96,7 @@ describe('konzept', () => {
   })
   it('die Regel lautet wörtlich wie in R40', () => {
     expect(WORKSPACE_HTML_CSP).toBe(
-      "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:; font-src data:; media-src data: blob:; form-action 'none'; base-uri 'none'; sandbox allow-scripts; webrtc 'block'",
+      "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:; font-src data:; media-src data: blob:; form-action 'none'; base-uri 'none'; sandbox allow-scripts",
     )
     expect(htmlResponseHeaders()).toEqual({
       'Content-Type': 'text/html; charset=utf-8',
@@ -352,4 +361,86 @@ describe('konzept', () => {
     const html = '<title>t</title>' + 'x'.repeat(KONZEPT_LESE_MAX + 10) + '<p>ende</p>'
     expect(htmlVisibleText(html).endsWith('ende')).toBe(false)
   })
+})
+
+describe('Gastbereich', () => {
+  it('kennt Partition, Kennzeichen und Kanal', () => {
+    expect(KONZEPT_PARTITION).toBe('konzept')
+    expect(KONZEPT_GAST_KANAL).toBe('konzept')
+    expect(KONZEPT_GAST_ARG).toBe('--rowboat-konzept-gast')
+  })
+  it('lässt nur Wissens-Dokumente als Gast zu', () => {
+    expect(guestAttachAllowed('app://workspace/knowledge/Konzepte/k.html')).toBe(true)
+    expect(guestAttachAllowed('app://workspace/knowledge/Konzepte/k.html?v=3')).toBe(true)
+    expect(guestAttachAllowed('APP://WORKSPACE/knowledge/Kanal/q.html')).toBe(true)
+    for (const u of ['https://example.com/', 'file:///c:/x.html', 'app://-/index.html', 'app://workspace/bg-tasks/r/index.html',
+      'app://workspace/knowledge/../config/x.html', 'app://workspace/knowledge%2F..%2Fconfig/x.html', 'app://space-document/a/b/c', 'javascript:1', '', 'app://workspace/'])
+      expect(guestAttachAllowed(u)).toBe(false)
+  })
+  it('lässt keine Grenzfälle als Gast zu', () => {
+    for (const u of ['app://workspace/knowledge', 'app://workspace/knowledge/', 'app://workspace/knowledge/a/%E0%A4%A.html',
+      'app://workspace/knowledge/a/%2e%2e/%2e%2e/config/x.html', 'app://workspace/knowledge\\..\\config\\x.html',
+      'app://workspacex/knowledge/k.html', 'app://workspace.evil/knowledge/k.html', 'app://workspace@x/knowledge/k.html',
+      ' app://workspace/knowledge/k.html', 'blob:app://workspace/knowledge/k.html'])
+      expect(guestAttachAllowed(u), u).toBe(false)
+    expect(guestAttachAllowed('app://workspace/Knowledge./Konzepte/k.html')).toBe(true)
+    expect(guestAttachAllowed('app://workspace/knowledge/Konzepte/k%20k.html#x')).toBe(true)
+  })
+  it('liefert in der Gast-Sitzung nur Wissens-Adressen aus', () => {
+    expect(guestProtocolAllowed('app://workspace/knowledge/Konzepte/k.html?v=1')).toBe(true)
+    for (const u of ['app://-/index.html', 'app://workspace/config/x.json', 'app://workspace/knowledge/../config/x.json',
+      'app://space-blob/a/b/c', 'app://file-preview/x', 'app://workspace/'])
+      expect(guestProtocolAllowed(u), u).toBe(false)
+  })
+  it('erzwingt die Gast-Rechte', () => {
+    expect(guestWebPreferences()).toEqual({ nodeIntegration: false, nodeIntegrationInSubFrames: false, contextIsolation: true, sandbox: true, plugins: false, webviewTag: false, partition: 'konzept' })
+  })
+  it('erlaubt in der Gast-Sitzung nur das eigene Dokument', () => {
+    const doc = 'app://workspace/knowledge/Konzepte/k.html?v=2'
+    expect(guestRequestAllowed('app://workspace/knowledge/Konzepte/k.html?v=2', doc)).toBe(true)
+    expect(guestRequestAllowed('data:image/png;base64,AA', doc)).toBe(true)
+    expect(guestRequestAllowed('blob:app://workspace/1', doc)).toBe(true)
+    for (const u of ['app://workspace/knowledge/Konzepte/anderes.html', 'app://-/index.html', 'https://example.com/', 'http://127.0.0.1:8765/x', 'ws://127.0.0.1/', 'file:///c:/x'])
+      expect(guestRequestAllowed(u, doc)).toBe(false)
+    expect(guestRequestAllowed('app://workspace/knowledge/Konzepte/k.html', null)).toBe(true)   // erstes Laden: Wissens-Dokument
+    expect(guestRequestAllowed('https://example.com/', null)).toBe(false)
+  })
+  it('vergleicht das eigene Dokument ohne Abfrage, Fragment und Groß/Klein von Schema und Host', () => {
+    const doc = 'APP://WORKSPACE/knowledge/Konzepte/k%20k.html?v=2#oben'
+    expect(guestRequestAllowed('app://workspace/knowledge/Konzepte/k%20k.html?v=9', doc)).toBe(true)
+    expect(guestRequestAllowed('app://workspace/knowledge/Konzepte/k k.html', doc)).toBe(true)
+    expect(guestRequestAllowed('app://workspace/knowledge/konzepte/k%20k.html', doc)).toBe(false)
+    // Ein Dokument außerhalb von knowledge/ gilt nie als "eigenes Dokument"
+    expect(guestRequestAllowed('https://example.com/a', 'https://example.com/a')).toBe(false)
+    expect(guestRequestAllowed('app://-/index.html', 'app://-/index.html')).toBe(false)
+    expect(guestRequestAllowed('app://workspace/knowledge/a/%E0%A4%A.html', 'app://workspace/knowledge/a/%E0%A4%A.html')).toBe(false)
+    expect(guestRequestAllowed('about:blank', null)).toBe(true)
+    expect(guestRequestAllowed('', null)).toBe(false)
+    expect(guestRequestAllowed('devtools://devtools/x', doc)).toBe(false)
+  })
+  it('lässt nur das erste Laden der angehängten Adresse navigieren', () => {
+    const src = 'app://workspace/knowledge/Konzepte/k.html?v=2'
+    expect(guestNavigationAllowed(src, src, false)).toBe(true)
+    expect(guestNavigationAllowed('APP://WORKSPACE/knowledge/Konzepte/k.html?v=2', src, false)).toBe(true)
+    expect(guestNavigationAllowed(src, src, true)).toBe(false)
+    expect(guestNavigationAllowed('app://workspace/knowledge/Konzepte/k.html?v=3', src, false)).toBe(false)
+    expect(guestNavigationAllowed('app://workspace/knowledge/Konzepte/k.html', src, false)).toBe(false)
+    expect(guestNavigationAllowed('https://example.com/', src, false)).toBe(false)
+    expect(guestNavigationAllowed('app://workspace/config/x.html', 'app://workspace/config/x.html', false)).toBe(false)
+    expect(guestNavigationAllowed(src, null, false)).toBe(false)
+  })
+  it('prüft weiterzureichende Nachrichten', () => {
+    expect(forwardableGuestMessage({ type: 'rowboat:link-oeffnen', url: 'https://example.com/a' })).toEqual({ type: 'rowboat:link-oeffnen', url: 'https://example.com/a' })
+    expect(forwardableGuestMessage({ type: 'rowboat:notiz-oeffnen', pfad: 'knowledge/Marke/Marke.md', extra: 1 })).toEqual({ type: 'rowboat:notiz-oeffnen', pfad: 'knowledge/Marke/Marke.md' })
+    for (const d of [null, 'x', { type: 'anderes' }, { type: 'rowboat:link-oeffnen', url: 5 }, { type: 'rowboat:link-oeffnen', url: 'a'.repeat(4001) }, { type: 'rowboat:notiz-oeffnen' }])
+      expect(forwardableGuestMessage(d)).toBeNull()
+  })
+  it('verwirft Nachrichten falscher Form', () => {
+    expect(forwardableGuestMessage({ type: 'rowboat:link-oeffnen', url: 'a'.repeat(4000) })).toEqual({ type: 'rowboat:link-oeffnen', url: 'a'.repeat(4000) })
+    for (const d of [undefined, 5, [], ['rowboat:link-oeffnen'], { type: 'rowboat:link-oeffnen', pfad: 'x' }, { type: 'rowboat:notiz-oeffnen', url: 'x' },
+      { type: 'rowboat:notiz-oeffnen', pfad: { toString: () => 'x' } }, { type: 'rowboat:notiz-oeffnen', pfad: 'p'.repeat(4001) },
+      { type: ['rowboat:link-oeffnen'], url: 'x' }])
+      expect(forwardableGuestMessage(d)).toBeNull()
+  })
+  it('führt webrtc nicht mehr in der Regel', () => { expect(WORKSPACE_HTML_CSP).not.toContain('webrtc'); expect(WORKSPACE_HTML_CSP).toContain('sandbox allow-scripts') })
 })
