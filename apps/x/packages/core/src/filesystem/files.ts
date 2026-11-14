@@ -59,6 +59,13 @@ export type WriteTextOptions = {
   expectedEtag?: string;
 };
 
+// Optional check evaluated INSIDE the path's queue slot, against the content
+// that is really about to be written (`next`) and what the file holds right
+// now (`current`, null when it does not exist). Return an error message to
+// refuse the write (it is thrown as an Error with exactly that text), or null
+// to allow it. Check and write are atomic per path.
+export type WriteGuard = (current: string | null, next: string) => string | null | Promise<string | null>;
+
 export type RemoveOptions = {
   recursive?: boolean;
   trash?: boolean;
@@ -84,6 +91,12 @@ const writeQueues = new Map<string, Promise<unknown>>();
 function writeQueueKey(resolvedPath: string): string {
   const key = path.resolve(resolvedPath);
   return process.platform === 'win32' ? key.toLowerCase() : key;
+}
+
+async function runWriteGuard(guard: WriteGuard | undefined, current: string | null, next: string): Promise<void> {
+  if (!guard) return;
+  const message = await guard(current, next);
+  if (message) throw new Error(message);
 }
 
 function withWriteQueue<T>(resolvedPath: string, fn: () => Promise<T>): Promise<T> {
@@ -440,13 +453,22 @@ export async function readBuffer(inputPath: string): Promise<{ buffer: Buffer; p
   };
 }
 
-export async function writeText(inputPath: string, data: string, opts?: WriteTextOptions) {
+export async function writeText(inputPath: string, data: string, opts?: WriteTextOptions, guard?: WriteGuard) {
   const resolved = resolveFilePath(inputPath);
-  return withWriteQueue(resolved.resolvedPath, () => writeTextUnqueued(inputPath, data, opts));
+  return withWriteQueue(resolved.resolvedPath, () => writeTextUnqueued(inputPath, data, opts, guard));
 }
 
-async function writeTextUnqueued(inputPath: string, data: string, opts?: WriteTextOptions) {
+async function writeTextUnqueued(inputPath: string, data: string, opts?: WriteTextOptions, guard?: WriteGuard) {
   const resolved = resolveFilePath(inputPath);
+  if (guard) {
+    let current: string | null = null;
+    try {
+      current = await fs.readFile(resolved.resolvedPath, 'utf8');
+    } catch {
+      current = null;
+    }
+    await runWriteGuard(guard, current, data);
+  }
   const atomic = opts?.atomic !== false;
   const mkdirp = opts?.mkdirp !== false;
 
@@ -525,12 +547,12 @@ async function writeBufferUnqueued(inputPath: string, data: Buffer, opts?: Write
   };
 }
 
-export async function editText(inputPath: string, oldString: string, newString: string, replaceAll = false) {
+export async function editText(inputPath: string, oldString: string, newString: string, replaceAll = false, guard?: WriteGuard) {
   const resolved = resolveFilePath(inputPath);
-  return withWriteQueue(resolved.resolvedPath, () => editTextUnqueued(inputPath, oldString, newString, replaceAll));
+  return withWriteQueue(resolved.resolvedPath, () => editTextUnqueued(inputPath, oldString, newString, replaceAll, guard));
 }
 
-async function editTextUnqueued(inputPath: string, oldString: string, newString: string, replaceAll: boolean) {
+async function editTextUnqueued(inputPath: string, oldString: string, newString: string, replaceAll: boolean, guard?: WriteGuard) {
   const resolved = resolveFilePath(inputPath);
   await assertTextFile(resolved.resolvedPath);
   const content = await fs.readFile(resolved.resolvedPath, 'utf8');
@@ -546,6 +568,7 @@ async function editTextUnqueued(inputPath: string, oldString: string, newString:
   const newContent = replaceAll
     ? content.replaceAll(oldString, newString)
     : content.replace(oldString, newString);
+  await runWriteGuard(guard, content, newContent);
   await writeTextUnqueued(inputPath, newContent, { atomic: true, mkdirp: true });
   return {
     success: true,

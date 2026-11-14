@@ -400,4 +400,78 @@ describe("filesystem files", () => {
       expect(files._pendingWriteQueueSize()).toBe(0);
     });
   });
+
+  describe("per-path write queue: key and writers", () => {
+    it("relative and absolute spelling of one file share one queue", async () => {
+      const files = await loadFiles();
+      const rel = "knowledge/Konzepte/s.html";
+      const abs = path.join(workspaceDir, "knowledge", "Konzepte", "s.html");
+      const body = Array.from({ length: 8 }, (_, i) => `<p>M${i}</p>`).join("\n") + "\n" + "x".repeat(200_000);
+      await files.writeText(rel, body);
+      const results = await Promise.all(
+        Array.from({ length: 8 }, (_, i) => files.editText(i % 2 ? rel : abs, `M${i}<`, `D${i}<`)),
+      );
+      const content = await fs.readFile(abs, "utf8");
+      for (let i = 0; i < 8; i++) {
+        expect(content).toContain(`D${i}<`);
+        expect(results[i]).toMatchObject({ success: true });
+      }
+      expect(files._pendingWriteQueueSize()).toBe(0);
+    });
+
+    it.runIf(process.platform === "win32")("different case of one path shares one queue on win32", async () => {
+      const files = await loadFiles();
+      const abs = path.join(workspaceDir, "case.html");
+      await files.writeText(abs, "<p>M0</p><p>M1</p>" + "x".repeat(200_000));
+      await Promise.all([
+        files.editText(abs, "M0<", "D0<"),
+        files.editText(abs.toUpperCase(), "M1<", "D1<"),
+      ]);
+      const content = await fs.readFile(abs, "utf8");
+      expect(content).toContain("D0<");
+      expect(content).toContain("D1<");
+    });
+
+    it("writeBuffer is ordered with editText", async () => {
+      const files = await loadFiles();
+      const abs = path.join(workspaceDir, "buf.html");
+      const [, edited] = await Promise.all([
+        files.writeBuffer(abs, Buffer.from("<p>roh</p>", "utf8")),
+        files.editText(abs, "roh", "fertig"),
+      ]);
+      expect(edited).toMatchObject({ success: true });
+      expect(await fs.readFile(abs, "utf8")).toBe("<p>fertig</p>");
+    });
+
+    it("a rejected step keeps its usual error text", async () => {
+      const files = await loadFiles();
+      const abs = path.join(workspaceDir, "nofile.html");
+      const [bad] = await Promise.allSettled([
+        files.editText(abs, "a", "b"),
+        files.writeText(abs, "<p>a</p>"),
+      ]);
+      expect(bad.status).toBe("rejected");
+      if (bad.status === "rejected") expect(String(bad.reason.message)).toMatch(/ENOENT/);
+    });
+
+    it("a write guard runs inside the slot against the real result and refuses with its text", async () => {
+      const files = await loadFiles();
+      const abs = path.join(workspaceDir, "guard.md");
+      await files.writeText(abs, "a");
+      const seen: Array<[string | null, string]> = [];
+      const guard = (current: string | null, next: string) => {
+        seen.push([current, next]);
+        return next.includes("verboten") ? "nein" : null;
+      };
+      const results = await Promise.allSettled([
+        files.editText(abs, "a", "ab", false, guard),
+        files.editText(abs, "ab", "verboten", false, guard),
+        files.writeText(abs, "neu", undefined, guard),
+      ]);
+      expect(seen).toEqual([["a", "ab"], ["ab", "verboten"], ["ab", "neu"]]);
+      expect(results[1]).toMatchObject({ status: "rejected" });
+      expect(String((results[1] as PromiseRejectedResult).reason.message)).toBe("nein");
+      expect(await fs.readFile(abs, "utf8")).toBe("neu");
+    });
+  });
 });
