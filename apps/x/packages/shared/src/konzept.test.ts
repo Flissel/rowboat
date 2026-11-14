@@ -10,9 +10,6 @@ import {
   htmlSearchText,
   konzeptBlockTexte,
   isKanalPath,
-  konzeptUebergabeAnzeige,
-  type KonzeptDaten,
-  type VideoKonzept,
   isKnowledgeHtmlPath,
   readKonzept,
   htmlResponseHeaders,
@@ -110,15 +107,6 @@ describe('konzept', () => {
     ])
     // jede Hälfte wird getrimmt, bevor gezählt wird
     expect(checkVideoKonzept({ ...VIDEO, kernaussage: ` ${'k'.repeat(1999)} `, abschluss: `${'a'.repeat(1999)}  ` })).toEqual([])
-  })
-  it('konzeptUebergabeAnzeige liefert genau die Felder der Rückfrage', () => {
-    const daten: KonzeptDaten = { art: 'videokonzept', bezuege: [], video: { ...VIDEO, auftrag: 'a1b2c3d4' } as VideoKonzept }
-    expect(konzeptUebergabeAnzeige(daten, 'knowledge/Konzepte/K.html')).toEqual({
-      thema: 'KI im Alltag', minuten: 4, stufen: 1, szenen: 8, auftrag: 'a1b2c3d4',
-    })
-    const zwei: KonzeptDaten = { ...daten, video: { ...VIDEO, stufen: [VIDEO.stufen[0], { name: 'Z', szenen: VIDEO.stufen[0].szenen.slice(0, 2) }] } as VideoKonzept }
-    expect(konzeptUebergabeAnzeige(zwei, 'p')).toEqual({ thema: 'KI im Alltag', minuten: 4, stufen: 2, szenen: 10, auftrag: null })
-    expect(() => konzeptUebergabeAnzeige({ art: 'konzept', bezuege: [] }, 'p')).toThrow()
   })
   it('readKonzept gibt video bei videokonzept unverändert zurück', () => {
     const r = readKonzept(SEITE(JSON.stringify({ art: 'videokonzept', bezuege: [], video: VIDEO })))

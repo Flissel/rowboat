@@ -416,25 +416,6 @@ export function checkVideoKonzept(v: unknown): string[] {
   return f
 }
 
-/**
- * Was die Rückfrage vor der Übergabe an die Werkbank zeigt. Rein, ohne Dateizugriff; das Videokonzept muss vorher
- * mit {@link checkVideoKonzept} geprüft sein. `pfad` gehört zum Aufruf der Karte und geht nicht in das Ergebnis ein.
- */
-export function konzeptUebergabeAnzeige(
-  k: KonzeptDaten,
-  _pfad: string,
-): { thema: string; minuten: number; stufen: number; szenen: number; auftrag: string | null } {
-  const v = k.video
-  if (v === undefined) throw new Error('Kein Videokonzept.')
-  return {
-    thema: v.thema,
-    minuten: v.minuten,
-    stufen: v.stufen.length,
-    szenen: v.stufen.reduce((n, s) => n + s.szenen.length, 0),
-    auftrag: v.auftrag,
-  }
-}
-
 const ohneEndpunkt = (x: string) => x.replace(/[. ]+$/, '')
 
 /**

@@ -85,14 +85,14 @@ Replace the title text and the JSON between the data-block tags; adapt \`bezuege
 
 ## Handing over to the Werkbank (Übergabe an die Werkbank)
 
-A finished video concept can become an order at the Video-Werkbank, which builds its first outline straight from the concept. Do this **only when the user explicitly asks** (for example "Gib das Konzept an die Werkbank"). Never offer it as a side effect of writing or changing a concept, and never hand over on your own initiative.
+A finished video concept can be handed over to the Video-Werkbank, which builds its first outline straight from the concept. The handover is only PREPARED here: the order is created later, when the user confirms it on the Sales page. Do this **only when the user explicitly asks** (for example "Gib das Konzept an die Werkbank"). Never offer it as a side effect of writing or changing a concept, and never prepare a handover on your own initiative.
 
 1. Make sure the concept is a valid video concept (see the limits above) and saved at \`knowledge/Konzepte/<Name>.html\`.
-2. If \`video.auftrag\` is already set, the concept already has an order. Say so in one sentence BEFORE handing over again, with the number, and note that a second handover creates a NEW order. Hand over only if the user still wants that.
-3. Call the tool \`rowboat-auftraege:video_auftrag_aus_konzept\` with the concept path in \`pfad\` (for example \`knowledge/Konzepte/KI im Alltag.html\`) and an empty string for \`stand\`. The app fills in \`stand\` itself; never invent a value for it. The tool reads the file itself, so you only pass the path.
-4. The app asks the user for a yes before anything is sent. Without that yes there is no order. If the user says no, or the tool returns a refusal or an error sentence, tell the user in one sentence what it said and stop — never try to work around a refusal (no second call, no other tool, no editing the file to get past it).
-5. If the tool is not available, say so in one sentence and do not claim a handover happened; do not look for another route. If the call times out or returns no answer, the result is unknown: say so, do not call again, do not write a number, and point the user to the Werkbank page to check whether an order appeared.
-6. After success, first tell the user the order number and the link from the answer. The order number is the 8-character \`auftrag\` field of the answer (never the longer \`id\`). Then write that number into the data block with \`file-editText\`: change \`"auftrag": null\` (or the previous number) to \`"auftrag": "<8-character order number>"\` and touch nothing else. Re-read the file with \`file-readText\` first if you did not just write it. If that edit fails, say so; the order exists anyway.
+2. If \`video.auftrag\` is already set, the concept already has an order. Say so in one sentence BEFORE preparing another handover, with the number, and note that a further handover would lead to a NEW order. Go on only if the user still wants that.
+3. Call the tool \`rowboat-auftraege:video_auftrag_aus_konzept\` with ONE parameter: the concept path in \`pfad\` (for example \`knowledge/Konzepte/KI im Alltag.html\`). The tool reads the file itself, so you only pass the path. It does not create an order. Its answer is either \`{ "status": "vorbereitet", "link": "<URL>", "vorgang": "<id>" }\` or \`{ "fehler": "<sentence>" }\`.
+4. On \`vorbereitet\`, tell the user plainly, in the user's language, that the handover is prepared and that the order is created only after they confirm it on the Sales page (German: "Die Übergabe ist vorbereitet. Der Auftrag entsteht erst nach der Bestätigung auf der Sales-Seite."), and give the link. Do not say that an order exists, and do not write anything into \`video.auftrag\` at this point.
+5. On \`fehler\`, show the user the sentence. If the tool is not available, say so in one sentence. If the call times out or returns no answer, the result is unknown: say so and point the user to the Sales page. In every case never claim a handover happened, never retry on your own, and never try another way to reach the service.
+6. Only if the user later tells you the order number (exactly 8 lowercase hex characters) and asks you to, enter it in the data block with \`file-editText\`: change \`"auftrag": null\` (or the previous number) to \`"auftrag": "<8-character order number>"\` and touch nothing else. Re-read the file with \`file-readText\` first if you did not just write it.
 
 Data protection: what is in the concept goes to the video model and may end up in the video. Never WRITE names, contact data or customer details into a video concept unless the user gave them. If the concept already contains such data, tell the user in one sentence what you found and ask before changing anything; do not edit the concept on your own and do not hand over until the user has decided.
 
@@ -104,7 +104,7 @@ Data protection: what is in the concept goes to the video model and may end up i
 - [ ] Nothing external (no http(s) resource, no font, no image URL); images only as \`data:\`.
 - [ ] Links and note references are click handlers with \`postMessage\`, no \`href\`/\`target\`.
 - [ ] Video concept: template used, only the data block changed, 8–15 scenes, 3–5 minutes, at most 8 stages.
-- [ ] Handover only on explicit request; the order number goes into \`video.auftrag\` only after the tool reported success.
+- [ ] Handover only on explicit request; it is only prepared, and \`video.auftrag\` is written only when the user gives you the order number.
 - [ ] No names or customer details the user did not give; one sentence to the user, no HTML in the chat, no \`app-navigation\`.
 `;
 
