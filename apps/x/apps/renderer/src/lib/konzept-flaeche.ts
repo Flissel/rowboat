@@ -144,6 +144,46 @@ export function cacheBustedUrl(url: string, version: number): string {
   return `${url}${url.includes('?') ? '&' : '?'}v=${version}`
 }
 
+// ---- Gastbereich: Konzepte im <webview> der Partition `konzept` ----
+
+/** Gibt es den Gastbereich? Nur wenn der Hauptprozess ihn bestätigt hat (Kennzeichen genau `true`) und die Laufzeit lokal ist. */
+export function guestAvailable(flag: unknown, localRuntime: boolean): boolean {
+  return flag === true && localRuntime
+}
+
+/** Mehr als Adresse und Partition bekommt das Tag nicht: Rechte, Vorschalt-Skript und Sitzung setzt der Hauptprozess. */
+export function guestElementProps(src: string): { src: string; partition: 'konzept' } {
+  return { src, partition: konzept.KONZEPT_PARTITION }
+}
+
+/**
+ * Kanonische Gast-Adresse: `app://workspace/<Segmente einzeln mit encodeURIComponent>?v=<n>`. `rel` ist der
+ * Arbeitsbereichspfad (`\` wird zu `/`), beginnt mit `knowledge`, ohne führendes `/` und ohne leere, `.`- oder
+ * `..`-Segmente. Null, wenn daraus keine Adresse wird, die der Hauptprozess anhängt (Prüfung mit derselben
+ * Funktion wie dort).
+ */
+export function guestSrc(rel: string, n: number): string | null {
+  if (!Number.isInteger(n) || n < 0) return null
+  const segs = rel.replace(/\\/g, '/').split('/')
+  if (segs.length < 2 || segs[0] !== 'knowledge') return null
+  if (segs.some((s) => s === '' || s === '.' || s === '..')) return null
+  const src = `app://workspace/${segs.map(encodeURIComponent).join('/')}?v=${n}`
+  return konzept.guestAttachAllowed(src) ? src : null
+}
+
+/** So lange (ms) nach dem Einhängen darf der Gast ohne `dom-ready`/`did-stop-loading` bleiben; danach gilt das Anhängen als verweigert. */
+export const guestMountTimeoutMs = 5000
+
+/** Ist die Frist für das erste Laden des Gasts abgelaufen (`loaded` = `dom-ready` oder `did-stop-loading` kam)? */
+export function guestMountOverdue(loaded: boolean, mountedAt: number, now: number): boolean {
+  return !loaded && now - mountedAt >= guestMountTimeoutMs
+}
+
+/** Hinweis statt Seite: fehlender Gastbereich und nie geladener Gast zeigen denselben Text, ein beendeter Gast einen eigenen. */
+export function guestNoticeText(kind: 'missing' | 'timeout' | 'gone'): string {
+  return kind === 'gone' ? 'Dieses Konzept wurde angehalten.' : 'Konzepte lassen sich hier nicht anzeigen.'
+}
+
 /**
  * Eine offene Rückfrage der Seite (Bestätigung in der Kopfzeile): Web-Link oder Notiz. `id` ist je Anfrage
  * eindeutig, `at` (Date.now) der Zeitpunkt der Anfrage für die 10-s-Regel.

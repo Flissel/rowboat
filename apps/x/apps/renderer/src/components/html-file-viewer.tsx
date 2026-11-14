@@ -4,10 +4,14 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { konzept } from '@x/shared'
 import { LOCAL_RUNTIME } from '@/lib/feature-flags'
 import {
-  cacheBustedUrl,
   canAcceptRequest,
   canConfirm,
   eventTime,
+  guestAvailable,
+  guestElementProps,
+  guestMountTimeoutMs,
+  guestNoticeText,
+  guestSrc,
   konzeptHinweise,
   linkOpenRequest,
   nextPendingRequest,
@@ -51,11 +55,13 @@ export function HtmlFileViewer({ path, active = true }: HtmlFileViewerProps) {
 function FlaecheViewer({ path, active }: { path: string; active: boolean }) {
   const source = useFileViewerSource()
   const [state, setState] = useState<ViewerState>({ kind: 'loading' })
-  const [iframeLoaded, setIframeLoaded] = useState(false)
-  // Reload = remount the iframe (new key + cache-busting query). The main process blocks every
-  // navigation of a frame that already holds a knowledge HTML document, so changing src or
-  // calling location.reload() on the frame does nothing.
+  // Reload = remount the guest (new key + new ?v=n). Never change src or call loadURL/reload on a live guest:
+  // the main process treats every navigation other than the attached document as an attack and kills the guest.
   const [version, setVersion] = useState(0)
+  // Guest lifecycle, each tied to the mount it happened in (`path#version`), so a remount starts clean:
+  // which mount has loaded, and which mount was ended or refused by the main process.
+  const [loadedKey, setLoadedKey] = useState<string | null>(null)
+  const [gone, setGone] = useState<{ key: string; kind: 'gone' | 'timeout' } | null>(null)
   const [stale, setStale] = useState(false)
   const [fileText, setFileText] = useState<string | null>(null)
   const [fileSize, setFileSize] = useState(0)
@@ -71,9 +77,14 @@ function FlaecheViewer({ path, active }: { path: string; active: boolean }) {
   const checkInFlightRef = useRef<object | null>(null)
   const cancelledAtRef = useRef<number | null>(null)
   const generationRef = useRef(0)
-  const iframeRef = useRef<HTMLIFrameElement | null>(null)
+  const guestRef = useRef<HTMLElement | null>(null)
   const lastPathRef = useRef<string | null>(null)
-  const iframeSrc = useMemo(() => cacheBustedUrl(source.url(path), version), [path, source, version])
+  const guestOk = guestAvailable(window.featureFlags?.konzeptGast, LOCAL_RUNTIME)
+  const guestKey = `${path}#${version}`
+  const guestUrl = useMemo(() => (guestOk ? guestSrc(path, version) : null), [guestOk, path, version])
+  const goneKind = gone?.key === guestKey ? gone.kind : null
+  const guestLoaded = loadedKey === guestKey
+  const guestMounted = state.kind === 'loaded' && guestUrl !== null && goneKind === null
 
   useEffect(() => {
     let cancelled = false
@@ -85,7 +96,6 @@ function FlaecheViewer({ path, active }: { path: string; active: boolean }) {
       cancelledAtRef.current = null
       setPending(null)
       setState({ kind: 'loading' })
-      setIframeLoaded(false)
       setFileText(null)
     }
 
@@ -178,19 +188,59 @@ function FlaecheViewer({ path, active }: { path: string; active: boolean }) {
     }
   }, [active])
 
-  // Requests from the page arrive as messages (the frame has no allow-popups, so scripts cannot open
-  // anything themselves). One listener per visible viewer, only from this frame's own window. Neither
-  // a web link nor a note opens on a message: both only show the confirmation in the header row, and
-  // only a click on its "Öffnen" button opens them. At most one request at a time: while one is pending
-  // (younger than 10 s) or an existence check runs, further messages are ignored, not queued; for 10 s
-  // after "Abbrechen" every request is ignored.
+  // Lifecycle of this mount's guest element (React's synthetic events do not cover <webview> events).
+  // `dom-ready` / `did-stop-loading` = loaded. `close` / `render-process-gone` / `destroyed` = the main
+  // process ended or refused the guest: the element is removed (guestMounted turns false), a pending
+  // confirmation is reset, and a notice with "Neu laden" appears. A refused attach never fires dom-ready,
+  // so 5 s without a load event count as "cannot be shown". Each viewer handles only its own element.
   useEffect(() => {
-    if (!active) return
-    const onMessage = (e: MessageEvent) => {
-      const frameWindow = iframeRef.current?.contentWindow
-      if (!frameWindow || e.source !== frameWindow) return
-      const link = linkOpenRequest(e.data)
-      const note = link ? null : noteOpenRequest(e.data)
+    const el = guestRef.current
+    if (!guestMounted || !el) return
+    let ready = false
+    const onLoaded = () => {
+      ready = true
+      setLoadedKey(guestKey)
+    }
+    const onGone = () => {
+      generationRef.current += 1
+      setPending((p) => nextPendingRequest(p, { type: 'reset' }))
+      setGone({ key: guestKey, kind: 'gone' })
+    }
+    const timer = setTimeout(() => {
+      if (!ready) setGone({ key: guestKey, kind: 'timeout' })
+    }, guestMountTimeoutMs)
+    el.addEventListener('dom-ready', onLoaded)
+    el.addEventListener('did-stop-loading', onLoaded)
+    el.addEventListener('close', onGone)
+    el.addEventListener('render-process-gone', onGone)
+    el.addEventListener('destroyed', onGone)
+    return () => {
+      clearTimeout(timer)
+      el.removeEventListener('dom-ready', onLoaded)
+      el.removeEventListener('did-stop-loading', onLoaded)
+      el.removeEventListener('close', onGone)
+      el.removeEventListener('render-process-gone', onGone)
+      el.removeEventListener('destroyed', onGone)
+    }
+  }, [guestMounted, guestKey])
+
+  // Requests from the page arrive as `ipc-message` events of the guest element (channel 'konzept', exactly
+  // one argument), forwarded by the guest preload and validated again here. Neither a web link nor a note
+  // opens on a message: both only show the confirmation in the header row, and only a click on its "Öffnen"
+  // button opens them. At most one request at a time: while one is pending (younger than 10 s) or an
+  // existence check runs, further messages are ignored, not queued; for 10 s after "Abbrechen" every
+  // request is ignored. One listener per visible viewer; a hidden viewer has none.
+  useEffect(() => {
+    const el = guestRef.current
+    if (!active || !guestMounted || !el) return
+    const onMessage = (e: Event) => {
+      const ev = e as Event & { channel?: unknown; args?: unknown }
+      if (ev.channel !== konzept.KONZEPT_GAST_KANAL) return
+      if (!Array.isArray(ev.args) || ev.args.length !== 1) return
+      const msg = konzept.forwardableGuestMessage(ev.args[0])
+      if (!msg) return
+      const link = linkOpenRequest(msg)
+      const note = link ? null : noteOpenRequest(msg)
       if (!link && !note) return
       if (!canAcceptRequest(pendingRef.current, checkInFlightRef.current !== null, Date.now(), cancelledAtRef.current)) return
       if (link) {
@@ -216,7 +266,7 @@ function FlaecheViewer({ path, active }: { path: string; active: boolean }) {
       Promise.resolve()
         .then(() => source.stat({ path: note }))
         .then((st) => {
-          // Discard if the frame was remounted/reloaded, the viewer hidden or the check timed out meanwhile.
+          // Discard if the guest was remounted/gone, the viewer hidden or the check timed out meanwhile.
           if (generation !== generationRef.current || st.kind !== 'file') return
           const id = ++requestIdRef.current
           setPending((p) => nextPendingRequest(p, { type: 'request', id, kind: 'note', value: note, now: Date.now() }))
@@ -227,9 +277,9 @@ function FlaecheViewer({ path, active }: { path: string; active: boolean }) {
           release()
         })
     }
-    window.addEventListener('message', onMessage)
-    return () => window.removeEventListener('message', onMessage)
-  }, [active, source])
+    el.addEventListener('ipc-message', onMessage)
+    return () => el.removeEventListener('ipc-message', onMessage)
+  }, [active, guestMounted, guestKey, source])
 
   // The lock of "Öffnen" starts when the confirmation row of THIS request has actually been painted
   // (double requestAnimationFrame after the commit), measured with performance.now(). A page that
@@ -400,27 +450,58 @@ function FlaecheViewer({ path, active }: { path: string; active: boolean }) {
             <p className="max-h-24 overflow-y-auto break-all text-muted-foreground">{pending.value}</p>
           </div>
         )}
-        {state.kind === 'loaded' && (
-          <iframe
-            key={`${path}#${version}`}
-            ref={iframeRef}
-            src={iframeSrc}
-            // No `allow-popups` and no `allow-same-origin`: the doc stays origin-isolated and a
-            // script cannot open a window (Electron would send it to the system browser).
-            // Web links and notes ask for confirmation in the viewer.
-            sandbox="allow-scripts"
-            className="h-full w-full border-0 bg-white"
-            title="HTML preview"
-            onLoad={() => setIframeLoaded(true)}
+        {guestUrl === null ? (
+          <GuestNotice text={guestNoticeText('missing')} />
+        ) : goneKind !== null ? (
+          <GuestNotice
+            text={guestNoticeText(goneKind)}
+            onReload={() => {
+              generationRef.current += 1
+              cancelledAtRef.current = null
+              setPending((p) => nextPendingRequest(p, { type: 'reset' }))
+              setVersion((v) => v + 1)
+            }}
           />
-        )}
-        {(state.kind === 'loading' || !iframeLoaded) && (
-          <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 bg-background text-muted-foreground">
-            <Loader2Icon className="size-6 animate-spin" />
-            <p className="text-sm">Rendering preview…</p>
-          </div>
+        ) : (
+          <>
+            {guestMounted && (
+              // Address and partition only, as strings: the main process forces rights, guest script and session.
+              // Explicit flex sizing so the guest fills the pane.
+              <webview
+                key={guestKey}
+                ref={guestRef}
+                {...guestElementProps(guestUrl)}
+                style={{ display: 'flex', width: '100%', height: '100%', background: '#fff' }}
+              />
+            )}
+            {(state.kind === 'loading' || !guestLoaded) && (
+              <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 bg-background text-muted-foreground">
+                <Loader2Icon className="size-6 animate-spin" />
+                <p className="text-sm">Rendering preview…</p>
+              </div>
+            )}
+          </>
         )}
       </div>
+    </div>
+  )
+}
+
+/** Hinweis statt Seite; mit `onReload` zusätzlich der Knopf "Neu laden" (neues Einhängen mit neuem `?v=n`). */
+function GuestNotice({ text, onReload }: { text: string; onReload?: () => void }) {
+  return (
+    <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 bg-background px-6 text-center text-muted-foreground">
+      <AlertCircleIcon className="size-6" />
+      <p className="text-sm font-medium text-foreground">{text}</p>
+      {onReload && (
+        <button
+          type="button"
+          onClick={onReload}
+          className="rounded-md border border-border bg-background px-2.5 py-1 text-xs font-medium text-foreground hover:bg-accent"
+        >
+          Neu laden
+        </button>
+      )}
     </div>
   )
 }

@@ -4,6 +4,12 @@ import {
   canAcceptRequest,
   canConfirm,
   eventTime,
+  guestAvailable,
+  guestElementProps,
+  guestMountOverdue,
+  guestNoticeText,
+  guestSrc,
+  guestMountTimeoutMs,
   konzeptHinweise,
   konzeptPathFromTool,
   konzeptSchreibvorgaenge,
@@ -162,6 +168,56 @@ describe('konzept-flaeche', () => {
     expect(workspaceEventTouches({ type: 'bulkChanged' }, p)).toBe(true)
     expect(workspaceEventTouches({ type: 'deleted', path: p }, p)).toBe(false)
     expect(workspaceEventTouches(null, p)).toBe(false)
+  })
+
+  it('kennt den Gastbereich nur mit Kennzeichen und lokaler Laufzeit', () => {
+    expect(guestAvailable(true, true)).toBe(true)
+    for (const [f, l] of [[false, true], [undefined, true], ['true', true], [true, false]] as const) expect(guestAvailable(f, l)).toBe(false)
+  })
+
+  it('gibt dem Gast nur Adresse und Partition mit', () => {
+    expect(guestElementProps('app://workspace/knowledge/Konzepte/k.html?v=1')).toEqual({
+      src: 'app://workspace/knowledge/Konzepte/k.html?v=1',
+      partition: 'konzept',
+    })
+  })
+
+  describe('guestSrc: kanonische Gast-Adresse', () => {
+    it('kodiert je Segment und hängt die Version an', () => {
+      expect(guestSrc('knowledge/Konzepte/k.html', 0)).toBe('app://workspace/knowledge/Konzepte/k.html?v=0')
+      expect(guestSrc('knowledge/Konzepte/k.html', 3)).toBe('app://workspace/knowledge/Konzepte/k.html?v=3')
+      expect(guestSrc('knowledge/Mein Konzept.html', 1)).toBe('app://workspace/knowledge/Mein%20Konzept.html?v=1')
+      expect(guestSrc('knowledge/Ärger/für Öl.html', 2)).toBe('app://workspace/knowledge/%C3%84rger/f%C3%BCr%20%C3%96l.html?v=2')
+    })
+    it('kodiert #, %, + und ein wörtliches %2e', () => {
+      expect(guestSrc('knowledge/a#b.html', 1)).toBe('app://workspace/knowledge/a%23b.html?v=1')
+      expect(guestSrc('knowledge/100%.html', 1)).toBe('app://workspace/knowledge/100%25.html?v=1')
+      expect(guestSrc('knowledge/a+b.html', 1)).toBe('app://workspace/knowledge/a%2Bb.html?v=1')
+      expect(guestSrc('knowledge/%2e.html', 1)).toBe('app://workspace/knowledge/%252e.html?v=1')
+    })
+    it('wandelt Backslash-Pfade um', () => {
+      expect(guestSrc('knowledge\\Konzepte\\k.html', 1)).toBe('app://workspace/knowledge/Konzepte/k.html?v=1')
+    })
+    it('liefert null, wenn der Pfad nicht kanonisch werden kann', () => {
+      for (const bad of ['', '/knowledge/k.html', 'knowledge', 'knowledge/', 'knowledge//k.html', 'knowledge/./k.html', 'knowledge/../k.html', 'bg-tasks/x.html', 'x/knowledge/k.html', 'knowledgex/k.html', 'knowledge/a\tb.html']) {
+        expect(guestSrc(bad, 1), bad).toBeNull()
+      }
+      expect(guestSrc('knowledge/k.html', -1)).toBeNull()
+      expect(guestSrc('knowledge/k.html', 1.5)).toBeNull()
+    })
+  })
+
+  it('erkennt einen Gast, der nach 5 s nicht geladen hat', () => {
+    expect(guestMountTimeoutMs).toBe(5000)
+    expect(guestMountOverdue(false, 0, 4999)).toBe(false)
+    expect(guestMountOverdue(false, 0, 5000)).toBe(true)
+    expect(guestMountOverdue(true, 0, 60_000)).toBe(false)
+  })
+
+  it('nennt die Hinweistexte', () => {
+    expect(guestNoticeText('missing')).toBe('Konzepte lassen sich hier nicht anzeigen.')
+    expect(guestNoticeText('timeout')).toBe('Konzepte lassen sich hier nicht anzeigen.')
+    expect(guestNoticeText('gone')).toBe('Dieses Konzept wurde angehalten.')
   })
 
   it('setzt den Cache-Brecher an die Adresse', () => {
