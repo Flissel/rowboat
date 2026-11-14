@@ -28,7 +28,8 @@ export type VideoKonzept = {
   kernaussage: string
   stufen: VideoStufe[]
   abschluss: string
-  auftrag: null
+  /** Auftragsnummer nach der Übergabe an die Werkbank: genau 8 Hex-Zeichen (klein), sonst `null`. */
+  auftrag: string | null
   firma?: string
 }
 export type KonzeptDaten = { art: 'konzept' | 'videokonzept'; bezuege: string[]; video?: VideoKonzept }
@@ -350,6 +351,8 @@ function textLaenge(v: unknown, min: number, max: number): boolean {
   return typeof v === 'string' && v.trim().length >= min && v.length <= max
 }
 
+const AUFTRAG_NUMMER = /^[0-9a-f]{8}$/
+
 export function checkVideoKonzept(v: unknown): string[] {
   if (!isRecord(v)) return ['Das Videokonzept fehlt oder ist kein Objekt.']
   const f: string[] = []
@@ -359,7 +362,9 @@ export function checkVideoKonzept(v: unknown): string[] {
   if (!textLaenge(v.hook, 1, Infinity)) f.push('Der Hook fehlt.')
   if (!textLaenge(v.kernaussage, 1, Infinity)) f.push('Die Kernaussage fehlt.')
   if (!textLaenge(v.abschluss, 1, Infinity)) f.push('Der Abschluss fehlt.')
-  if (v.auftrag !== null) f.push('Der Auftrag muss leer (null) sein.')
+  if (v.auftrag !== null && !(typeof v.auftrag === 'string' && AUFTRAG_NUMMER.test(v.auftrag))) {
+    f.push('Der Auftrag muss leer (null) oder eine Nummer aus genau 8 Zeichen 0-9 und a-f (klein) sein.')
+  }
   if (v.firma !== undefined && typeof v.firma !== 'string') f.push('Die Firma muss ein Text sein.')
   if (!Array.isArray(v.stufen)) {
     f.push('Die Stufen fehlen oder sind keine Liste.')
@@ -394,6 +399,25 @@ export function checkVideoKonzept(v: unknown): string[] {
   if (!bildartOk) f.push('Die Bildart jeder Szene muss slide, avatar_slide, avatar_gross oder clip sein.')
   if (!notizOk) f.push('Eine Notiz muss ein Text sein.')
   return f
+}
+
+/**
+ * Was die Rückfrage vor der Übergabe an die Werkbank zeigt. Rein, ohne Dateizugriff; das Videokonzept muss vorher
+ * mit {@link checkVideoKonzept} geprüft sein. `pfad` gehört zum Aufruf der Karte und geht nicht in das Ergebnis ein.
+ */
+export function konzeptUebergabeAnzeige(
+  k: KonzeptDaten,
+  _pfad: string,
+): { thema: string; minuten: number; stufen: number; szenen: number; auftrag: string | null } {
+  const v = k.video
+  if (v === undefined) throw new Error('Kein Videokonzept.')
+  return {
+    thema: v.thema,
+    minuten: v.minuten,
+    stufen: v.stufen.length,
+    szenen: v.stufen.reduce((n, s) => n + s.szenen.length, 0),
+    auftrag: v.auftrag,
+  }
 }
 
 const ohneEndpunkt = (x: string) => x.replace(/[. ]+$/, '')

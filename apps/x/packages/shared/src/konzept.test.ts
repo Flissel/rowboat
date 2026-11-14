@@ -10,6 +10,9 @@ import {
   htmlSearchText,
   konzeptBlockTexte,
   isKanalPath,
+  konzeptUebergabeAnzeige,
+  type KonzeptDaten,
+  type VideoKonzept,
   isKnowledgeHtmlPath,
   readKonzept,
   htmlResponseHeaders,
@@ -88,6 +91,22 @@ describe('konzept', () => {
     expect(checkVideoKonzept({ ...VIDEO, stufen: [{ name: 'E', szenen: [...VIDEO.stufen[0].szenen, ...VIDEO.stufen[0].szenen] }] })).toHaveLength(1) // 16
     expect(checkVideoKonzept({ ...VIDEO, stufen: [{ name: 'E', szenen: VIDEO.stufen[0].szenen.map((s) => ({ ...s, bildart: 'film' })) }] }).length).toBeGreaterThan(0)
     expect(checkVideoKonzept(null)).toHaveLength(1)
+  })
+  it('Auftragsnummer: null oder genau 8 Hex-Zeichen (klein), sonst Fehler', () => {
+    expect(checkVideoKonzept({ ...VIDEO, auftrag: 'a1b2c3d4' })).toEqual([])
+    expect(checkVideoKonzept({ ...VIDEO, auftrag: '00000000' })).toEqual([])
+    for (const falsch of ['xyz', 'A1B2C3D4', 'a1b2c3d', 'a1b2c3d45', ' a1b2c3d4', 'a1b2c3d4\n', '', 12345678, undefined, {}]) {
+      expect(checkVideoKonzept({ ...VIDEO, auftrag: falsch }), String(falsch)).toHaveLength(1)
+    }
+  })
+  it('konzeptUebergabeAnzeige liefert genau die Felder der Rückfrage', () => {
+    const daten: KonzeptDaten = { art: 'videokonzept', bezuege: [], video: { ...VIDEO, auftrag: 'a1b2c3d4' } as VideoKonzept }
+    expect(konzeptUebergabeAnzeige(daten, 'knowledge/Konzepte/K.html')).toEqual({
+      thema: 'KI im Alltag', minuten: 4, stufen: 1, szenen: 8, auftrag: 'a1b2c3d4',
+    })
+    const zwei: KonzeptDaten = { ...daten, video: { ...VIDEO, stufen: [VIDEO.stufen[0], { name: 'Z', szenen: VIDEO.stufen[0].szenen.slice(0, 2) }] } as VideoKonzept }
+    expect(konzeptUebergabeAnzeige(zwei, 'p')).toEqual({ thema: 'KI im Alltag', minuten: 4, stufen: 2, szenen: 10, auftrag: null })
+    expect(() => konzeptUebergabeAnzeige({ art: 'konzept', bezuege: [] }, 'p')).toThrow()
   })
   it('readKonzept gibt video bei videokonzept unverändert zurück', () => {
     const r = readKonzept(SEITE(JSON.stringify({ art: 'videokonzept', bezuege: [], video: VIDEO })))

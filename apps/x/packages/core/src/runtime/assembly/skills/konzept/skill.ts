@@ -59,7 +59,7 @@ Write the skeleton yourself, in the order above: \`<title>\`, data block with \`
 A video concept has \`"art": "videokonzept"\` and a \`video\` object. **Use the template below and change ONLY the data block** and the title text. The title appears twice, in \`<title>\` and in the page heading \`<h1>\`; change both and keep them identical. Its script draws the whole page from the data block — stages as collapsible sections, scenes as cards, summary, warnings, references.
 
 Limits (the app checks them):
-- \`thema\` 3–300 characters; \`zielgruppe\`; \`minuten\` 3–5 (a number); \`hook\`; \`kernaussage\`; \`abschluss\`; \`auftrag\` always \`null\`.
+- \`thema\` 3–300 characters; \`zielgruppe\`; \`minuten\` 3–5 (a number); \`hook\`; \`kernaussage\`; \`abschluss\`; \`auftrag\` is \`null\` or exactly 8 lowercase hex characters (\`0-9a-f\`, the order number the Werkbank gave back) — write \`null\` yourself and never invent a number.
 - \`stufen\`: at most 8, each \`{ "name", "szenen": [...] }\`. Scenes **8 to 15 in total** across all stages.
 - Scene: \`kurz\` (at most 300 characters), \`bildart\` one of \`slide\`, \`avatar_slide\`, \`avatar_gross\`, \`clip\`, optional \`notiz\` (free text shown under the scene — NOT a reference; a \`[[…]]\` in it stays plain text, so put notes that should be clickable into \`bezuege\`).
 - A scene stands for 35–110 spoken words (about 15–45 seconds) that the video pipeline writes LATER — that length is only the planning basis, the words are not part of the concept. \`kurz\` stays a one-to-two sentence summary of at most 300 characters saying what the scene shows and says; never put the script into it. Plan roughly two scenes per minute: 3 min ≈ 8 scenes, 4 min ≈ 8–10, 5 min ≈ 10–12, never outside 8–15. The page shows the possible range against \`minuten\` and warns when the target is outside it.
@@ -83,6 +83,18 @@ Replace the title text and the JSON between the data-block tags; adapt \`bezuege
 - For a video concept, edit the JSON in the data block ONLY. The template's script redraws the page.
 - After an edit, check the data block is still valid JSON and the limits above still hold.
 
+## Handing over to the Werkbank (Übergabe an die Werkbank)
+
+A finished video concept can become an order at the Video-Werkbank, which builds its first outline straight from the concept. Do this **only when the user explicitly asks** (for example "Gib das Konzept an die Werkbank"). Never offer it as a side effect of writing or changing a concept, and never hand over on your own initiative.
+
+1. Make sure the concept is a valid video concept (see the limits above) and saved at \`knowledge/Konzepte/<Name>.html\`.
+2. If \`video.auftrag\` is already set, the concept already has an order. Say so in one sentence BEFORE handing over again, with the number, and note that a second handover creates a NEW order. Hand over only if the user still wants that.
+3. Call the tool \`rowboat-auftraege:video_auftrag_aus_konzept\` with the concept path in \`pfad\` (for example \`knowledge/Konzepte/KI im Alltag.html\`) and an empty string for \`stand\`. The app fills in \`stand\` itself; never invent a value for it. The tool reads the file itself, so you only pass the path.
+4. The app asks the user for a yes before anything is sent. Without that yes there is no order. If the user says no, or the tool returns a refusal or an error sentence, tell the user in one sentence what it said and stop — never try to work around a refusal (no second call, no other tool, no editing the file to get past it).
+5. After success, name the order number and the link from the answer to the user, then write the number into the data block with \`file-editText\`: change \`"auftrag": null\` (or the previous number) to \`"auftrag": "<order number>"\` and touch nothing else. Re-read the file with \`file-readText\` first if you did not just write it.
+
+Before a handover, apply the data-protection rule once more: what is in the concept goes to the video model and may end up in the video. It holds no names, contact data or customer details the user did not give you — remove any you find.
+
 ## Before you finish
 
 - [ ] File is \`knowledge/Konzepte/<Name>.html\`, not under \`knowledge/Kanal/\`, one file under 1 MB.
@@ -91,6 +103,7 @@ Replace the title text and the JSON between the data-block tags; adapt \`bezuege
 - [ ] Nothing external (no http(s) resource, no font, no image URL); images only as \`data:\`.
 - [ ] Links and note references are click handlers with \`postMessage\`, no \`href\`/\`target\`.
 - [ ] Video concept: template used, only the data block changed, 8–15 scenes, 3–5 minutes, at most 8 stages.
+- [ ] Handover only on explicit request; the order number goes into \`video.auftrag\` only after the tool reported success.
 - [ ] No names or customer details the user did not give; one sentence to the user, no HTML in the chat, no \`app-navigation\`.
 `;
 

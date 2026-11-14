@@ -16,6 +16,17 @@ describe('videoKonzeptSeite', () => {
     expect(new TextEncoder().encode(html).length).toBeLessThan(200_000);
   });
 
+  it('Seite mit gesetzter Auftragsnummer ist gültig, zeigt "Übergeben als Auftrag" und warnt nicht darüber', () => {
+    const daten: KonzeptDaten = { art: 'videokonzept', bezuege: [], video: { ...VIDEO, auftrag: 'a1b2c3d4' } };
+    const html = videoKonzeptSeite(daten, 'KI im Alltag');
+    expect(readKonzept(html)).toEqual({ daten, fehler: [] });
+    expect(checkVideoKonzept(readKonzept(html).daten!.video)).toEqual([]);
+    // Die Zeile hängt nur an einem gesetzten Auftrag und steht nicht in der Liste der Warnungen.
+    expect(html).toContain("if (v.auftrag) wurzel.appendChild(el('p', 'leise', 'Übergeben als Auftrag ' + v.auftrag));");
+    const hinweise = html.slice(html.indexOf('var hinweise = []'), html.indexOf('if (hinweise.length)'));
+    expect(hinweise).not.toMatch(/auftrag/i);
+  });
+
   it('ein </script> in den Daten bricht den Block nicht', () => {
     const html = videoKonzeptSeite({ art: 'videokonzept', bezuege: [], video: { ...VIDEO, hook: 'a</script><b>' } }, 't');
     expect(readKonzept(html).daten?.video?.hook).toBe('a</script><b>');
