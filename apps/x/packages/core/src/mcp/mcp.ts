@@ -1,4 +1,3 @@
-// Modified for VibeMind (Flissel/rowboat vibemind): Freigabe-Tor für strenge Werkzeuge in executeTool (Konzept-Fläche Teil B).
 import container from "../di/container.js";
 import { Client } from "@modelcontextprotocol/sdk/client";
 import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js";
@@ -13,7 +12,6 @@ import {
     McpServerConfig,
     McpServerList,
 } from "@x/shared/dist/mcp.js";
-import { ABSAGE_OHNE_JA, strengeFreigabe } from "@x/shared/dist/strenge-freigabe.js";
 import { spacesMcpServers } from "../spaces/orgs.js";
 
 type mcpState = {
@@ -168,30 +166,7 @@ export async function listTools(serverName: string, cursor?: string): Promise<z.
     }
 }
 
-// VibeMind Konzept-Fläche Teil B: strenge Werkzeuge laufen nie über diesen
-// allgemeinen Weg (Legacy-Engine, RPC mcp:executeTool, Copilot-Läufe ohne
-// Freigabeprüfung). Nur die Turn-Laufzeit ruft sie nach dem Ja eines Menschen
-// über executeToolNachFreigabe auf.
-export class StrengesWerkzeugError extends Error {
-    constructor() {
-        super(ABSAGE_OHNE_JA);
-        this.name = "StrengesWerkzeugError";
-    }
-}
-
 export async function executeTool(serverName: string, toolName: string, input: Record<string, unknown>): Promise<unknown> {
-    if (strengeFreigabe(String(serverName), String(toolName))) {
-        throw new StrengesWerkzeugError();
-    }
-    return callToolUngeprueft(serverName, toolName, input);
-}
-
-/** Nur für RealStrengeFreigabe.ausfuehren (runtime/turns/strenge-freigabe.ts): nach dem Ja eines Menschen. */
-export async function executeToolNachFreigabe(serverName: string, toolName: string, input: Record<string, unknown>): Promise<unknown> {
-    return callToolUngeprueft(serverName, toolName, input);
-}
-
-async function callToolUngeprueft(serverName: string, toolName: string, input: Record<string, unknown>): Promise<unknown> {
     const client = await getClient(serverName);
     const result = await client.callTool({
         name: toolName,

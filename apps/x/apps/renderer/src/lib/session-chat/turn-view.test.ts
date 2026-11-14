@@ -672,47 +672,6 @@ describe('buildSessionChatState', () => {
     expect(state.isWaitingOnHuman).toBe(false)
   })
 
-  // VibeMind Konzept-Fläche Teil B: a strict call is never classified, so in
-  // auto mode its card must still show and the turn waits on the human.
-  it('shows the card of a strict tool in auto mode without any classification', () => {
-    const turnCreated = created(T1, S1)
-    const uebergabe = {
-      pfad: 'knowledge/Konzepte/a.html',
-      thema: 'KI im Alltag',
-      minuten: 4,
-      stufen: 2,
-      szenen: 9,
-      auftrag: null,
-      stand: 'a'.repeat(64),
-      ziel: 'Laden Ivan',
-      hinweis: 'Was im Konzept steht, geht an das Videomodell und kann im Video landen.',
-    }
-    const turn = reduceTurn([
-      {
-        ...turnCreated,
-        config: { ...turnCreated.config, autoPermission: true },
-      },
-      requested(T1, 0),
-      completed(T1, 0, assistantCalls(toolCallPart('s1', 'executeMcpTool'))),
-      {
-        type: 'tool_permission_required',
-        turnId: T1,
-        ts: TS,
-        toolCallId: 's1',
-        toolName: 'executeMcpTool',
-        request: {
-          kind: 'mcp',
-          serverName: 'rowboat-auftraege',
-          toolName: 'video_auftrag_aus_konzept',
-          uebergabe,
-        },
-      },
-    ])
-    const state = buildSessionChatState([turn], emptyOverlay())
-    expect(state.allPermissionRequests.get('s1')?.permission).toMatchObject({ kind: 'mcp', uebergabe })
-    expect(state.isWaitingOnHuman).toBe(true)
-  })
-
   it('marks the turn as waiting when automatic permission classification defers', () => {
     const turnCreated = created(T1, S1)
     const turn = reduceTurn([

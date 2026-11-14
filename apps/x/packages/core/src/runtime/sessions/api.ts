@@ -1,4 +1,4 @@
-// Modified for VibeMind (Flissel/rowboat vibemind): SendMessageConfig.channel pass-through (Teil E), SendMessageConfig.herkunft (Konzept-Fläche Teil B).
+// Modified for VibeMind (Flissel/rowboat vibemind): SendMessageConfig.channel pass-through (Teil E).
 import type { z } from "zod";
 import type { UseCase } from "@x/shared/dist/analytics.js";
 import type { UserMessage } from "@x/shared/dist/message.js";
@@ -47,10 +47,6 @@ export interface SendMessageConfig {
     // when the message starts one: sendOrQueueMessage steering into a live
     // turn keeps that turn's own restriction.
     channel?: { readOnlyMcpTools: string[] };
-    // VibeMind Konzept-Fläche Teil B: "agent" = sent through the rowboat-ui
-    // agent access. Lands on turn_created (new turn) or input_added (steer),
-    // per message; strict tools are refused in a turn that carries it.
-    herkunft?: "agent";
 }
 
 export interface ISessions {

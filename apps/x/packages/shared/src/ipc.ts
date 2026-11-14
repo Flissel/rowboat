@@ -19,7 +19,6 @@ import {
 } from './background-task.js';
 import { UserMessage, UserMessageContent } from './message.js';
 import { RequestedAgent, type TurnBusEvent, type TurnEvent } from './turns.js';
-import { Herkunft } from './strenge-freigabe.js';
 import type { QueuedSessionMessage, SessionBusEvent, SessionIndexEntry, SessionState } from './sessions.js';
 import { RowboatApiConfig } from './rowboat-account.js';
 import { RecommendationRowSchema, RecommendationSlot } from './recommendation-update.js';
@@ -726,9 +725,6 @@ export const ipcSchemas = {
         autoPermission: z.boolean().optional(),
         maxModelCalls: z.number().int().positive().optional(),
         reasoningEffort: ReasoningEffort.optional(),
-        // Modified for VibeMind (Flissel/rowboat vibemind): set by the
-        // rowboat-ui agent access; the turn then refuses the strict tools.
-        herkunft: Herkunft.optional(),
       }),
     }),
     res: z.object({ turnId: z.string() }),
@@ -747,9 +743,6 @@ export const ipcSchemas = {
         autoPermission: z.boolean().optional(),
         maxModelCalls: z.number().int().positive().optional(),
         reasoningEffort: ReasoningEffort.optional(),
-        // See sessions:sendMessage: marks the turn, or (steered) the live
-        // turn it joins.
-        herkunft: Herkunft.optional(),
       }),
     }),
     res: z.union([
