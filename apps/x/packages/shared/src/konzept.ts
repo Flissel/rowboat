@@ -757,9 +757,13 @@ export function guestRequestDecision(r: {
 }
 
 /**
- * Stolperdraht (`did-start-navigation` des Gasts): ein beendeter Gast -> jede Navigation `'beenden'` (anhalten). Sonst
- * nur Dokumentwechsel des Hauptrahmens prüfen: erlaubt ist nur die angehängte Wissens-Adresse
+ * Stolperdraht (`did-start-navigation` des Gasts): ein beendeter Gast -> jede Navigation `'beenden'`. Sonst nur
+ * Dokumentwechsel des Hauptrahmens prüfen: erlaubt ist nur die angehängte Wissens-Adresse
  * ({@link guestNavigationAllowed}); Unterrahmen sperrt `will-frame-navigate`, Gleiche-Dokument-Navigationen laden nichts.
+ * Fremdes Ziel, von der Seite ausgelöst (`pageInitiated`): `'ueberlassen'`, denn `did-start-navigation` kommt VOR
+ * `will-frame-navigate`/`will-navigate`, und deren `preventDefault` hält die Navigation an, ohne den Gast zu beenden.
+ * Ausnahme `about:`: dort feuert kein `will-*`, es würde festgeschrieben, also `'beenden'`. Alles andere (vom Browser
+ * gestartet) -> `'beenden'`.
  */
 export function guestTripwireDecision(n: {
   dead: boolean
@@ -767,10 +771,13 @@ export function guestTripwireDecision(n: {
   isSameDocument: boolean
   url: string
   attachedSrc: string | null
-}): 'erlauben' | 'beenden' {
+  pageInitiated: boolean
+}): 'erlauben' | 'ueberlassen' | 'beenden' {
   if (n.dead) return 'beenden'
   if (!n.isMainFrame || n.isSameDocument) return 'erlauben'
-  return guestNavigationAllowed(n.url, n.attachedSrc) ? 'erlauben' : 'beenden'
+  if (guestNavigationAllowed(n.url, n.attachedSrc)) return 'erlauben'
+  if (n.pageInitiated && !/^[\u0000- \u007f]*about:/i.test(n.url)) return 'ueberlassen'
+  return 'beenden'
 }
 
 export type GuestMessage = { type: 'rowboat:link-oeffnen'; url: string } | { type: 'rowboat:notiz-oeffnen'; pfad: string }

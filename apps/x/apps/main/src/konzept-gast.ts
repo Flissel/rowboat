@@ -55,31 +55,33 @@ function verweigern(): Response {
 
 /**
  * Gast endgueltig beenden: als tot markieren (der Anfrage-Filter bricht ab jetzt alles ab, auch data:/blob:/about:, der
- * Stolperdraht haelt jede weitere Navigation an), seine Adresse vergessen, sofort anhalten und nach dem laufenden
- * Ereignis den Renderer beenden (`forcefullyCrashRenderer`, das Element meldet `render-process-gone`). `close()` nur,
- * damit das Element zusaetzlich `close` meldet; darauf verlaesst sich nichts.
+ * Stolperdraht haelt jede weitere Navigation an) und seine Adresse vergessen. Synchron geschieht NUR das, nie ein Aufruf
+ * am Gast: `stop()` (oder jeder andere Aufruf) mitten in `did-start-navigation` stuerzt die ganze App ab
+ * (Zugriffsverletzung). Erst im naechsten Durchlauf (`setImmediate`): `stop()`, dann `close()`. `close()` und kein
+ * Renderer-Absturz, weil Chromium eine vom Browser gestartete, noch wartende Navigation (`loadURL`, `src`) nach dem
+ * Absturz in einen frischen Prozess festschreibt; nur das Zerstoeren der webContents beendet sie. Das Element meldet
+ * dann `close`/`destroyed`; faellt `close()` aus, bleibt der Absturz des Renderers als Notnagel.
  */
 function gastBeenden(guest: WebContents, grund: string): void {
   const id = guest.id;
   if (!beendet.has(id)) console.error(`[konzept] Gast beendet: ${grund}`);
   beendet.add(id);
   gastAdressen.delete(id);
-  try {
-    guest.stop();
-  } catch {
-    // schon zerstoert
-  }
   setImmediate(() => {
     if (guest.isDestroyed()) return;
     try {
-      guest.forcefullyCrashRenderer();
+      guest.stop();
     } catch {
-      // kein Renderer (noch nicht geladen): der Filter haelt alles ab
+      // kein Renderer / schon zerstoert
     }
     try {
       guest.close();
     } catch {
-      // schon zerstoert
+      try {
+        guest.forcefullyCrashRenderer();
+      } catch {
+        // der Anfrage-Filter haelt alles ab
+      }
     }
   });
 }
@@ -175,20 +177,42 @@ function gastAbsichern(guest: WebContents, adresse: string | null): void {
   try {
     // Von der Seite ausgeloest (Link, location, meta refresh, Formular) oder Umleitung: nie. Gleiche-Dokument-
     // Navigationen (Anker, pushState) loesen diese Ereignisse nicht aus und bleiben moeglich; sie laden nichts.
+    // Reihenfolge bei Seiten-Navigationen: did-start-navigation kommt VOR will-frame-navigate/will-navigate (etwa 0,3 ms);
+    // vom Browser gestartete (loadURL, src, Verlauf) und about:blank loesen kein will-* aus.
     guest.on("will-navigate", (event) => event.preventDefault());
     guest.on("will-frame-navigate", (event) => event.preventDefault());
     guest.on("will-redirect", (event) => event.preventDefault());
-    // Stolperdraht: ein Dokumentwechsel des Hauptrahmens zu etwas anderem als der angehaengten Wissens-Adresse, oder
-    // jede Navigation eines schon beendeten Gasts.
+    // Stolperdraht: beendet nur, was kein will-* abfaengt (vom Browser gestartet, about:, schon beendeter Gast). Eine
+    // fremde Seiten-Navigation ueberlaesst er dem preventDefault oben. Hier nie etwas am Gast aufrufen (gastBeenden).
     guest.on("did-start-navigation", (event) => {
+      let seiteAusgeloest = false;
+      try {
+        seiteAusgeloest = event.initiator != null;
+      } catch {
+        seiteAusgeloest = false;
+      }
       const entscheidung = guestTripwireDecision({
         dead: beendet.has(id),
         isMainFrame: event.isMainFrame,
         isSameDocument: event.isSameDocument,
         url: event.url,
         attachedSrc: gastAdressen.get(id) ?? null,
+        pageInitiated: seiteAusgeloest,
       });
       if (entscheidung === "beenden") gastBeenden(guest, `Navigation zu ${event.url.slice(0, 200)}`);
+    });
+    // Notnetz: ein festgeschriebener Hauptrahmen-Wechsel zu etwas Fremdem, das der Stolperdraht durchliess.
+    guest.on("did-navigate", (_event, url) => {
+      if (beendet.has(id)) return;
+      const entscheidung = guestTripwireDecision({
+        dead: false,
+        isMainFrame: true,
+        isSameDocument: false,
+        url,
+        attachedSrc: gastAdressen.get(id) ?? null,
+        pageInitiated: false,
+      });
+      if (entscheidung === "beenden") gastBeenden(guest, `Festgeschrieben: ${url.slice(0, 200)}`);
     });
     // WebRTC und Fensteroeffnen zuletzt: wirft eines davon, ist der Gast schon voll bewacht (und wird beendet).
     guest.setWebRTCIPHandlingPolicy("disable_non_proxied_udp");

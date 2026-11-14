@@ -502,20 +502,42 @@ describe('Gastbereich', () => {
   })
   it('Stolperdraht nach Zustand: ein beendeter Gast navigiert nie wieder', () => {
     const src = 'app://workspace/knowledge/Konzepte/k.html?v=1'
-    const n = (url: string, o: { dead?: boolean; isMainFrame?: boolean; isSameDocument?: boolean; attachedSrc?: string | null } = {}) =>
-      guestTripwireDecision({ dead: false, isMainFrame: true, isSameDocument: false, attachedSrc: src, url, ...o })
+    const n = (url: string, o: { dead?: boolean; isMainFrame?: boolean; isSameDocument?: boolean; attachedSrc?: string | null; pageInitiated?: boolean } = {}) =>
+      guestTripwireDecision({ dead: false, isMainFrame: true, isSameDocument: false, attachedSrc: src, pageInitiated: false, url, ...o })
     expect(n(src)).toBe('erlauben')
     expect(n('app://workspace/knowledge/Konzepte/k.html?v=7')).toBe('erlauben')
     expect(n('https://example.com/')).toBe('beenden')
     expect(n('about:blank')).toBe('beenden')
     expect(n('chrome://gpu')).toBe('beenden')
     expect(n(src, { attachedSrc: null })).toBe('beenden')
+    expect(n('https://example.com/', { attachedSrc: null, pageInitiated: false })).toBe('beenden')
     expect(n('https://example.com/', { isMainFrame: false })).toBe('erlauben') // Unterrahmen: will-frame-navigate sperrt
     expect(n(`${src}#unten`, { isSameDocument: true })).toBe('erlauben')
     expect(n(src, { dead: true })).toBe('beenden')
     expect(n(`${src}#unten`, { dead: true, isSameDocument: true })).toBe('beenden')
     expect(n('about:blank', { dead: true })).toBe('beenden')
     expect(n('https://example.com/', { dead: true, isMainFrame: false })).toBe('beenden')
+  })
+  it('Stolperdraht: von der Seite ausgeloest wird nur verhindert (ueberlassen), ausser about:', () => {
+    const src = 'app://workspace/knowledge/Konzepte/k.html?v=1'
+    const n = (url: string, o: { dead?: boolean; isMainFrame?: boolean; isSameDocument?: boolean; attachedSrc?: string | null; pageInitiated?: boolean }) =>
+      guestTripwireDecision({ dead: false, isMainFrame: true, isSameDocument: false, attachedSrc: src, pageInitiated: false, url, ...o })
+    const fremd = ['https://example.com/', 'app://workspace/knowledge/Konzepte/anderes.html', 'file:///C:/Windows/win.ini', 'chrome://gpu', 'data:text/html,<b>x</b>']
+    for (const u of fremd) {
+      expect(n(u, { pageInitiated: true }), `seite ${u}`).toBe('ueberlassen')
+      expect(n(u, { pageInitiated: false }), `browser ${u}`).toBe('beenden')
+      expect(n(u, { pageInitiated: true, dead: true }), `tot ${u}`).toBe('beenden')
+      expect(n(u, { pageInitiated: false, dead: true }), `tot ${u}`).toBe('beenden')
+    }
+    for (const u of ['about:blank', 'ABOUT:blank', 'about:srcdoc', ' about:blank', '\u0000about:blank', '\tAbout:blank'])
+      expect(n(u, { pageInitiated: true }), `about ${JSON.stringify(u)}`).toBe('beenden')
+    for (const p of [true, false]) {
+      expect(n(src, { pageInitiated: p })).toBe('erlauben')
+      expect(n('https://example.com/', { pageInitiated: p, isMainFrame: false })).toBe('erlauben')
+      expect(n(`${src}#x`, { pageInitiated: p, isSameDocument: true })).toBe('erlauben')
+      expect(n('https://example.com/', { pageInitiated: p, dead: true, isMainFrame: false })).toBe('beenden')
+    }
+    expect(n('https://example.com/', { pageInitiated: true, attachedSrc: null })).toBe('ueberlassen')
   })
   it('gibt ohne bekannten Gast nur Anfragen frei, die im Dokument bleiben', () => {
     for (const u of ['data:image/png;base64,AA', 'blob:app://workspace/1', 'about:blank', 'ABOUT:blank'])
