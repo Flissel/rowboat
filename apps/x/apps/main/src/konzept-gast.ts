@@ -23,8 +23,11 @@ import {
 /** Alle Schemata auf einen toten lokalen Port; `<-loopback>` noetig, sonst umgehen 127.0.0.1/localhost den Proxy. */
 const TOTER_PROXY = { mode: "fixed_servers", proxyRules: "socks5://127.0.0.1:9", proxyBypassRules: "<-loopback>" } as const;
 const PROXY_PROBEN = ["https://example.com/", "http://127.0.0.1:8765/", "ws://127.0.0.1:8765/", "wss://example.com/", "http://localhost:8765/"];
-/** So lange wartet der Start hoechstens auf die Bestaetigung; danach gilt der Gastbereich als nicht verfuegbar. */
-const PROXY_WARTEZEIT_MS = 10_000;
+/**
+ * So lange wartet der Start (nur vor dem ersten Fenster) hoechstens auf die Bestaetigung; sie kommt sonst in
+ * Millisekunden. Danach entsteht das Fenster ohne Gastbereich (Kennzeichen aus, kein webviewTag).
+ */
+const PROXY_WARTEZEIT_MS = 2_000;
 
 /** Tag-Attribute, die der Hauptprozess nie vom `<webview>` uebernimmt (Namen laut webview-tag.md, Electron 39). */
 const VERBOTENE_PARAMETER = [
@@ -229,7 +232,10 @@ export function prepareKonzeptGast(deps: Vorbereitung): Promise<boolean> {
       eingerichtet = true;
       let zeitgeber: NodeJS.Timeout | undefined;
       const frist = new Promise<never>((_, reject) => {
-        zeitgeber = setTimeout(() => reject(new Error("konzept: Proxy nicht rechtzeitig bestaetigt")), PROXY_WARTEZEIT_MS);
+        zeitgeber = setTimeout(
+          () => reject(new Error(`konzept: Proxy nicht binnen ${PROXY_WARTEZEIT_MS} ms bestaetigt, erstes Fenster ohne Gastbereich`)),
+          PROXY_WARTEZEIT_MS,
+        );
       });
       try {
         await Promise.race([proxyBestaetigen(ses), frist]);

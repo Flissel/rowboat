@@ -693,11 +693,14 @@ function dokumentSchluessel(url: string): string | null {
   }
 }
 
-/** Anfrage, die im Dokument bleibt (`data:`, `blob:`, `about:`, ohne Steuerzeichen/Leerraum)? Nie Netz, nie Datei. */
+/**
+ * Anfrage, die im Dokument bleibt (`data:`, `blob:`, `about:`)? Nie Netz, nie Datei. Das Schema ist der rohe Text bis
+ * zum ersten `:` (klein), ohne Zerlegen: `data:image/svg+xml,<svg …>` mit Leerzeichen bleibt erlaubt; Leerraum oder
+ * Steuerzeichen vor dem `:` ergeben ein anderes Schema und damit nein.
+ */
 export function guestInDocumentRequest(requestUrl: string): boolean {
-  if (hatSteuerOderLeerzeichen(requestUrl)) return false
-  const s = schema(requestUrl)
-  return s !== null && DOKUMENT_SCHEMATA.has(s)
+  const i = requestUrl.indexOf(':')
+  return i > 0 && DOKUMENT_SCHEMATA.has(requestUrl.slice(0, i).toLowerCase())
 }
 
 /** Ist `zielUrl` dasselbe Wissens-Dokument wie `dokumentUrl` (ohne Query/Fragment, Schema/Host ohne Groß/Klein)? */
@@ -708,7 +711,8 @@ function gleichesWissensDokument(zielUrl: string, dokumentUrl: string): boolean 
 }
 
 /**
- * Anfrage in der Gast-Sitzung erlauben? `data:`, `blob:`, `about:` bleiben im Dokument -> ja. Sonst nur das eigene
+ * Anfrage in der Gast-Sitzung erlauben? Zuerst: `data:`, `blob:`, `about:` bleiben im Dokument -> ja (auch mit
+ * Leerzeichen, {@link guestInDocumentRequest}). Erst danach die strenge Vorprüfung (Steuerzeichen/Leerraum) und nur das eigene
  * Hauptdokument des Gasts (ohne Query/Fragment, Schema/Host ohne Groß/Klein verglichen), und nur wenn es eine
  * Wissens-Adresse ist ({@link guestAttachAllowed}). `guestDocumentUrl === null` (Dokument unbekannt): nur ein
  * Wissens-Dokument. Der Hauptprozess kennt die angehängte Adresse jedes Gasts und gibt für unbekannte Anfragen nur

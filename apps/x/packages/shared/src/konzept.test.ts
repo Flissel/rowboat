@@ -445,10 +445,27 @@ describe('Gastbereich', () => {
         expect(guestNavigationAllowed(u, doc), JSON.stringify(u)).toBe(false)
         expect(guestNavigationAllowed(doc, u), JSON.stringify(u)).toBe(false)
       }
-      expect(guestRequestAllowed(`data:text/plain,a${z}b`, doc), JSON.stringify(z)).toBe(false)
-      expect(guestInDocumentRequest(`about:blank${z}`), JSON.stringify(z)).toBe(false)
+      // data:/blob:/about: bleiben im Dokument: Leerraum im Inhalt ist dort normal und wird nicht abgelehnt
+      expect(guestRequestAllowed(`data:text/plain,a${z}b`, doc), JSON.stringify(z)).toBe(true)
+      expect(guestInDocumentRequest(`about:blank${z}`), JSON.stringify(z)).toBe(true)
+      // ... aber nicht vor dem Doppelpunkt (anderes Schema)
+      expect(guestInDocumentRequest(`${z}data:text/plain,x`), JSON.stringify(z)).toBe(false)
+      expect(guestInDocumentRequest(`da${z}ta:text/plain,x`), JSON.stringify(z)).toBe(false)
     }
     expect(guestAttachAllowed('app://workspace/knowledge/%2e%09%2e/config/x.html')).toBe(false)
+  })
+  it('erlaubt data:-Bilder mit Leerzeichen, aber nie data: als Gast-Dokument', () => {
+    const doc = 'app://workspace/knowledge/Konzepte/k.html?v=1'
+    const svg = 'data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"></svg>'
+    expect(guestRequestAllowed(svg, doc)).toBe(true)
+    expect(guestRequestAllowed(svg, null)).toBe(true)
+    expect(guestInDocumentRequest(svg)).toBe(true)
+    expect(guestRequestAllowed('DATA:image/svg+xml,<svg width="1"></svg>', doc)).toBe(true)
+    const html = 'data:text/html,<b>x</b>'
+    expect(guestAttachAllowed(html)).toBe(false)
+    expect(guestProtocolAllowed(html)).toBe(false)
+    expect(guestNavigationAllowed(html, doc)).toBe(false)
+    expect(guestNavigationAllowed(svg, doc)).toBe(false)
   })
   it('gibt ohne bekannten Gast nur Anfragen frei, die im Dokument bleiben', () => {
     for (const u of ['data:image/png;base64,AA', 'blob:app://workspace/1', 'about:blank', 'ABOUT:blank'])
