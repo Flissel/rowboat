@@ -312,4 +312,92 @@ describe("filesystem files", () => {
     expect(outEdited).toMatchObject({ success: true });
     expect(outEdited).not.toHaveProperty("workspaceRelPath");
   });
+
+  describe("per-path write queue", () => {
+    it("concurrent editText calls on one file all apply", async () => {
+      const files = await loadFiles();
+      const target = path.join(workspaceDir, "knowledge", "Konzepte", "q.html");
+      const n = 12;
+      const body = Array.from({ length: n }, (_, i) => `<h${i}>MARK${i}</h${i}>`).join("\n") + "\n" + "x".repeat(200_000);
+      await files.writeText(target, body);
+
+      const results = await Promise.all(
+        Array.from({ length: n }, (_, i) => files.editText(target, `MARK${i}<`, `DONE${i}<`)),
+      );
+
+      const content = await fs.readFile(target, "utf8");
+      for (let i = 0; i < n; i++) {
+        expect(content).toContain(`DONE${i}<`);
+        expect(content).not.toContain(`MARK${i}<`);
+        expect(results[i]).toMatchObject({ success: true, replacements: 1 });
+      }
+    });
+
+    it("a failing edit does not block the next one on the same path", async () => {
+      const files = await loadFiles();
+      const target = path.join(workspaceDir, "q2.html");
+      await files.writeText(target, "<p>eins</p>");
+
+      const [first, second] = await Promise.all([
+        files.editText(target, "gibtsnicht", "x"),
+        files.editText(target, "eins", "zwei"),
+      ]);
+
+      expect(first).toEqual({ error: "oldString not found in file" });
+      expect(second).toMatchObject({ success: true, replacements: 1 });
+      expect(await fs.readFile(target, "utf8")).toBe("<p>zwei</p>");
+    });
+
+    it("a rejecting step does not block later steps and still rejects for its caller", async () => {
+      const files = await loadFiles();
+      const target = path.join(workspaceDir, "missing.html");
+      const [bad, good] = await Promise.allSettled([
+        files.editText(target, "a", "b"),
+        files.writeText(target, "<p>a</p>"),
+      ]);
+      expect(bad.status).toBe("rejected");
+      expect(good.status).toBe("fulfilled");
+      expect(await fs.readFile(target, "utf8")).toBe("<p>a</p>");
+    });
+
+    it("editText right after an un-awaited writeText sees the written content", async () => {
+      const files = await loadFiles();
+      const target = path.join(workspaceDir, "q3.html");
+
+      const [, edited] = await Promise.all([
+        files.writeText(target, "<p>neu</p>"),
+        files.editText(target, "neu", "bearbeitet"),
+      ]);
+
+      expect(edited).toMatchObject({ success: true });
+      expect(await fs.readFile(target, "utf8")).toBe("<p>bearbeitet</p>");
+    });
+
+    it("different files do not block each other", async () => {
+      const files = await loadFiles();
+      const a = path.join(workspaceDir, "a.html");
+      const b = path.join(workspaceDir, "b.html");
+      await files.writeText(a, "<p>a</p>");
+      await files.writeText(b, "<p>b</p>");
+
+      const [ra, rb] = await Promise.all([
+        files.editText(a, "a", "A"),
+        files.editText(b, "b", "B"),
+      ]);
+
+      expect(ra).toMatchObject({ success: true });
+      expect(rb).toMatchObject({ success: true });
+    });
+
+    it("holds no queue entry once all calls settled", async () => {
+      const files = await loadFiles();
+      const target = path.join(workspaceDir, "q5.html");
+      await Promise.all([
+        files.writeText(target, "<p>x</p>"),
+        files.editText(target, "x", "y"),
+        files.editText(target, "nix", "z"),
+      ]);
+      expect(files._pendingWriteQueueSize()).toBe(0);
+    });
+  });
 });
