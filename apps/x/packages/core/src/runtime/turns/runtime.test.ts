@@ -3773,6 +3773,40 @@ describe("channel runs (VibeMind Teil E)", () => {
         expect(log.some((e) => e.type === "tool_permission_required")).toBe(false);
     });
 
+    it("refuses the Werkbank handoff tool in a channel run even though the checker would not prompt", async () => {
+        const executed: string[] = [];
+        // Wie der echte Checker für das vertraute Werkzeug: keine Rückfrage nötig.
+        const checker = new FakePermissionChecker({ executeMcpTool: "allow" });
+        const classifier = new FakePermissionClassifier();
+        const handoff = { serverName: "rowboat-auftraege", toolName: "video_auftrag_aus_konzept" };
+        const run = async (config: Parameters<TurnRuntime["createTurn"]>[0]["config"]) => {
+            const { runtime, repo } = makeRuntime({
+                agent: channelAgent,
+                tools: recordingTools(executed),
+                checker,
+                classifier,
+                models: [
+                    respond(completedResp(assistantCalls(toolCallPart("V", "executeMcpTool", handoff)))),
+                    respond(completedResp(assistantText("done"))),
+                ],
+            });
+            const turnId = await newTurn(runtime, { config });
+            await advanceAndSettle(runtime, turnId);
+            return persisted(repo, turnId);
+        };
+        const channelLog = await run({ humanAvailable: true, autoPermission: true, channel });
+        expect(resultFor(channelLog, "V")).toMatchObject({ source: "runtime", result: { isError: true } });
+        expect(JSON.stringify(resultFor(channelLog, "V")?.result.output)).toContain("rowboat-auftraege:video_auftrag_aus_konzept");
+        expect(executed).toEqual([]);
+        expect(checker.calls).toEqual([]);
+        // Desktop: dieselbe Antwort des Checkers lässt den Aufruf ohne Rückfrage laufen.
+        const desktopLog = await run({ humanAvailable: true });
+        expect(resultFor(desktopLog, "V")).toMatchObject({ source: "sync", result: { isError: false } });
+        expect(desktopLog.some((e) => e.type === "tool_permission_required")).toBe(false);
+        expect(executed).toEqual(["executeMcpTool"]);
+        expect(classifier.batches).toEqual([]);
+    });
+
     it("desktop turns are unchanged: full tool set, POST runs, MCP goes through checker + classifier", async () => {
         const executed: string[] = [];
         const checker = new FakePermissionChecker({ executeMcpTool: { request: { kind: "mcp" } } });

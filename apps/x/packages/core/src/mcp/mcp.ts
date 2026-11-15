@@ -37,6 +37,24 @@ async function effectiveServers(): Promise<z.infer<typeof McpServerConfig>["mcpS
     return { ...mcpServers, ...(await spacesMcpServers()) };
 }
 
+/**
+ * URL of the entry getClient (and so executeTool) uses for serverName,
+ * resolved the same way (effectiveServers). null for stdio entries and for
+ * names without an entry. Used by the permission checker so a trust decision
+ * is made on the entry that is actually executed, not on a lookalike.
+ */
+export async function effectiveServerUrl(serverName: string): Promise<string | null> {
+    const mcpServers = await effectiveServers();
+    if (!Object.prototype.hasOwnProperty.call(mcpServers, serverName)) {
+        return null;
+    }
+    const config = mcpServers[serverName];
+    if (!config || "command" in config) {
+        return null;
+    }
+    return typeof config.url === "string" ? config.url : null;
+}
+
 async function getClient(serverName: string): Promise<Client> {
     const mcpServers = await effectiveServers();
     const config = mcpServers[serverName];
