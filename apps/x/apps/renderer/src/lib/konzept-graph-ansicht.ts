@@ -48,7 +48,8 @@ export function merkeGraphAnsicht(ansicht: GraphAnsicht): void {
 }
 
 const hauptRadius = (degree: number) => 6 + Math.min(18, degree * 2)
-const bezugRadius = (degree: number) => 4 + Math.min(4, degree)
+/** Höchstens 5: kleiner als jeder Hauptknoten (mindestens 6), gleich wie viele Kanten. */
+const bezugRadius = (degree: number) => 3 + Math.min(2, degree)
 
 /** Ein Konzept als Nebenknoten im Notizen-Graphen: klein, gedämpft, Legende „Konzept (Bezug)". */
 export function konzeptBezugKnoten(id: string, label: string, degree: number): GraphNode {

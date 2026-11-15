@@ -7748,6 +7748,7 @@ function App() {
                         notizen={graphData}
                         konzepte={konzeptGraphData}
                         error={graphStatus === 'error' ? (graphError ?? 'Failed to build graph') : null}
+                        isLoading={graphStatus === 'idle' || graphStatus === 'loading'}
                         onSelectNode={(path) => {
                           navigateToFile(path)
                         }}
@@ -7839,6 +7840,7 @@ function App() {
                     notizen={graphData}
                     konzepte={konzeptGraphData}
                     error={graphStatus === 'error' ? (graphError ?? 'Failed to build graph') : null}
+                    isLoading={graphStatus === 'idle' || graphStatus === 'loading'}
                     onSelectNode={(path) => {
                       navigateToFile(path)
                     }}

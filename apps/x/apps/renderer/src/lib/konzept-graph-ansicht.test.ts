@@ -49,7 +49,21 @@ describe('konzept-graph-ansicht', () => {
     const notiz = g.nodes[3]
     expect(notiz.color).toBe(BEZUG_FARBE.color)
     expect(notiz.degree).toBe(2)
-    expect(notiz.radius).toBeLessThan(g.nodes[0].radius + 1)
+    // Nebenknoten sind kleiner als jeder Hauptknoten, auch bei vielen Kanten (Hauptknoten ohne Kante: 6)
+    const viele = konzeptGraphAnsicht({
+      nodes: [
+        { id: 'k', label: 'K', art: 'konzept' },
+        { id: 'n', label: 'N', art: 'notiz' },
+        ...Array.from({ length: 30 }, (_, i) => ({ id: `c${i}`, label: `C${i}`, art: 'konzept' as const })),
+      ],
+      edges: Array.from({ length: 30 }, (_, i) => ({ source: `c${i}`, target: 'n', kind: 'verweis' as const })),
+    })
+    const n = viele.nodes.find((x) => x.id === 'n')!
+    const k = viele.nodes.find((x) => x.id === 'k')!
+    expect(n.degree).toBe(30)
+    expect(k.degree).toBe(0)
+    expect(n.radius).toBeLessThan(k.radius)
+    expect(notiz.radius).toBeLessThan(g.nodes[0].radius)
     expect(g.edges).toEqual([
       { source: 'knowledge/Konzepte/a.html', target: 'knowledge/Marke.md' },
       { source: 'knowledge/Konzepte/v.html', target: 'knowledge/Marke.md' },
@@ -62,5 +76,7 @@ describe('konzept-graph-ansicht', () => {
     expect(n.group).toBe('Konzept (Bezug)')
     expect(n.color).toBe(BEZUG_FARBE.color)
     expect(n.level).toBeUndefined()
+    // kleiner als jeder Notiz-Knoten des Notizen-Graphen (App: 6 + min(18, 2 * Grad))
+    expect(konzeptBezugKnoten('x', 'X', 40).radius).toBeLessThan(6)
   })
 })

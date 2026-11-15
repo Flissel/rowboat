@@ -2,7 +2,7 @@ import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { GraphMitAnsicht } from './graph-ansicht'
 import type { GraphNode } from './graph-view'
-import { GRAPH_ANSICHT_SCHLUESSEL, KONZEPTE_LEER } from '@/lib/konzept-graph-ansicht'
+import { GRAPH_ANSICHT_SCHLUESSEL, KONZEPTE_LEER, konzeptGraphAnsicht } from '@/lib/konzept-graph-ansicht'
 
 class StillerBeobachter {
   observe() {}
@@ -45,6 +45,34 @@ describe('GraphMitAnsicht', () => {
     expect(container.querySelector('img')).toBeNull()
     expect(screen.queryByRole('button', { name: '3D' })).toBeNull()
     expect(screen.queryByRole('button', { name: '2D' })).toBeNull()
+  })
+
+  it('zeigt waehrend des Ladens nicht den Leertext', () => {
+    localStorage.setItem(GRAPH_ANSICHT_SCHLUESSEL, 'konzepte')
+    render(<GraphMitAnsicht notizen={notizen} konzepte={{ nodes: [], edges: [] }} error={null} isLoading onSelectNode={vi.fn()} />)
+    expect(screen.queryByText(KONZEPTE_LEER)).toBeNull()
+  })
+
+  it('Konzepte-Graph aus dem Adapter: kein 3D-Schalter, Klick auf einen Knoten meldet seinen Pfad', () => {
+    vi.stubGlobal('requestAnimationFrame', () => 0)
+    const setPointerCapture = vi.fn()
+    Object.defineProperty(Element.prototype, 'setPointerCapture', { value: setPointerCapture, configurable: true })
+    const onSelectNode = vi.fn()
+    const daten = konzeptGraphAnsicht({
+      nodes: [
+        { id: 'knowledge/Konzepte/a.html', label: 'Sommer', art: 'konzept' },
+        { id: 'knowledge/Marke.md', label: 'Marke', art: 'notiz' },
+      ],
+      edges: [{ source: 'knowledge/Konzepte/a.html', target: 'knowledge/Marke.md', kind: 'verweis' }],
+    })
+    localStorage.setItem(GRAPH_ANSICHT_SCHLUESSEL, 'konzepte')
+    render(<GraphMitAnsicht notizen={notizen} konzepte={daten} error={null} onSelectNode={onSelectNode} />)
+    expect(screen.queryByRole('button', { name: '3D' })).toBeNull()
+    expect(screen.queryByRole('button', { name: '2D' })).toBeNull()
+    const knoten = screen.getByText('Marke').closest('g') as Element
+    fireEvent.pointerDown(knoten, { button: 0, pointerId: 1 })
+    fireEvent.pointerUp(knoten, { button: 0, pointerId: 1 })
+    expect(onSelectNode).toHaveBeenCalledWith('knowledge/Marke.md')
   })
 
   it('startet mit der gemerkten Wahl und zeigt den leeren Zustand', () => {

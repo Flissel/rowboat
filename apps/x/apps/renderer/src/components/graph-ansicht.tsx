@@ -15,11 +15,14 @@ export function GraphMitAnsicht({
   notizen,
   konzepte,
   error,
+  isLoading = false,
   onSelectNode,
 }: {
   notizen: GraphDaten
   konzepte: GraphDaten
   error: string | null
+  /** While the graph is built: the Konzepte graph shows no empty-state text (the Notizen graph is unchanged). */
+  isLoading?: boolean
   onSelectNode: (id: string) => void
 }) {
   const [ansicht, setAnsicht] = useState<GraphAnsicht>(leseGraphAnsicht)
@@ -57,7 +60,7 @@ export function GraphMitAnsicht({
           isLoading={false}
           error={error}
           onSelectNode={onSelectNode}
-          emptyText={ansicht === 'konzepte' ? KONZEPTE_LEER : undefined}
+          emptyText={ansicht === 'konzepte' ? (isLoading ? '' : KONZEPTE_LEER) : undefined}
           legendTitle={ansicht === 'konzepte' ? 'Arten' : undefined}
         />
       </div>

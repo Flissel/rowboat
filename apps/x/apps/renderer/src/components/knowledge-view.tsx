@@ -675,9 +675,10 @@ function ItemRow({
             <span className="block truncate text-sm font-semibold text-foreground">
               {displayName(node)}
             </span>
+            {/* Neutral badge: the listing has no file content, and no file is read per row. */}
             {isKonzept(node) && (
               <span className="shrink-0 rounded border border-border px-1.5 py-px text-[11px] text-muted-foreground">
-                Konzept
+                HTML-Seite
               </span>
             )}
           </span>
