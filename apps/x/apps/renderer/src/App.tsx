@@ -407,7 +407,7 @@ const normalizeUsage = (usage?: UsageSummary | null): UsageSummary | null => {
 }
 
 // Sidebar folder ordering — listed folders appear in this order, unlisted ones follow alphabetically
-const FOLDER_ORDER = ['People', 'Organizations', 'Projects', 'Topics', 'Meetings', 'Agent Notes', 'Notes']
+const FOLDER_ORDER = ['People', 'Organizations', 'Projects', 'Topics', 'Meetings', 'Agent Notes', 'Notes', 'Konzepte']
 
 /**
  * Per-folder base view config: which columns to show and default sort.
@@ -3130,6 +3130,8 @@ function App() {
       .catch((err: unknown) => console.error('Failed to ensure bases directory:', err))
     window.ipc.invoke('workspace:mkdir', { path: 'knowledge/Notes', recursive: true })
       .catch((err: unknown) => console.error('Failed to ensure Notes directory:', err))
+    window.ipc.invoke('workspace:mkdir', { path: 'knowledge/Konzepte', recursive: true })
+      .catch((err: unknown) => console.error('Failed to ensure Konzepte directory:', err))
   }, [])
 
   // Load initial tree
@@ -7801,6 +7803,7 @@ function App() {
                     onOpenNote={(path) => navigateToFile(path)}
                     onOpenSearch={() => { setSearchDefaultScope('brain'); setIsSearchOpen(true) }}
                     onVoiceNoteCreated={handleVoiceNoteCreated}
+                    onNewKonzept={prefillChat}
                   />
                 </div>
                 </KeepAliveSection>
