@@ -61,18 +61,26 @@ export class RealPermissionChecker implements IPermissionChecker {
     // The one exception to "every MCP call prompts": the code-constant list
     // in vertraute-mcp-werkzeuge.ts, matched on server name, tool name AND
     // the URL of the entry the executor resolves for that name. Other names
-    // never trigger a config read; a failed lookup fails closed.
-    private async vertraut(serverName: string, toolName: string): Promise<boolean> {
+    // never trigger a config read; a failed lookup fails closed. The allowed
+    // answer carries the checked URL (trustedMcp): the runtime logs it and
+    // the executor refuses if the entry it connects with no longer matches.
+    private async vertraut(
+        serverName: string,
+        toolName: string,
+    ): Promise<PermissionCheckAllowed | null> {
         if (!istVertrauterMcpName(serverName, toolName)) {
-            return false;
+            return null;
         }
         let serverUrl: string | null;
         try {
             serverUrl = await this.getMcpServerUrl(serverName);
         } catch {
-            return false;
+            return null;
         }
-        return vertrautesMcpWerkzeug({ serverName, toolName, serverUrl });
+        if (serverUrl === null || !vertrautesMcpWerkzeug({ serverName, toolName, serverUrl })) {
+            return null;
+        }
+        return { required: false, trustedMcp: { serverName, toolName, url: serverUrl } };
     }
 
     async check(
@@ -83,8 +91,11 @@ export class RealPermissionChecker implements IPermissionChecker {
             // toolId family: fail closed with a family-specific request.
             if (input.toolId.startsWith("mcp:")) {
                 const executed = parseMcpToolId(input.toolId);
-                if (executed && (await this.vertraut(executed.server, executed.tool))) {
-                    return { required: false };
+                const trusted = executed
+                    ? await this.vertraut(executed.server, executed.tool)
+                    : null;
+                if (trusted) {
+                    return trusted;
                 }
                 const serverName = input.toolId.split(":")[1];
                 return {
@@ -121,11 +132,11 @@ export class RealPermissionChecker implements IPermissionChecker {
             }
             case "mcp-execute": {
                 const parsed = McpExecuteInput.safeParse(input.input);
-                if (
-                    parsed.success &&
-                    (await this.vertraut(parsed.data.serverName, parsed.data.toolName))
-                ) {
-                    return { required: false };
+                const trusted = parsed.success
+                    ? await this.vertraut(parsed.data.serverName, parsed.data.toolName)
+                    : null;
+                if (trusted) {
+                    return trusted;
                 }
                 return {
                     required: true,

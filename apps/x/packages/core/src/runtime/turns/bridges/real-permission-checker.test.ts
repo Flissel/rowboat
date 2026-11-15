@@ -242,16 +242,74 @@ describe("RealPermissionChecker", () => {
             return { ...input, toolId: `mcp:${serverName}:${toolName}`, toolName, input: {} };
         }
 
+        const ALLOWED = {
+            required: false,
+            trustedMcp: { serverName: SERVER, toolName: TOOL, url: URL_OK },
+        };
+
         it("braucht keine Rückfrage über executeMcpTool, wenn der ausgeführte Eintrag die vertraute URL hat", async () => {
             const { checker, lookups } = checkerWithServers({ [SERVER]: URL_OK });
-            expect(await checker.check(viaExecuteMcpTool(SERVER, TOOL))).toEqual({ required: false });
+            expect(await checker.check(viaExecuteMcpTool(SERVER, TOOL))).toEqual(ALLOWED);
             expect(lookups).toEqual([SERVER]);
         });
 
         it("braucht keine Rückfrage über die Anbindung mcp:<server>:<tool>", async () => {
             const { checker, lookups } = checkerWithServers({ [SERVER]: URL_OK });
-            expect(await checker.check(viaAttachment(SERVER, TOOL))).toEqual({ required: false });
+            expect(await checker.check(viaAttachment(SERVER, TOOL))).toEqual(ALLOWED);
             expect(lookups).toEqual([SERVER]);
+        });
+
+        it("gibt die geprüfte Schreibweise der URL weiter (die Ausführung vergleicht normalisiert)", async () => {
+            const { checker } = checkerWithServers({ [SERVER]: "HTTP://127.1:8156/mcp" });
+            expect(await checker.check(viaExecuteMcpTool(SERVER, TOOL))).toEqual({
+                required: false,
+                trustedMcp: { serverName: SERVER, toolName: TOOL, url: "HTTP://127.1:8156/mcp" },
+            });
+        });
+
+        // E4: executeMcpTool mit den vertrauten Namen in ungültiger Form -> generische Rückfrage, kein Nachschlagen.
+        it("fragt generisch bei ungültiger executeMcpTool-Eingabe mit den vertrauten Namen", async () => {
+            const { checker, lookups } = checkerWithServers({ [SERVER]: URL_OK });
+            const generic = {
+                required: true,
+                request: { kind: "tool", toolId: "builtin:executeMcpTool", toolName: "executeMcpTool" },
+            };
+            for (const odd of [
+                { serverName: [SERVER], toolName: TOOL },
+                { serverName: { name: SERVER }, toolName: TOOL },
+                { serverName: SERVER },
+                { serverName: SERVER, toolName: [TOOL] },
+                null,
+                [],
+                `${SERVER}:${TOOL}`,
+            ]) {
+                expect(
+                    await checker.check({ ...viaExecuteMcpTool(SERVER, TOOL), input: odd }),
+                    JSON.stringify(odd),
+                ).toEqual(generic);
+            }
+            expect(lookups).toEqual([]);
+        });
+
+        it("bleibt vertraut mit zusätzlichen Feldern in der executeMcpTool-Eingabe", async () => {
+            const { checker } = checkerWithServers({ [SERVER]: URL_OK });
+            expect(
+                await checker.check({
+                    ...viaExecuteMcpTool(SERVER, TOOL),
+                    input: { serverName: SERVER, toolName: TOOL, arguments: {}, x: 1 },
+                }),
+            ).toEqual(ALLOWED);
+        });
+
+        // E5: kaputte toolIds -> Rückfrage ohne Nachschlagen.
+        it("fragt bei unvollständigen mcp:-toolIds ohne nachzuschlagen", async () => {
+            const { checker, lookups } = checkerWithServers({ [SERVER]: URL_OK });
+            for (const toolId of [`mcp:${SERVER}:`, `mcp::${TOOL}`, `mcp:${SERVER}`, "mcp:", "mcp::"]) {
+                expect(await checker.check({ ...input, toolId, toolName: TOOL, input: {} }), toolId).toMatchObject({
+                    required: true,
+                });
+            }
+            expect(lookups).toEqual([]);
         });
 
         it("fragt, wenn derselbe Servername auf eine andere URL zeigt", async () => {

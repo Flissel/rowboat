@@ -1,3 +1,4 @@
+// Modified for VibeMind (Flissel/rowboat vibemind): effectiveServerUrl and the trusted-call check in executeTool (vertraute-mcp-werkzeuge.ts).
 import container from "../di/container.js";
 import { Client } from "@modelcontextprotocol/sdk/client";
 import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js";
@@ -10,8 +11,13 @@ import {
     connectionState,
     ListToolsResponse,
     McpServerConfig,
+    McpServerDefinition,
     McpServerList,
 } from "@x/shared/dist/mcp.js";
+import {
+    type VertrauterMcpAufruf,
+    vertrauterAufrufPasst,
+} from "@x/shared/dist/vertraute-mcp-werkzeuge.js";
 import { spacesMcpServers } from "../spaces/orgs.js";
 
 type mcpState = {
@@ -55,12 +61,19 @@ export async function effectiveServerUrl(serverName: string): Promise<string | n
     return typeof config.url === "string" ? config.url : null;
 }
 
-async function getClient(serverName: string): Promise<Client> {
+async function getClient(
+    serverName: string,
+    // Modified for VibeMind (Flissel/rowboat vibemind): runs on the entry this
+    // call is about to use, BEFORE a cached client is reused or a transport is
+    // created; throwing aborts the call with nothing connected.
+    pruefeEintrag?: (config: z.infer<typeof McpServerDefinition>) => void,
+): Promise<Client> {
     const mcpServers = await effectiveServers();
     const config = mcpServers[serverName];
     if (!config) {
         throw new Error(`MCP server ${serverName} not found`);
     }
+    pruefeEintrag?.(config);
     const configKey = JSON.stringify(config);
     const cached = clients[serverName];
     if (cached && cached.state === "connected" && cached.configKey === configKey) {
@@ -184,8 +197,34 @@ export async function listTools(serverName: string, cursor?: string): Promise<z.
     }
 }
 
-export async function executeTool(serverName: string, toolName: string, input: Record<string, unknown>): Promise<unknown> {
-    const client = await getClient(serverName);
+/**
+ * opts.vertraut: set ONLY for a call the permission checker let through
+ * without a prompt (trusted MCP list). The entry this call connects with must
+ * then still be the checked, trusted one — otherwise (mcp.json changed between
+ * check and call, e.g. to another URL or a stdio command) the call is refused
+ * before any client is reused or created. Calls without the marker (human or
+ * classifier approved, legacy paths) run as before.
+ */
+export async function executeTool(
+    serverName: string,
+    toolName: string,
+    input: Record<string, unknown>,
+    opts: { vertraut?: VertrauterMcpAufruf } = {},
+): Promise<unknown> {
+    const { vertraut } = opts;
+    const client = await getClient(
+        serverName,
+        vertraut
+            ? (config) => {
+                  const serverUrl = "command" in config ? null : config.url;
+                  if (!vertrauterAufrufPasst(vertraut, { serverName, toolName, serverUrl })) {
+                      throw new Error(
+                          `Der Eintrag ${serverName} hat sich seit der Prüfung geändert. Aufruf abgebrochen.`,
+                      );
+                  }
+              }
+            : undefined,
+    );
     const result = await client.callTool({
         name: toolName,
         arguments: input,

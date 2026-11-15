@@ -39,6 +39,26 @@ describe("effectiveServerUrl", () => {
         }
     });
 
+    // E6: through the real McpServerConfig.parse (what FSMcpConfigRepo.getConfig applies to mcp.json).
+    it("after the real config parse: {command,url} is stdio (null), {type:http,command,url} is http", async () => {
+        const { McpServerConfig } = await import("@x/shared/dist/mcp.js");
+        state.file = McpServerConfig.parse({
+            mcpServers: {
+                a: { command: "node", url: "http://127.0.0.1:8156/mcp" },
+                b: { type: "http", command: "node", url: "http://127.0.0.1:8156/mcp" },
+            },
+        }).mcpServers;
+        await expect(effectiveServerUrl("a")).resolves.toBeNull();
+        await expect(effectiveServerUrl("b")).resolves.toBe("http://127.0.0.1:8156/mcp");
+    });
+
+    it("after the real config parse: {type:stdio,url} does not parse (the checker then prompts)", async () => {
+        const { McpServerConfig } = await import("@x/shared/dist/mcp.js");
+        expect(() =>
+            McpServerConfig.parse({ mcpServers: { a: { type: "stdio", url: "http://127.0.0.1:8156/mcp" } } }),
+        ).toThrow();
+    });
+
     it("uses the entry getClient uses: a derived spaces entry wins over mcp.json", async () => {
         state.file = { "rowboat-auftraege": { url: "http://127.0.0.1:8156/mcp" } };
         state.spaces = { "rowboat-auftraege": { url: "https://spaces.example.com/mcp" } };
