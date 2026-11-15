@@ -94,9 +94,9 @@ import { CreditCelebration } from "@/components/credit-celebration"
 import { matchBillingError, type BillingErrorMatch } from "@/lib/billing-error"
 import { dispatchCreditExhausted, dispatchCreditReplenished } from "@/lib/credit-status"
 import { rewriteOpenDocumentForRename, renamedFileName } from '@/lib/wiki-rename'
-import { ensureMarkdownExtension, normalizeWikiPath, splitWikiFragment, stripKnowledgePrefix, toKnowledgePath, wikiLabel } from '@/lib/wiki-links'
-import { buildHierarchyGraph, graphFileData, parseVaultMap, vaultMapNodeId, wikiLinkTargets, type NodeInfo } from '@/lib/graph-hierarchy'
-import { buildKonzeptGraph, canCreateWikiTarget, graphHtmlNode, graphNodeLabel, knowledgeHtmlFiles, notizGraph, resolveWikiTarget } from '@/lib/graph-html'
+import { normalizeWikiPath, splitWikiFragment, stripKnowledgePrefix, toKnowledgePath, wikiLabel } from '@/lib/wiki-links'
+import { buildHierarchyGraph, graphFileData, parseVaultMap, vaultMapNodeId, type NodeInfo } from '@/lib/graph-hierarchy'
+import { buildKonzeptGraph, canCreateWikiTarget, graphHtmlNode, graphNodeLabel, graphResolver, knowledgeHtmlFiles, namensIndex, notizGraph, notizZiele, wikiDateiPfad } from '@/lib/graph-html'
 import { konzeptBezugKnoten, konzeptGraphAnsicht } from '@/lib/konzept-graph-ansicht'
 import { splitFrontmatter, joinFrontmatter } from '@/lib/frontmatter'
 import { extractConferenceLink } from '@/lib/calendar-event'
@@ -6968,33 +6968,12 @@ function App() {
     return () => window.removeEventListener('meeting-prep:create-note', handler)
   }, [])
 
-  const resolveWikiFilePath = useCallback((wikiPath: string) => {
-    const normalized = normalizeWikiPath(wikiPath)
-    const { path: basePath } = splitWikiFragment(normalized)
-    if (!basePath) return null
-
-    const targetPath = ensureMarkdownExtension(basePath)
-    const targetKey = targetPath.toLowerCase()
-    const exactMatch = knowledgeGraphFiles.find((filePath) => normalizeWikiPath(filePath).toLowerCase() === targetKey)
-    if (exactMatch) return toKnowledgePath(exactMatch)
-
-    if (!basePath.includes('/')) {
-      const targetBaseName = targetPath.split('/').pop()?.toLowerCase()
-      const basenameMatches = knowledgeGraphFiles.filter((filePath) => {
-        const normalizedFile = normalizeWikiPath(filePath)
-        return normalizedFile.split('/').pop()?.toLowerCase() === targetBaseName
-      })
-      if (basenameMatches.length === 1) return toKnowledgePath(basenameMatches[0])
-    }
-
-    // Extensionless link without x.md: exactly one x.html/.htm/.xhtml wins.
-    // Exact-case comparison, same as the graph edges (nodeSet.has).
-    const known = new Set(knowledgeGraphFiles.map((f) => toKnowledgePath(f)))
-    const htmlHit = resolveWikiTarget(basePath, (p) => known.has(p), [...known].filter((p): p is string => p !== null))
-    if (htmlHit && htmlHit !== toKnowledgePath(basePath)) return htmlHit
-
-    return toKnowledgePath(basePath)
-  }, [knowledgeGraphFiles])
+  // VibeMind: one name index per file list for the [[x]] -> concept rule (lib/graph-html wikiDateiPfad).
+  const knowledgeNamensIndex = React.useMemo(() => namensIndex(knowledgeFilePaths), [knowledgeFilePaths])
+  const resolveWikiFilePath = useCallback(
+    (wikiPath: string) => wikiDateiPfad(wikiPath, knowledgeGraphFiles, knowledgeNamensIndex),
+    [knowledgeGraphFiles, knowledgeNamensIndex],
+  )
 
   const ensureWikiFile = useCallback(async (wikiPath: string) => {
     const resolvedPath = resolveWikiFilePath(wikiPath)
@@ -7079,11 +7058,8 @@ function App() {
           }
         })
       )
-      // VibeMind: [[x]] also finds the one knowledge HTML concept named x (resolveWikiTarget candidates).
-      const resolveNode = (raw: string) => {
-        const target = resolveWikiTarget(raw, (p) => nodeSet.has(p), graphFilePaths)
-        return target && nodeSet.has(target) ? target : null
-      }
+      // VibeMind: one name index per build; [[x]] in a body finds the one concept named x, front matter never by name.
+      const resolveNode = graphResolver(nodeSet, knowledgeFilePaths)
 
       // config/vault-map.json (ehl-schema map) places notes that carry no hierarchy front matter; optional.
       let vaultMap: Map<string, NodeInfo> | undefined
@@ -7093,15 +7069,15 @@ function App() {
       } catch {
         vaultMap = undefined
       }
-      const { edges: typedEdges, info: hierarchyInfo } = buildHierarchyGraph(contents, nodeSet, resolveNode, vaultMap)
+      const { edges: typedEdges, info: hierarchyInfo } = buildHierarchyGraph(contents, nodeSet, resolveNode.body, vaultMap, resolveNode.frontMatter)
       // Notizen graph: concepts only as secondary nodes linked with a note, no concept-concept edges.
       const istKonzept = (p: string) => konzept.isKnowledgeHtmlPath(p)
       const notizenGraph = notizGraph(graphFilePaths, typedEdges, istKonzept)
       edges.push(...notizenGraph.kanten)
       const konzepteGraph = konzeptGraphAnsicht(buildKonzeptGraph(
         contents.filter((c) => istKonzept(c.path)).map((c) => ({ pfad: c.path, html: c.raw })),
-        contents.filter((c) => !istKonzept(c.path)).map((c) => ({ pfad: c.path, ziele: wikiLinkTargets(c.data) })),
-        resolveNode,
+        contents.filter((c) => !istKonzept(c.path)).map((c) => ({ pfad: c.path, ziele: notizZiele(c.data, resolveNode.frontMatter) })),
+        resolveNode.body,
         istKonzept,
       ))
 

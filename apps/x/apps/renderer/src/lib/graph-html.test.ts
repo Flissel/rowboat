@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest'
 import { konzept } from '@x/shared'
-import { buildKonzeptGraph, canCreateWikiTarget, escapeHtml, graphHtmlData, graphHtmlNode, graphLabelHtml, graphNodeLabel, knowledgeHtmlFiles, konzepteMitNotizBezug, notizGraph, resolveWikiTarget } from './graph-html'
+import {
+  buildKonzeptGraph, canCreateWikiTarget, escapeHtml, graphHtmlData, graphHtmlNode, graphLabelHtml, graphNodeLabel,
+  graphResolver, knowledgeHtmlFiles, konzeptPerName, konzepteMitNotizBezug, namensIndex, notizGraph, notizZiele,
+  resolveWikiTarget, wikiDateiPfad,
+} from './graph-html'
 import { buildHierarchyGraph } from './graph-hierarchy'
 import { toKnowledgePath, wikiLabel } from './wiki-links'
 
@@ -104,21 +108,117 @@ describe('graph-html', () => {
   it('loest Konzepte per Pfad ohne Endung und per Dateiname ohne Endung auf (genau ein Treffer)', () => {
     const pfade = ['knowledge/Konzepte/x.html', 'knowledge/Notiz.md']
     const has = (p: string) => pfade.includes(p)
-    expect(resolveWikiTarget('Konzepte/x', has, pfade)).toBe('knowledge/Konzepte/x.html')
-    expect(resolveWikiTarget('x', has, pfade)).toBe('knowledge/Konzepte/x.html')
-    expect(resolveWikiTarget('x|Anzeige', has, pfade)).toBe('knowledge/Konzepte/x.html')
-    // ohne Kandidatenliste wie bisher: [[x]] bleibt knowledge/x.md (nicht vorhanden)
+    const namen = namensIndex(pfade)
+    expect(resolveWikiTarget('Konzepte/x', has, namen)).toBe('knowledge/Konzepte/x.html')
+    expect(resolveWikiTarget('x', has, namen)).toBe('knowledge/Konzepte/x.html')
+    expect(resolveWikiTarget('x|Anzeige', has, namen)).toBe('knowledge/Konzepte/x.html')
+    expect(resolveWikiTarget('x#Abschnitt', has, namen)).toBe('knowledge/Konzepte/x.html')
+    // Groß/Klein wie der Editor: ohne Unterschied
+    expect(resolveWikiTarget('X', has, namen)).toBe('knowledge/Konzepte/x.html')
+    // ohne Namensindex wie bisher: [[x]] bleibt knowledge/x.md (nicht vorhanden)
     expect(resolveWikiTarget('x', has)).toBe('knowledge/x.md')
-    // mehrdeutig (zwei Konzepte oder Konzept und Notiz gleichen Namens): unaufgeloest
-    const zwei = ['knowledge/Konzepte/x.html', 'knowledge/Alt/x.htm']
-    expect(resolveWikiTarget('x', (p) => zwei.includes(p), zwei)).toBe('knowledge/x.md')
-    const mitNotiz = ['knowledge/Konzepte/x.html', 'knowledge/People/x.md']
-    expect(resolveWikiTarget('x', (p) => mitNotiz.includes(p), mitNotiz)).toBe('knowledge/x.md')
     // eine Notiz knowledge/x.md geht vor
     const wurzel = ['knowledge/Konzepte/x.html', 'knowledge/x.md']
-    expect(resolveWikiTarget('x', (p) => wurzel.includes(p), wurzel)).toBe('knowledge/x.md')
+    expect(resolveWikiTarget('x', (p) => wurzel.includes(p), namensIndex(wurzel))).toBe('knowledge/x.md')
     // Pfad mit Ordner sucht nicht per Dateiname
-    expect(resolveWikiTarget('Anders/x', has, pfade)).toBe('knowledge/Anders/x.md')
+    expect(resolveWikiTarget('Anders/x', has, namen)).toBe('knowledge/Anders/x.md')
+  })
+
+  it('Kurzform [[x]]: mehrdeutig oder Notiz gleichen Namens -> unaufgeloest (wie bisher)', () => {
+    const fall = (pfade: string[]) => resolveWikiTarget('x', (p) => pfade.includes(p), namensIndex(pfade))
+    expect(fall(['knowledge/Konzepte/x.html', 'knowledge/Alt/x.htm'])).toBe('knowledge/x.md')
+    expect(fall(['knowledge/Konzepte/x.html', 'knowledge/People/x.md'])).toBe('knowledge/x.md')
+    // nur Groß/Klein verschieden zählt als derselbe Name
+    expect(fall(['knowledge/Konzepte/x.html', 'knowledge/People/X.md'])).toBe('knowledge/x.md')
+    // eine Meeting-Notiz gleichen Namens macht es mehrdeutig
+    expect(fall(['knowledge/Konzepte/x.html', 'knowledge/Meetings/2026/x.md'])).toBe('knowledge/x.md')
+    // eine Datei außerhalb von knowledge/ ist kein Konzept
+    expect(konzeptPerName('x', namensIndex(['other/x.html']))).toBeNull()
+  })
+
+  it('Namensindex: je Verweis ein Nachschlagen, die Dateiliste wird nur einmal gelesen', () => {
+    const pfade = Array.from({ length: 500 }, (_, i) => `knowledge/Notes/n${i}.md`).concat('knowledge/Konzepte/x.html')
+    let gelesen = 0
+    function* liste() {
+      for (const p of pfade) {
+        gelesen++
+        yield p
+      }
+    }
+    const nodeSet = new Set(pfade)
+    const r = graphResolver(nodeSet, liste())
+    for (let i = 0; i < 2000; i++) r.body(`fehlt${i}`)
+    expect(r.body('x')).toBe('knowledge/Konzepte/x.html')
+    expect(gelesen).toBe(pfade.length)
+  })
+
+  it('Editor-Klick: Kurzform nur bei eindeutigem Konzept, sonst wie bisher', () => {
+    const klick = (dateien: string[], link = 'x') =>
+      wikiDateiPfad(link, dateien, namensIndex(dateien.map((d) => `knowledge/${d}`)))
+    expect(klick(['Konzepte/x.html', 'Notiz.md'])).toBe('knowledge/Konzepte/x.html')
+    expect(klick(['Konzepte/x.html', 'People/X.md'])).toBe('knowledge/People/X.md')
+    expect(klick(['Konzepte/x.html', 'Meetings/x.md'])).toBe('knowledge/Meetings/x.md')
+    expect(klick(['Konzepte/x.html', 'People/X.md', 'Orgs/X.md'])).toBe('knowledge/x.md')
+    expect(klick(['Notiz.md'], 'Neu')).toBe('knowledge/Neu.md')
+    expect(klick(['Konzepte/x.html'], 'Konzepte/x')).toBe('knowledge/Konzepte/x.html')
+  })
+})
+
+describe('Frontmatter loest nie per Name auf', () => {
+  const pfade = ['knowledge/Notiz.md', 'knowledge/Konzepte/Marke.html']
+  const nodeSet = new Set(pfade)
+  const notiz = '---\nlevel: 2\nparent: "[[Marke]]"\nthema: "[[Marke]]"\n---\n# Notiz\n'
+
+  it('parent und Relationen im Frontmatter zeigen nicht auf ein Konzept', () => {
+    const r = graphResolver(nodeSet, pfade)
+    const { edges, info } = buildHierarchyGraph([{ path: 'knowledge/Notiz.md', data: notiz }], nodeSet, r.body, undefined, r.frontMatter)
+    expect(info.get('knowledge/Notiz.md')?.parentId).toBeUndefined()
+    expect(edges).toEqual([])
+  })
+
+  it('ein Verweis im Rumpf darf es', () => {
+    const r = graphResolver(nodeSet, pfade)
+    const { edges } = buildHierarchyGraph([{ path: 'knowledge/Notiz.md', data: `${notiz}siehe [[Marke]]\n` }], nodeSet, r.body, undefined, r.frontMatter)
+    expect(edges).toEqual([{ source: 'knowledge/Notiz.md', target: 'knowledge/Konzepte/Marke.html', kind: 'link' }])
+  })
+
+  it('notizZiele: Frontmatter streng aufgeloest vorn, Rumpf roh', () => {
+    const r = graphResolver(nodeSet, pfade)
+    expect(notizZiele(`${notiz}siehe [[Marke]]`, r.frontMatter)).toEqual(['Marke'])
+    expect(notizZiele('---\nparent: "[[Konzepte/Marke]]"\n---\n', r.frontMatter)).toEqual(['knowledge/Konzepte/Marke.html'])
+  })
+
+  it('Konzepte-Graph: Frontmatter-parent per Name ergibt keine Kante', () => {
+    const r = graphResolver(nodeSet, pfade)
+    const g = buildKonzeptGraph(
+      [{ pfad: 'knowledge/Konzepte/Marke.html', html: '<title>Marke</title>' }],
+      [{ pfad: 'knowledge/Notiz.md', ziele: notizZiele(notiz, r.frontMatter) }],
+      r.body,
+      (p) => konzept.isKnowledgeHtmlPath(p),
+    )
+    expect(g.edges).toEqual([])
+  })
+})
+
+describe('ohne Konzepte bleibt der Notizen-Graph wie vorher', () => {
+  it('Knoten, Kanten und Hierarchie gleich dem alten Aufbau', () => {
+    const contents = [
+      { path: 'knowledge/People/Anna.md', data: '---\nlevel: 2\nparent: "[[Orgs/Firma]]"\nkennt: "[[People/Ben]]"\n---\nsiehe [[Projekt]] und [[People/Ben|Ben]]' },
+      { path: 'knowledge/People/Ben.md', data: '[[Anna]] [[Fehlt]] [[Projekt#Teil]]' },
+      { path: 'knowledge/Orgs/Firma.md', data: '---\nlevel: 1\ndomain: Arbeit\n---\n' },
+      { path: 'knowledge/Projekt.md', data: '[[People/Anna]]' },
+    ]
+    const pfade = contents.map((c) => c.path)
+    const nodeSet = new Set(pfade)
+    const alt = buildHierarchyGraph(contents, nodeSet, (raw) => resolveWikiTarget(raw, (p) => nodeSet.has(p)))
+    const r = graphResolver(nodeSet, [...pfade, 'knowledge/Meetings/m.md'])
+    const neu = buildHierarchyGraph(contents, nodeSet, r.body, undefined, r.frontMatter)
+    const istKonzept = (p: string) => konzept.isKnowledgeHtmlPath(p)
+    const notizen = notizGraph(pfade, neu.edges, istKonzept)
+    expect(notizen.pfade).toEqual(pfade)
+    expect(notizen.kanten).toEqual(alt.edges)
+    expect(neu.info).toEqual(alt.info)
+    expect(alt.edges.length).toBeGreaterThan(2)
   })
 })
 
@@ -193,6 +293,22 @@ describe('buildKonzeptGraph', () => {
       { id: B, label: 'B', art: 'konzept' },
     ])
     expect(g.edges).toEqual([{ source: A, target: B, kind: 'verweis' }])
+  })
+
+  it('Konzepte verweisen gegenseitig: je Richtung eine Kante', () => {
+    const g = buildKonzeptGraph(
+      [
+        { pfad: A, html: seite('A', 'konzept', ['[[Konzepte/b]]']) },
+        { pfad: B, html: seite('B', 'konzept', [], 'zurück zu [[Konzepte/a]]') },
+      ],
+      [],
+      resolve,
+      istKonzept,
+    )
+    expect(g.edges).toEqual([
+      { source: A, target: B, kind: 'verweis' },
+      { source: B, target: A, kind: 'verweis' },
+    ])
   })
 
   it('Notiz ohne Konzept-Bezug fehlt; Konzept ohne Bezug ist ein einzelner Knoten', () => {

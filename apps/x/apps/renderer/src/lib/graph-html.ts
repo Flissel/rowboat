@@ -1,7 +1,7 @@
 // HTML-Konzepte im Wissensgraphen: Text für den [[…]]-Leser, Knotennamen, HTML-Dateien, Verweise ohne Endung.
 import { konzept } from '@x/shared'
-import { wikiLinkTargets } from './graph-hierarchy'
-import { normalizeWikiPath, splitWikiFragment, toKnowledgePath, wikiLabel } from './wiki-links'
+import { splitWikiLinkTargets, wikiLinkTargets } from './graph-hierarchy'
+import { ensureMarkdownExtension, normalizeWikiPath, splitWikiFragment, toKnowledgePath, wikiLabel } from './wiki-links'
 
 /**
  * Text einer HTML-Datei für den vorhandenen [[…]]-Leser des Graphen: die bezuege des Datenblocks plus der sichtbare
@@ -59,22 +59,48 @@ export function canCreateWikiTarget(path: string): boolean {
 
 const HTML_ENDUNGEN = ['.html', '.htm', '.xhtml']
 
-/** Dateiname ohne Ordner und ohne `.md`- bzw. HTML-Endung. */
-function nameOhneEndung(path: string): string {
+/**
+ * Schlüssel der Kurzform `[[x]]`: Dateiname ohne Ordner und ohne `.md`- bzw. HTML-Endung, klein geschrieben. Gleiche
+ * Regel wie der Namensabgleich des Editors (`resolveWikiFilePath`: `toLowerCase`, keine Unicode-Normalisierung).
+ */
+function namensSchluessel(path: string): string {
   const name = path.replace(/\\/g, '/').split('/').pop() ?? path
-  return name.replace(/\.(md|html?|xhtml)$/i, '')
+  return name.replace(/\.(md|html?|xhtml)$/i, '').toLowerCase()
+}
+
+/** Name -> alle Pfade dieses Namens (Notizen und HTML, auch Meetings). Einmal je Graph-Aufbau bzw. Dateiliste bauen. */
+export type NamensIndex = ReadonlyMap<string, readonly string[]>
+
+export function namensIndex(pfade: Iterable<string>): NamensIndex {
+  const index = new Map<string, string[]>()
+  for (const p of pfade) {
+    const schluessel = namensSchluessel(p)
+    const liste = index.get(schluessel)
+    if (liste) liste.push(p)
+    else index.set(schluessel, [p])
+  }
+  return index
+}
+
+/**
+ * Kurzform `[[x]]` (kein Ordner, keine Endung) -> das eine Wissens-Konzept dieses Namens, wenn im ganzen Wissensordner
+ * genau EINE Datei (Notiz oder HTML) so heißt und sie ein Konzept ist; sonst null (mehrdeutig, Notiz, nichts).
+ */
+export function konzeptPerName(base: string, namen: NamensIndex): string | null {
+  if (base === '' || base.includes('/') || base.includes('\\')) return null
+  const treffer = namen.get(base.toLowerCase())
+  return treffer && treffer.length === 1 && konzept.isKnowledgeHtmlPath(treffer[0]) ? treffer[0] : null
 }
 
 /**
  * Verweis -> Knoten-Pfad. Mit Endung wie bisher (toKnowledgePath). Ohne Endung: `x.md`, wenn es existiert; sonst
- * genau eine von `x.html`/`x.htm`/`x.xhtml`, wenn nur eine existiert; sonst, bei einem Verweis ohne Ordner und mit
- * `kandidaten` (alle bekannten Wissens-Pfade), die eine HTML-Datei gleichen Namens, wenn der Name unter allen
- * Kandidaten (Notizen und HTML) genau einmal vorkommt; sonst wie bisher (`x.md`, also unaufgelöst, wenn es fehlt).
+ * genau eine von `x.html`/`x.htm`/`x.xhtml`, wenn nur eine existiert. Nur wenn das nichts findet und `namen` gegeben
+ * ist: {@link konzeptPerName} (ein Nachschlagen, O(1)). Sonst wie bisher (`x.md`, unaufgelöst, wenn es fehlt).
  */
 export function resolveWikiTarget(
   raw: string,
   exists: (knowledgePath: string) => boolean,
-  kandidaten: readonly string[] = [],
+  namen?: NamensIndex,
 ): string | null {
   const standard = toKnowledgePath(raw)
   if (!standard) return null
@@ -83,13 +109,73 @@ export function resolveWikiTarget(
   if (exists(standard)) return standard
   const hits = HTML_ENDUNGEN.map((e) => `knowledge/${base}${e}`).filter(exists)
   if (hits.length === 1) return hits[0]
-  if (hits.length === 0 && !base.includes('/')) {
-    const gleichnamig = kandidaten.filter((p) => nameOhneEndung(p) === base)
-    if (gleichnamig.length === 1 && konzept.isKnowledgeHtmlPath(gleichnamig[0]) && exists(gleichnamig[0])) {
-      return gleichnamig[0]
-    }
+  if (hits.length === 0 && namen) {
+    const perName = konzeptPerName(base, namen)
+    if (perName !== null && exists(perName)) return perName
   }
   return standard
+}
+
+/**
+ * Die Auflöser eines Graph-Aufbaus. `alleWissensPfade`: alle Notizen und HTML-Dateien des Wissensordners (auch
+ * Meetings, sie zählen für die Eindeutigkeit des Namens), einmal gelesen; der Namensindex entsteht nur, wenn darunter
+ * ein Wissens-Konzept ist. `body`: Verweise im Rumpf und in `bezuege` (mit Kurzform per Name, Ergebnis je Verweis
+ * gemerkt). `frontMatter`: Verweise im Frontmatter (parent, Relationen), nie per Name. Beide liefern nur Knoten aus
+ * `nodeSet`, sonst null.
+ */
+export function graphResolver(
+  nodeSet: ReadonlySet<string>,
+  alleWissensPfade: Iterable<string>,
+): { body: (ziel: string) => string | null; frontMatter: (ziel: string) => string | null } {
+  const pfade = Array.from(alleWissensPfade)
+  const namen = pfade.some((p) => konzept.isKnowledgeHtmlPath(p)) ? namensIndex(pfade) : undefined
+  const exists = (p: string) => nodeSet.has(p)
+  const imKnoten = (p: string | null) => (p !== null && nodeSet.has(p) ? p : null)
+  const gemerkt = new Map<string, string | null>()
+  return {
+    body: (ziel) => {
+      const alt = gemerkt.get(ziel)
+      if (alt !== undefined) return alt
+      const neu = imKnoten(resolveWikiTarget(ziel, exists, namen))
+      gemerkt.set(ziel, neu)
+      return neu
+    },
+    frontMatter: (ziel) => imKnoten(resolveWikiTarget(ziel, exists)),
+  }
+}
+
+/**
+ * Pfad, den ein Klick auf `[[…]]` im Editor öffnet (oder anlegt). Reihenfolge wie bisher: genauer Pfad (ohne
+ * Groß/Klein), dann eine einzige Notiz gleichen Namens, dann `x.html` am selben Pfad, dann ein eindeutiges Konzept per
+ * Name ({@link konzeptPerName}), sonst `knowledge/<x>.md` (wird angelegt). `dateien` wie `knowledgeGraphFiles`
+ * (ohne `knowledge/`), `namen` aus denselben Dateien mit `knowledge/`.
+ */
+export function wikiDateiPfad(wikiPath: string, dateien: readonly string[], namen: NamensIndex): string | null {
+  const normalized = normalizeWikiPath(wikiPath)
+  const { path: basePath } = splitWikiFragment(normalized)
+  if (!basePath) return null
+
+  const targetPath = ensureMarkdownExtension(basePath)
+  const targetKey = targetPath.toLowerCase()
+  const exactMatch = dateien.find((filePath) => normalizeWikiPath(filePath).toLowerCase() === targetKey)
+  if (exactMatch) return toKnowledgePath(exactMatch)
+
+  if (!basePath.includes('/')) {
+    const targetBaseName = targetPath.split('/').pop()?.toLowerCase()
+    const basenameMatches = dateien.filter((filePath) => {
+      const normalizedFile = normalizeWikiPath(filePath)
+      return normalizedFile.split('/').pop()?.toLowerCase() === targetBaseName
+    })
+    if (basenameMatches.length === 1) return toKnowledgePath(basenameMatches[0])
+  }
+
+  // Extensionless link without x.md: exactly one x.html/.htm/.xhtml wins, else a unique concept by name.
+  // Exact-case comparison for the path, same as the graph edges (nodeSet.has).
+  const known = new Set(dateien.map((f) => toKnowledgePath(f)))
+  const htmlHit = resolveWikiTarget(basePath, (p) => known.has(p), namen)
+  if (htmlHit && htmlHit !== toKnowledgePath(basePath)) return htmlHit
+
+  return toKnowledgePath(basePath)
 }
 
 // ---- Zwei Graphen: Konzepte (mit Notizen als Bezug) und Notizen (mit Konzepten als Bezug) ----
@@ -151,6 +237,16 @@ export function buildKonzeptGraph(
     nodes: [...knoten.values()].sort((a, b) => vor(a.id, b.id)),
     edges: [...kanten.values()].sort((a, b) => vor(a.source, b.source) || vor(a.target, b.target) || vor(a.kind, b.kind)),
   }
+}
+
+/**
+ * `ziele` einer Notiz für {@link buildKonzeptGraph}: Verweise im Frontmatter schon streng aufgelöst (als Pfad mit
+ * Endung, ohne Kurzform per Name; unaufgelöste entfallen), dann die rohen Verweise des Rumpfs.
+ */
+export function notizZiele(data: string, frontMatterResolve: (ziel: string) => string | null): string[] {
+  const { frontMatter, body } = splitWikiLinkTargets(data)
+  const kopf = frontMatter.map(frontMatterResolve).filter((p): p is string => p !== null)
+  return [...kopf, ...body]
 }
 
 /** Konzepte, die im Notizen-Graphen als Nebenknoten bleiben: mit mindestens einer Kante zu einer Notiz (Richtung egal). */
