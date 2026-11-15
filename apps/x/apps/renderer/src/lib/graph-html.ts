@@ -1,5 +1,6 @@
 // HTML-Konzepte im Wissensgraphen: Text für den [[…]]-Leser, Knotennamen, HTML-Dateien, Verweise ohne Endung.
 import { konzept } from '@x/shared'
+import { wikiLinkTargets } from './graph-hierarchy'
 import { normalizeWikiPath, splitWikiFragment, toKnowledgePath, wikiLabel } from './wiki-links'
 
 /**
@@ -58,16 +59,127 @@ export function canCreateWikiTarget(path: string): boolean {
 
 const HTML_ENDUNGEN = ['.html', '.htm', '.xhtml']
 
+/** Dateiname ohne Ordner und ohne `.md`- bzw. HTML-Endung. */
+function nameOhneEndung(path: string): string {
+  const name = path.replace(/\\/g, '/').split('/').pop() ?? path
+  return name.replace(/\.(md|html?|xhtml)$/i, '')
+}
+
 /**
  * Verweis -> Knoten-Pfad. Mit Endung wie bisher (toKnowledgePath). Ohne Endung: `x.md`, wenn es existiert; sonst
- * genau eine von `x.html`/`x.htm`/`x.xhtml`, wenn nur eine existiert; sonst wie bisher (`x.md`).
+ * genau eine von `x.html`/`x.htm`/`x.xhtml`, wenn nur eine existiert; sonst, bei einem Verweis ohne Ordner und mit
+ * `kandidaten` (alle bekannten Wissens-Pfade), die eine HTML-Datei gleichen Namens, wenn der Name unter allen
+ * Kandidaten (Notizen und HTML) genau einmal vorkommt; sonst wie bisher (`x.md`, also unaufgelöst, wenn es fehlt).
  */
-export function resolveWikiTarget(raw: string, exists: (knowledgePath: string) => boolean): string | null {
+export function resolveWikiTarget(
+  raw: string,
+  exists: (knowledgePath: string) => boolean,
+  kandidaten: readonly string[] = [],
+): string | null {
   const standard = toKnowledgePath(raw)
   if (!standard) return null
   const base = splitWikiFragment(normalizeWikiPath(raw)).path
   if (standard !== `knowledge/${base}.md` || base.toLowerCase().endsWith('.md')) return standard
   if (exists(standard)) return standard
   const hits = HTML_ENDUNGEN.map((e) => `knowledge/${base}${e}`).filter(exists)
-  return hits.length === 1 ? hits[0] : standard
+  if (hits.length === 1) return hits[0]
+  if (hits.length === 0 && !base.includes('/')) {
+    const gleichnamig = kandidaten.filter((p) => nameOhneEndung(p) === base)
+    if (gleichnamig.length === 1 && konzept.isKnowledgeHtmlPath(gleichnamig[0]) && exists(gleichnamig[0])) {
+      return gleichnamig[0]
+    }
+  }
+  return standard
+}
+
+// ---- Zwei Graphen: Konzepte (mit Notizen als Bezug) und Notizen (mit Konzepten als Bezug) ----
+
+export type KonzeptKnoten = { id: string; label: string; art: 'konzept' | 'videokonzept' | 'html' | 'notiz' }
+export type KonzeptKante = { source: string; target: string; kind: 'verweis' }
+
+/**
+ * Der Konzepte-Graph. Hauptknoten: jede HTML-Datei aus `eintraege` (Name aus `<title>`, sonst Dateiname; Art aus dem
+ * Datenblock, ohne lesbaren Block `html`; eine nicht gelesene Datei kommt mit leerem `html`). Nebenknoten (`notiz`):
+ * jede Notiz, auf die ein Konzept verweist (bezuege oder Verweise im sichtbaren Text) oder die auf ein Konzept verweist
+ * (`notizen[].ziele`, die schon gelesenen `[[…]]`-Ziele). Kanten `verweis` in Richtung des Verweises; doppelte
+ * zusammengefasst, Selbstbezüge und unaufgelöste Ziele (`resolve` -> null) entfallen. Ordnung: Knoten nach id,
+ * Kanten nach source, target, kind. Alle Namen sind reiner Text.
+ */
+export function buildKonzeptGraph(
+  eintraege: { pfad: string; html: string }[],
+  notizen: { pfad: string; ziele: string[] }[],
+  resolve: (ziel: string) => string | null,
+  istKonzept: (pfad: string) => boolean,
+): { nodes: KonzeptKnoten[]; edges: KonzeptKante[] } {
+  const knoten = new Map<string, KonzeptKnoten>()
+  for (const { pfad, html } of eintraege) {
+    const capped = html.length > konzept.KONZEPT_LESE_MAX ? html.slice(0, konzept.KONZEPT_LESE_MAX) : html
+    const art = konzept.readKonzept(capped).daten?.art ?? 'html'
+    knoten.set(pfad, { id: pfad, label: graphNodeLabel(pfad, capped), art })
+  }
+  const kanten = new Map<string, KonzeptKante>()
+  const notizKnoten = (pfad: string) => {
+    if (!knoten.has(pfad)) knoten.set(pfad, { id: pfad, label: graphNodeLabel(pfad, ''), art: 'notiz' })
+  }
+  const kante = (source: string, target: string) => {
+    if (source !== target) kanten.set(`${source}\u0000${target}`, { source, target, kind: 'verweis' })
+  }
+  const konzeptPfade = new Set(eintraege.map((e) => e.pfad))
+  for (const { pfad, html } of eintraege) {
+    for (const roh of wikiLinkTargets(graphHtmlData(html))) {
+      const ziel = resolve(roh)
+      if (ziel === null || ziel === pfad) continue
+      if (istKonzept(ziel)) {
+        if (konzeptPfade.has(ziel)) kante(pfad, ziel)
+      } else {
+        notizKnoten(ziel)
+        kante(pfad, ziel)
+      }
+    }
+  }
+  for (const { pfad, ziele } of notizen) {
+    if (konzeptPfade.has(pfad)) continue
+    for (const roh of ziele) {
+      const ziel = resolve(roh)
+      if (ziel === null || ziel === pfad || !istKonzept(ziel) || !konzeptPfade.has(ziel)) continue
+      notizKnoten(pfad)
+      kante(pfad, ziel)
+    }
+  }
+  const vor = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0)
+  return {
+    nodes: [...knoten.values()].sort((a, b) => vor(a.id, b.id)),
+    edges: [...kanten.values()].sort((a, b) => vor(a.source, b.source) || vor(a.target, b.target) || vor(a.kind, b.kind)),
+  }
+}
+
+/** Konzepte, die im Notizen-Graphen als Nebenknoten bleiben: mit mindestens einer Kante zu einer Notiz (Richtung egal). */
+export function konzepteMitNotizBezug(
+  kanten: readonly { source: string; target: string }[],
+  istKonzept: (pfad: string) => boolean,
+): Set<string> {
+  const out = new Set<string>()
+  for (const { source, target } of kanten) {
+    const s = istKonzept(source)
+    const t = istKonzept(target)
+    if (s && !t) out.add(source)
+    if (t && !s) out.add(target)
+  }
+  return out
+}
+
+/**
+ * Der Notizen-Graph aus dem heutigen Graphen: alle Notizen, Konzepte nur mit Notiz-Bezug ({@link konzepteMitNotizBezug}),
+ * ohne Kanten zwischen zwei Konzepten. Reihenfolge der Eingabe bleibt.
+ */
+export function notizGraph<K extends { source: string; target: string }>(
+  pfade: readonly string[],
+  kanten: readonly K[],
+  istKonzept: (pfad: string) => boolean,
+): { pfade: string[]; kanten: K[] } {
+  const bleiben = konzepteMitNotizBezug(kanten, istKonzept)
+  return {
+    pfade: pfade.filter((p) => !istKonzept(p) || bleiben.has(p)),
+    kanten: kanten.filter((k) => !(istKonzept(k.source) && istKonzept(k.target))),
+  }
 }

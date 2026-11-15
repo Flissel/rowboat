@@ -221,9 +221,14 @@ export function buildHierarchyGraph(
     if (hierarchy.parent) add(path, hierarchy.parent, 'parent')
     else if (mappedParent) addEdge(path, mappedParent, 'parent')
     for (const relation of hierarchy.relations) add(path, relation.target, 'relation', relation.name)
-    for (const match of data.matchAll(LINK)) add(path, match[1], 'link')
+    for (const target of wikiLinkTargets(data)) add(path, target, 'link')
   }
   return { edges: Array.from(edges.values()), info }
+}
+
+/** Raw `[[…]]` targets of a note's text, as the graph edges read them (VibeMind: Konzepte-Graph uses the same list). */
+export function wikiLinkTargets(data: string): string[] {
+  return Array.from(data.matchAll(LINK), (m) => m[1])
 }
 
 // ---- 3D view (react-force-graph-3d): nodes on one sphere shell per level ----
