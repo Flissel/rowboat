@@ -33,7 +33,8 @@ import { queuedMessageText } from './components/chat-session';
 // Value import: the Home to-do surface mounts a standalone composer directly
 // (not tab-bound); chat tabs render theirs through ChatSessionComposer.
 import { ChatInputWithMentions, type CallPreset, type PermissionMode, type StagedAttachment, type ModelSelection } from './components/chat-input-with-mentions';
-import { GraphView, type GraphEdge, type GraphNode } from '@/components/graph-view';
+import { type GraphEdge, type GraphNode } from '@/components/graph-view';
+import { GraphMitAnsicht } from '@/components/graph-ansicht';
 import { BasesView, type BaseConfig, DEFAULT_BASE_CONFIG } from '@/components/bases-view';
 import { PersistentViewerCache } from '@/components/persistent-viewer-cache';
 import { getViewerType, isCacheableViewerPath } from '@/lib/file-types';
@@ -94,8 +95,9 @@ import { matchBillingError, type BillingErrorMatch } from "@/lib/billing-error"
 import { dispatchCreditExhausted, dispatchCreditReplenished } from "@/lib/credit-status"
 import { rewriteOpenDocumentForRename, renamedFileName } from '@/lib/wiki-rename'
 import { ensureMarkdownExtension, normalizeWikiPath, splitWikiFragment, stripKnowledgePrefix, toKnowledgePath, wikiLabel } from '@/lib/wiki-links'
-import { buildHierarchyGraph, graphFileData, parseVaultMap, vaultMapNodeId, type NodeInfo } from '@/lib/graph-hierarchy'
-import { canCreateWikiTarget, graphHtmlNode, graphNodeLabel, knowledgeHtmlFiles, resolveWikiTarget } from '@/lib/graph-html'
+import { buildHierarchyGraph, graphFileData, parseVaultMap, vaultMapNodeId, wikiLinkTargets, type NodeInfo } from '@/lib/graph-hierarchy'
+import { buildKonzeptGraph, canCreateWikiTarget, graphHtmlNode, graphNodeLabel, knowledgeHtmlFiles, notizGraph, resolveWikiTarget } from '@/lib/graph-html'
+import { konzeptBezugKnoten, konzeptGraphAnsicht } from '@/lib/konzept-graph-ansicht'
 import { splitFrontmatter, joinFrontmatter } from '@/lib/frontmatter'
 import { extractConferenceLink } from '@/lib/calendar-event'
 import { OnboardingModal } from '@/components/onboarding'
@@ -947,6 +949,11 @@ function App() {
   const [emailSearchQueryVersion, setEmailSearchQueryVersion] = useState(0)
   const [baseConfigByPath, setBaseConfigByPath] = useState<Record<string, BaseConfig>>({})
   const [graphData, setGraphData] = useState<{ nodes: GraphNode[]; edges: GraphEdge[] }>({
+    nodes: [],
+    edges: [],
+  })
+  // VibeMind: second graph (HTML concepts plus the notes they link with), see GraphMitAnsicht.
+  const [konzeptGraphData, setKonzeptGraphData] = useState<{ nodes: GraphNode[]; edges: GraphEdge[] }>({
     nodes: [],
     edges: [],
   })
@@ -6981,7 +6988,7 @@ function App() {
     // Extensionless link without x.md: exactly one x.html/.htm/.xhtml wins.
     // Exact-case comparison, same as the graph edges (nodeSet.has).
     const known = new Set(knowledgeGraphFiles.map((f) => toKnowledgePath(f)))
-    const htmlHit = resolveWikiTarget(basePath, (p) => known.has(p))
+    const htmlHit = resolveWikiTarget(basePath, (p) => known.has(p), [...known].filter((p): p is string => p !== null))
     if (htmlHit && htmlHit !== toKnowledgePath(basePath)) return htmlHit
 
     return toKnowledgePath(basePath)
@@ -7041,6 +7048,7 @@ function App() {
 
       if (knowledgeFilePaths.length === 0) {
         setGraphData({ nodes: [], edges: [] })
+        setKonzeptGraphData({ nodes: [], edges: [] })
         setGraphStatus('ready')
         return
       }
@@ -7060,15 +7068,20 @@ function App() {
             const data = graphFileData(result)
             if (konzept.isHtmlPath(path)) {
               const node = graphHtmlNode(path, data)
-              return { path, data: node.data, label: node.label }
+              return { path, data: node.data, label: node.label, raw: data }
             }
-            return { path, data, label: graphNodeLabel(path, data) }
+            return { path, data, label: graphNodeLabel(path, data), raw: '' }
           } catch (err) {
             console.error('Failed to read file for graph:', path, err)
-            return { path, data: '', label: graphNodeLabel(path, '') }
+            return { path, data: '', label: graphNodeLabel(path, ''), raw: '' }
           }
         })
       )
+      // VibeMind: [[x]] also finds the one knowledge HTML concept named x (resolveWikiTarget candidates).
+      const resolveNode = (raw: string) => {
+        const target = resolveWikiTarget(raw, (p) => nodeSet.has(p), graphFilePaths)
+        return target && nodeSet.has(target) ? target : null
+      }
 
       // config/vault-map.json (ehl-schema map) places notes that carry no hierarchy front matter; optional.
       let vaultMap: Map<string, NodeInfo> | undefined
@@ -7078,8 +7091,17 @@ function App() {
       } catch {
         vaultMap = undefined
       }
-      const { edges: typedEdges, info: hierarchyInfo } = buildHierarchyGraph(contents, nodeSet, (raw) => resolveWikiTarget(raw, (p) => nodeSet.has(p)), vaultMap)
-      edges.push(...typedEdges)
+      const { edges: typedEdges, info: hierarchyInfo } = buildHierarchyGraph(contents, nodeSet, resolveNode, vaultMap)
+      // Notizen graph: concepts only as secondary nodes linked with a note, no concept-concept edges.
+      const istKonzept = (p: string) => konzept.isKnowledgeHtmlPath(p)
+      const notizenGraph = notizGraph(graphFilePaths, typedEdges, istKonzept)
+      edges.push(...notizenGraph.kanten)
+      const konzepteGraph = konzeptGraphAnsicht(buildKonzeptGraph(
+        contents.filter((c) => istKonzept(c.path)).map((c) => ({ pfad: c.path, html: c.raw })),
+        contents.filter((c) => !istKonzept(c.path)).map((c) => ({ pfad: c.path, ziele: wikiLinkTargets(c.data) })),
+        resolveNode,
+        istKonzept,
+      ))
 
       const degreeMap = new Map<string, number>()
       edges.forEach((edge) => {
@@ -7117,8 +7139,9 @@ function App() {
       }
 
       const labelByPath = new Map(contents.map((c) => [c.path, c.label]))
-      const nodes = graphFilePaths.map((path) => {
+      const nodes = notizenGraph.pfade.map((path) => {
         const degree = degreeMap.get(path) ?? 0
+        if (istKonzept(path)) return konzeptBezugKnoten(path, labelByPath.get(path) ?? graphNodeLabel(path, ''), degree)
         const radius = 6 + Math.min(18, degree * 2)
         const hierarchy = hierarchyInfo.get(path)
         const folderGroup = getNodeGroup(path)
@@ -7142,6 +7165,7 @@ function App() {
 
       if (!cancelled) {
         setGraphData({ nodes, edges })
+        setKonzeptGraphData(konzepteGraph)
         setGraphStatus('ready')
       }
     }
@@ -7742,10 +7766,9 @@ function App() {
                     mode={knowledgeViewMode}
                     onModeChange={setKnowledgeViewMode}
                     graphContent={(
-                      <GraphView
-                        nodes={graphData.nodes}
-                        edges={graphData.edges}
-                        isLoading={false}
+                      <GraphMitAnsicht
+                        notizen={graphData}
+                        konzepte={konzeptGraphData}
                         error={graphStatus === 'error' ? (graphError ?? 'Failed to build graph') : null}
                         onSelectNode={(path) => {
                           navigateToFile(path)
@@ -7833,10 +7856,9 @@ function App() {
               )}
               {activeMiddle === 'graph' && (
                 <div className="flex-1 min-h-0">
-                  <GraphView
-                    nodes={graphData.nodes}
-                    edges={graphData.edges}
-                    isLoading={false}
+                  <GraphMitAnsicht
+                    notizen={graphData}
+                    konzepte={konzeptGraphData}
                     error={graphStatus === 'error' ? (graphError ?? 'Failed to build graph') : null}
                     onSelectNode={(path) => {
                       navigateToFile(path)
