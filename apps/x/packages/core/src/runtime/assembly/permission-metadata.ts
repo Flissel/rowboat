@@ -11,7 +11,7 @@ import { ToolCallPart } from "@x/shared/dist/message.js";
 import { z } from "zod";
 import { ToolPermissionMetadata } from "@x/shared/dist/runs.js";
 import { isBlocked, extractCommandNames } from "../../application/lib/command-executor.js";
-import { canonicalCodeAgentCwd, isProtectedWrite } from "../tools/protected-paths.js";
+import { canonicalCodeAgentCwd, isProtectedWrite, needsHumanForProtectedPath } from "../tools/protected-paths.js";
 import { getFileAccessAllowList, type FileAccessGrant, type FileAccessOperation } from "../../config/security.js";
 import { isPathInside, resolveFilePathForPermission } from "../../filesystem/files.js";
 
@@ -145,8 +145,8 @@ export async function getToolPermissionMetadata(
     const resolvedTargets = await Promise.all(targets.paths.map(p => resolveFilePathForPermission(p)));
     // VibeMind (ticket #330): a write to a protected path (config/, keys,
     // channels/, ...) asks the human, inside the workspace too and whatever
-    // file grants are stored.
-    if (await isProtectedWrite(underlyingTool.name, args)) {
+    // file grants are stored. Fix round 1: reading one as well.
+    if (await needsHumanForProtectedPath(underlyingTool.name, args)) {
         const paths = resolvedTargets.map(target => target.canonicalPath);
         return {
             kind: 'file',

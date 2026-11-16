@@ -67,6 +67,19 @@ describe("file tools on protected paths", () => {
         }
     });
 
+    it("fix round 1 (C1): reading a protected entry is a human-only read request", async () => {
+        expect(await check("file-readText", { path: "server-key" })).toMatchObject({
+            required: true,
+            request: { kind: "file", operation: "read", humanOnly: true },
+        });
+        expect(await check("file-copy", { from: "config/mcp.json", to: "knowledge/m.json" })).toMatchObject({
+            required: true,
+            request: { kind: "file", humanOnly: true },
+        });
+        expect(await check("file-readText", { path: "knowledge/x.md" })).toEqual({ required: false });
+        expect(await check("file-grep", { pattern: "x" })).toEqual({ required: false });
+    });
+
     it("knowledge/x.md stays prompt-free", async () => {
         expect(await check("file-writeText", { path: "knowledge/x.md", data: "# x" })).toEqual({ required: false });
     });

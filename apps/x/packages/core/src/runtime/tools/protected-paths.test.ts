@@ -12,7 +12,9 @@ process.env.ROWBOAT_WORKDIR = root;
 const {
     PROTECTED_WORKSPACE_ENTRIES,
     commandNamesProtectedEntry,
+    isProtectedRead,
     isProtectedWrite,
+    needsHumanForProtectedPath,
     setNativeRealpathForTests,
 } = await import("./protected-paths.js");
 
@@ -165,6 +167,50 @@ describe("isProtectedWrite — file tools", () => {
     it("reads are not writes", async () => {
         expect(await isProtectedWrite("file-readText", { path: "config/mcp.json" })).toBe(false);
         expect(await isProtectedWrite("file-list", { path: "config" })).toBe(false);
+    });
+});
+
+describe("isProtectedRead (fix round 1, review C1)", () => {
+    it("content reads of a protected entry count", async () => {
+        for (const [name, input] of [
+            ["file-readText", { path: "server-key" }],
+            ["file-readText", { path: "config/mcp.json" }],
+            ["file-readText", { path: "scoped-keys.json" }],
+            ["file-readText", { path: "knowledge/link/mcp.json" }],
+            ["parseFile", { path: "cipher-key" }],
+            ["LLMParse", { path: "config/mcp.json" }],
+            ["deck-review", { path: "config/d.pptx" }],
+            ["transcribe-audio", { path: "channels/a.ogg" }],
+            ["file-exists", { path: "server-key" }],
+            ["file-stat", { path: "server-key" }],
+            ["file-copy", { from: "config/mcp.json", to: "knowledge/m.json" }],
+            ["file-readText", { path: "\\\\localhost\\share\\x.md" }],
+        ] as Array<[string, Record<string, unknown>]>) {
+            expect(await isProtectedRead(name, input), `${name} ${JSON.stringify(input)}`).toBe(true);
+            expect(await needsHumanForProtectedPath(name, input), name).toBe(true);
+        }
+    });
+
+    it("listing or searching inside a protected entry counts; the workspace root does not", async () => {
+        expect(await isProtectedRead("file-list", { path: "config" })).toBe(true);
+        expect(await isProtectedRead("file-glob", { pattern: "*", cwd: "channels" })).toBe(true);
+        expect(await isProtectedRead("file-grep", { pattern: "x", searchPath: "config" })).toBe(true);
+        expect(await isProtectedRead("file-grep", { pattern: "x", searchPath: "server-key" })).toBe(true);
+        expect(await isProtectedRead("file-list", { path: "." })).toBe(false);
+        expect(await isProtectedRead("file-grep", { pattern: "x" })).toBe(false);
+        expect(await isProtectedRead("file-glob", { pattern: "config/**" })).toBe(false);
+    });
+
+    it("leaves ordinary reads alone", async () => {
+        for (const [name, input] of [
+            ["file-readText", { path: "knowledge/x.md" }],
+            ["file-readText", { path: "configuration.md" }],
+            ["file-copy", { from: "knowledge/x.md", to: "knowledge/y.md" }],
+            ["file-writeText", { path: "config/mcp.json", data: "x" }],
+        ] as Array<[string, Record<string, unknown>]>) {
+            expect(await isProtectedRead(name, input), name).toBe(false);
+        }
+        expect(await needsHumanForProtectedPath("file-writeText", { path: "config/mcp.json", data: "x" })).toBe(true);
     });
 });
 

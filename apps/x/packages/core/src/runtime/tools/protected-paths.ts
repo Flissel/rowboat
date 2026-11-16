@@ -56,13 +56,17 @@ function hasStreamSyntax(inputPath: string): boolean {
     return rest.includes(":");
 }
 
-function protectedUnder(root: string, target: string): boolean {
-    // The workspace itself or one of its ancestors: removing or moving it
-    // takes the protected entries along.
-    if (isPathInside(target, root)) return true;
-    if (!isPathInside(root, target)) return false;
+// "entry": a protected entry or a path inside one (or a path no check can
+// map back: stream, 8.3 or UNC syntax). "container": the workspace itself or
+// one of its ancestors — removing or moving it takes the entries along, but
+// listing or searching it does not read them.
+type ProtectedKind = "entry" | "container" | null;
+
+function protectedUnder(root: string, target: string): ProtectedKind {
+    if (isPathInside(target, root)) return "container";
+    if (!isPathInside(root, target)) return null;
     const first = path.relative(root, target).split(path.sep)[0] ?? "";
-    return isProtectedEntryName(first);
+    return isProtectedEntryName(first) ? "entry" : null;
 }
 
 async function canonicalWorkspaceRoot(): Promise<string> {
@@ -113,21 +117,30 @@ function isUncOrDevicePath(p: string): boolean {
 // path, the real path (symlinks / junctions resolved where the target
 // exists) and the native real path (alias drives) are checked.
 export async function isProtectedPath(inputPath: string): Promise<boolean> {
-    if (hasStreamSyntax(inputPath)) return true;
+    return (await protectedPathKind(inputPath)) !== null;
+}
+
+// "entry" wins over "container": the strongest answer of the three checks.
+async function protectedPathKind(inputPath: string): Promise<ProtectedKind> {
+    if (hasStreamSyntax(inputPath)) return "entry";
     // An 8.3 short name (SERVER~1, CONFIG~1) is not resolved by the lexical
     // check: the 8.3 shape counts as protected.
-    if (SHORT_NAME_SHAPE.test(inputPath)) return true;
-    if (isUncOrDevicePath(inputPath.trim()) || isUncOrDevicePath(expandHomePath(inputPath))) return true;
+    if (SHORT_NAME_SHAPE.test(inputPath)) return "entry";
+    if (isUncOrDevicePath(inputPath.trim()) || isUncOrDevicePath(expandHomePath(inputPath))) return "entry";
     const resolved = await resolveFilePathForPermission(inputPath);
-    if (isUncOrDevicePath(resolved.canonicalPath) && !isUncOrDevicePath(path.resolve(WorkDir))) return true;
-    if (protectedUnder(path.resolve(WorkDir), resolved.resolvedPath)) return true;
-    if (protectedUnder(await canonicalWorkspaceRoot(), resolved.canonicalPath)) return true;
+    if (isUncOrDevicePath(resolved.canonicalPath) && !isUncOrDevicePath(path.resolve(WorkDir))) return "entry";
     const [nativeRoot, nativeTarget] = await Promise.all([
         nativeCanonical(path.resolve(WorkDir)),
         nativeCanonical(resolved.resolvedPath),
     ]);
-    if (isUncOrDevicePath(nativeTarget) && !isUncOrDevicePath(nativeRoot)) return true;
-    return protectedUnder(nativeRoot, nativeTarget);
+    if (isUncOrDevicePath(nativeTarget) && !isUncOrDevicePath(nativeRoot)) return "entry";
+    const kinds = [
+        protectedUnder(path.resolve(WorkDir), resolved.resolvedPath),
+        protectedUnder(await canonicalWorkspaceRoot(), resolved.canonicalPath),
+        protectedUnder(nativeRoot, nativeTarget),
+    ];
+    if (kinds.includes("entry")) return "entry";
+    return kinds.includes("container") ? "container" : null;
 }
 
 // cmd.exe drops "^", the shells drop quotes, bash drops "\" escapes: check
@@ -194,10 +207,50 @@ export async function isProtectedWrite(toolName: string, args: Record<string, un
     if (!targets || (targets.operation !== "write" && targets.operation !== "delete")) {
         return false;
     }
-    // file-copy only reads its source.
+    // file-copy only reads its source (see isProtectedRead).
     const writePaths = toolName === "file-copy" ? targets.paths.slice(1) : targets.paths;
     for (const target of writePaths) {
         if (await isProtectedPath(target)) return true;
     }
     return false;
+}
+
+// Fix round 1 (review C1): reading a protected entry needs the human as well
+// — server-key opens every RPC of the local server. True when the call reads
+// the content of a protected path (file-readText, parseFile, LLMParse,
+// deck-review, transcribe-audio, and file-exists / file-stat on it), copies
+// FROM one, or lists / searches inside one. Listing or searching the
+// workspace itself (or an ancestor) does not count; a workspace-wide
+// file-grep drops matches in protected files instead (protectedContentFilter).
+export async function isProtectedRead(toolName: string, args: Record<string, unknown>): Promise<boolean> {
+    const targets = filePermissionTargets(toolName, args);
+    if (!targets) return false;
+    if (toolName === "file-copy") {
+        const from = targets.paths[0];
+        return from !== undefined && (await isProtectedPath(from));
+    }
+    if (targets.operation === "read") {
+        for (const target of targets.paths) {
+            if (await isProtectedPath(target)) return true;
+        }
+        return false;
+    }
+    if (targets.operation === "list" || targets.operation === "search") {
+        for (const target of targets.paths) {
+            if ((await protectedPathKind(target)) === "entry") return true;
+        }
+    }
+    return false;
+}
+
+// The one gate for the permission request and execTool: a protected write
+// or a protected read.
+export async function needsHumanForProtectedPath(toolName: string, args: Record<string, unknown>): Promise<boolean> {
+    return (await isProtectedWrite(toolName, args)) || (await isProtectedRead(toolName, args));
+}
+
+// Per-file filter for a search that was not approved by a human: keeps a
+// file only when it is not protected (checked before the file is read).
+export async function protectedContentFilter(absPath: string): Promise<boolean> {
+    return !(await isProtectedPath(absPath));
 }

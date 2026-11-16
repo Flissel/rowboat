@@ -8,7 +8,7 @@ import { executeTool } from "../../mcp/mcp.js";
 import { IAbortRegistry } from "../turns/abort-registry.js";
 import { sandboxChecker, type HeadlessSandbox } from "./headless-sandbox.js";
 import { quarantineChecker, quarantineMode } from "./channel-quarantine.js";
-import { isProtectedWrite } from "./protected-paths.js";
+import { needsHumanForProtectedPath } from "./protected-paths.js";
 
 /**
  * Context passed to every tool execution, providing abort signal and run metadata.
@@ -93,10 +93,11 @@ export async function execTool(agentTool: z.infer<typeof ToolAttachment>, input:
                 if (refused) return { error: refused };
             }
             // Protected paths (ticket #330): config/, keys, channels/ ... are
-            // written only after a human approved this call.
-            if (ctx?.humanApproved !== true && (await isProtectedWrite(agentTool.name, input))) {
+            // written (fix round 1: and read) only after a human approved
+            // this call.
+            if (ctx?.humanApproved !== true && (await needsHumanForProtectedPath(agentTool.name, input))) {
                 return {
-                    error: `"${agentTool.name}" would change a protected workspace path (config/, keys, channels/, app data). This needs the human's approval in the permission prompt; it was not given for this call.`,
+                    error: `"${agentTool.name}" would read or change a protected workspace path (config/, keys, channels/, app data). This needs the human's approval in the permission prompt; it was not given for this call.`,
                 };
             }
             return builtinTool.execute(input, ctx);

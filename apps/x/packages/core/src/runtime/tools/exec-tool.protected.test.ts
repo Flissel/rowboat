@@ -143,6 +143,55 @@ describe("execTool protected writes", () => {
     it("leaves ordinary writes alone", async () => {
         expect(await refused("file-writeText", { path: "knowledge/y.md", data: "# y\n" })).toBeUndefined();
         expect(await fs.readFile(ws("knowledge/y.md"), "utf8")).toBe("# y\n");
-        expect(await refused("file-copy", { from: "config/mcp.json", to: "knowledge/m.json" })).toBeUndefined();
+    });
+});
+
+describe("execTool protected reads (fix round 1, review C1)", () => {
+    beforeEach(async () => {
+        await fs.writeFile(ws("server-key"), "KEYVALUE-not-a-real-key\n");
+    });
+
+    it("refuses reading server-key, config/ and copying out of config/ without humanApproved", async () => {
+        const cases: Array<[string, Record<string, unknown>]> = [
+            ["file-readText", { path: "server-key" }],
+            ["file-readText", { path: "config/mcp.json" }],
+            ["file-readText", { path: "Server-Key." }],
+            ["parseFile", { path: "server-key" }],
+            ["file-copy", { from: "config/mcp.json", to: "knowledge/m.json" }],
+            ["file-list", { path: "config" }],
+            ["file-grep", { pattern: ".", searchPath: "config" }],
+            ["file-glob", { pattern: "*", cwd: "config" }],
+        ];
+        for (const [name, input] of cases) {
+            expect(await refused(name, input), `${name} ${JSON.stringify(input)}`).toMatch(/protected/i);
+        }
+        expect(fsSync.existsSync(ws("knowledge/m.json"))).toBe(false);
+    });
+
+    it("reads server-key when a human approved the call", async () => {
+        const result = (await execTool(builtin("file-readText"), { path: "server-key" }, ctx({ humanApproved: true }))) as {
+            content?: string;
+            error?: string;
+        };
+        expect(result.error).toBeUndefined();
+        expect(JSON.stringify(result)).toContain("KEYVALUE");
+    });
+
+    it("a workspace-wide grep never returns lines of protected files", async () => {
+        await fs.writeFile(ws("knowledge/k.md"), "KEYVALUE in a note\n");
+        const result = (await execTool(builtin("file-grep"), { pattern: "KEYVALUE" }, ctx())) as {
+            matches?: Array<{ file?: string; resolvedPath?: string }>;
+            error?: string;
+        };
+        expect(result.error).toBeUndefined();
+        const text = JSON.stringify(result);
+        expect(text).toContain("k.md");
+        expect(text).not.toContain("server-key");
+    });
+
+    it("leaves ordinary reads alone", async () => {
+        expect(await refused("file-readText", { path: "knowledge/x.md" })).toBeUndefined();
+        expect(await refused("file-list", { path: "." })).toBeUndefined();
+        expect(await refused("file-copy", { from: "knowledge/x.md", to: "knowledge/x2.md" })).toBeUndefined();
     });
 });

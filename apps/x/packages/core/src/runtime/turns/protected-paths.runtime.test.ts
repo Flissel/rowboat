@@ -51,7 +51,7 @@ const agent: z.infer<typeof ResolvedAgent> = {
     agentId: "copilot",
     systemPrompt: "SYS",
     model: { provider: "fake", model: "m" },
-    tools: [builtinDescriptor("file-writeText"), builtinDescriptor("executeCommand")],
+    tools: [builtinDescriptor("file-writeText"), builtinDescriptor("executeCommand"), builtinDescriptor("file-readText")],
 };
 
 type Call = { id: string; name: string; args: JsonValue };
@@ -318,6 +318,47 @@ describe("protected paths in the turn loop", () => {
         expect((await settle(runtime.advanceTurn(second))).status).toBe("suspended");
         expect(required(await repo.read(second), "B")?.request).toMatchObject({ humanOnly: true });
         expect(fsSync.existsSync(ws("config/slack2.json"))).toBe(false);
+    });
+
+    describe("fix round 1 (review C1): reading server-key", () => {
+        const readKey = (id: string): Call => ({ id, name: "file-readText", args: { path: "server-key" } });
+        beforeEach(async () => {
+            await fs.writeFile(ws("server-key"), "KEYVALUE-not-a-real-key\n");
+        });
+
+        it("DM: waits for a human-only read request", async () => {
+            const { runtime, repo } = makeRuntime(new ScriptedModels([respondCalls(readKey("A"))]), new SpyClassifier());
+            const turnId = await startTurn(runtime, DM);
+            expect(await settle(runtime.advanceTurn(turnId))).toMatchObject({ status: "suspended" });
+            expect(required(await repo.read(turnId), "A")?.request).toMatchObject({
+                kind: "file",
+                operation: "read",
+                humanOnly: true,
+            });
+            expect(JSON.stringify(await repo.read(turnId))).not.toContain("KEYVALUE");
+        });
+
+        it("DA: the classifier is never asked", async () => {
+            const classifier = new SpyClassifier();
+            const { runtime, repo } = makeRuntime(new ScriptedModels([respondCalls(readKey("A"))]), classifier);
+            const turnId = await startTurn(runtime, DA);
+            expect((await settle(runtime.advanceTurn(turnId))).status).toBe("suspended");
+            expect(classifier.batches).toEqual([]);
+            expect(required(await repo.read(turnId), "A")?.request).toMatchObject({ humanOnly: true });
+        });
+
+        for (const [label, mode] of [["SS (to-do run)", SS], ["HL (headless)", HL]] as const) {
+            it(`${label}: denied, the key never reaches the log`, async () => {
+                const classifier = new SpyClassifier();
+                const { runtime, repo } = makeRuntime(new ScriptedModels([respondCalls(readKey("A")), respondText("done")]), classifier);
+                const turnId = await startTurn(runtime, mode);
+                expect((await settle(runtime.advanceTurn(turnId))).status).toBe("completed");
+                expect(classifier.batches).toEqual([]);
+                const log = await repo.read(turnId);
+                expect(result(log, "A")?.result).toMatchObject({ isError: true });
+                expect(JSON.stringify(log)).not.toContain("KEYVALUE");
+            });
+        }
     });
 
     it("DM: file-writeText knowledge/x.md is unchanged — no prompt, written", async () => {
