@@ -33,7 +33,7 @@ afterAll(async () => {
 });
 
 describe("protected workspace entries", () => {
-    it("lists exactly the six entries of the ticket", () => {
+    it("lists the six entries of the ticket plus the two of fix round 1", () => {
         expect([...PROTECTED_WORKSPACE_ENTRIES]).toEqual([
             "config",
             "server-key",
@@ -41,6 +41,9 @@ describe("protected workspace entries", () => {
             "embed.json",
             ".electron-data",
             "channels",
+            // Fix round 1 (C1/I3): server auth keys and code-session policy.
+            "scoped-keys.json",
+            "code-mode",
         ]);
     });
 });
@@ -57,6 +60,10 @@ describe("isProtectedWrite — file tools", () => {
             "embed.json",
             ".electron-data/Local State",
             "channels/telegram-state.json",
+            "scoped-keys.json",
+            "Scoped-Keys.JSON",
+            "code-mode/sessions-meta/s1.json",
+            "code-mode",
         ]) {
             expect(await write(p), p).toBe(true);
         }

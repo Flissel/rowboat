@@ -23,6 +23,12 @@ export const PROTECTED_WORKSPACE_ENTRIES: readonly string[] = [
     "embed.json",
     ".electron-data",
     "channels",
+    // Fix round 1 (review C1/I3): scoped bearer keys of the local server
+    // (apps/server/src/auth.ts SCOPED_KEYS_FILE, re-read per request) and the
+    // code-session state (code-mode/sessions-meta/<id>.json holds the pinned
+    // cwd and the approval policy, e.g. "yolo").
+    "scoped-keys.json",
+    "code-mode",
 ];
 
 // Windows ignores trailing dots and spaces in a name ("config." is
