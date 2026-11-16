@@ -1,7 +1,9 @@
 // Modified for VibeMind (Flissel/rowboat vibemind): channel-origin turns are
 // restricted by the channel-run guard (tool snapshot filter, call-time guard,
 // no classifier) — Teil E. Trusted MCP calls (checker trustedMcp) are logged
-// on the invocation and bound to the executed entry.
+// on the invocation and bound to the executed entry. Human-only requests
+// (protected paths, ticket #330) skip the classifier; only a human's allow
+// marks the execution humanApproved.
 import { z } from "zod";
 import type { TurnAnalytics } from "@x/shared/dist/analytics.js";
 import {
@@ -61,7 +63,7 @@ import type {
     LlmStreamEvent,
     ResolvedModel,
 } from "./model-registry.js";
-import type { IPermissionChecker, IPermissionClassifier } from "./permission.js";
+import { isHumanOnlyRequest, type IPermissionChecker, type IPermissionClassifier } from "./permission.js";
 import type { ITurnRepo } from "./repo.js";
 import { HotStream } from "./stream.js";
 import type { IToolRegistry, RuntimeTool, SyncRuntimeTool } from "./tool-registry.js";
@@ -915,6 +917,9 @@ class TurnAdvance {
                 !tc.permission.classification &&
                 !tc.permission.classificationFailed &&
                 tc.permission.required.checkerError === undefined &&
+                // VibeMind #330: protected writes are for a human only; they
+                // fall through to the human / deny fallback.
+                !isHumanOnlyRequest(tc.permission.required.request) &&
                 !tc.result,
         );
         if (candidates.length === 0) {
@@ -1133,6 +1138,12 @@ class TurnAdvance {
             const sandboxed =
                 !!channel || (this.definition.sessionId === null && !desktopChild);
             const trustedMcp = this.trustedMcpCalls.get(tc.toolCallId);
+            // VibeMind #330: only a human's allow in the permission prompt
+            // lets execTool write protected paths (never the classifier, never
+            // a call the checker let through without a prompt).
+            const humanApproved =
+                tc.permission?.resolved?.decision === "allow" &&
+                tc.permission.resolved.source === "human";
             const result = await syncTool.execute(tc.input, {
                 turnId: this.turnId,
                 sessionId: this.definition.sessionId,
@@ -1150,6 +1161,7 @@ class TurnAdvance {
                       }
                     : {}),
                 ...(trustedMcp ? { trustedMcp } : {}),
+                ...(humanApproved ? { humanApproved: true } : {}),
                 reportProgress: async (progress) => {
                     await this.append({
                         type: "tool_progress",

@@ -35,6 +35,20 @@ export interface IPermissionChecker {
     ): Promise<PermissionCheckAllowed | PermissionCheckRequired>;
 }
 
+// Modified for VibeMind (Flissel/rowboat vibemind): ticket #330. A request
+// flagged humanOnly (a write to config/, keys, channels/, ...) is never sent
+// to the classifier, is denied when no human is available, and no grant is
+// persisted for it. Anything that is not an object with humanOnly === true
+// is an ordinary request.
+export function isHumanOnlyRequest(request: unknown): boolean {
+    return (
+        typeof request === "object" &&
+        request !== null &&
+        !Array.isArray(request) &&
+        (request as { humanOnly?: unknown }).humanOnly === true
+    );
+}
+
 export interface PermissionClassificationInput {
     toolCallId: string;
     toolName: string;
