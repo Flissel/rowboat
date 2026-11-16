@@ -43,7 +43,9 @@ function grantPrefixForTool(toolName: string, resolvedPaths: string[]): string {
     return commonPathPrefix(parentPaths);
 }
 
-function filePermissionTargets(toolName: string, args: Record<string, unknown>): { operation: FileAccessOperation; paths: string[] } | null {
+// Exported for runtime/tools/protected-paths.ts (VibeMind, ticket #330): the
+// protected-write check reuses this one mapping of tool -> paths.
+export function filePermissionTargets(toolName: string, args: Record<string, unknown>): { operation: FileAccessOperation; paths: string[] } | null {
     const pathArg = typeof args.path === 'string' ? args.path : undefined;
     switch (toolName) {
         case 'file-readText':
