@@ -107,6 +107,9 @@ export interface ISessions {
         toolCallId: string,
         decision: "allow" | "deny",
         metadata?: JsonValue,
+        // VibeMind #330 (Task 17 fix round 1): "delegated" for a restricted
+        // caller (scoped server key, embed bridge); absent = the human.
+        answeredBy?: "human" | "delegated",
     ): Promise<void>;
     // The dedicated ask-human endpoint; sendMessage never routes here.
     respondToAskHuman(

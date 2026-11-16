@@ -672,13 +672,29 @@ class TurnAdvance {
                         `no pending permission for tool call ${input.toolCallId}`,
                     );
                 }
+                // VibeMind #330 (Task 17 fix round 1, review I-2): a restricted
+                // caller's answer is never the human's approval.
+                const delegated = input.answeredBy === "delegated";
+                if (delegated) {
+                    if (input.decision === "allow" && isHumanOnlyRequest(tc.permission.required.request)) {
+                        throw new TurnInputError(
+                            `tool call ${input.toolCallId} needs the human's own answer; this caller may only deny it`,
+                        );
+                    }
+                    const scope = permissionScopeOf(input.metadata);
+                    if (scope === "always" || scope === "session") {
+                        throw new TurnInputError(
+                            `this caller may not answer with scope "${scope}"; only a one-time answer is accepted`,
+                        );
+                    }
+                }
                 await this.append({
                     type: "tool_permission_resolved",
                     turnId: this.turnId,
                     ts: this.now(),
                     toolCallId: input.toolCallId,
                     decision: input.decision,
-                    source: "human",
+                    source: delegated ? "delegated" : "human",
                     ...(input.metadata === undefined
                         ? {}
                         : { metadata: input.metadata }),
@@ -1597,6 +1613,19 @@ function parseToolAdditions(
     }
     const parsed = ToolAdditionsMetadata.safeParse(metadata);
     return parsed.success ? parsed.data.toolAdditions : undefined;
+}
+
+// VibeMind #330 (Task 17 fix round 1): the scope a permission answer carries
+// in its metadata ({ scope: "once" | "session" | "always" }), if any. Any
+// non-string scope counts as present (fails closed for a restricted caller).
+function permissionScopeOf(metadata: JsonValue | undefined): string | null {
+    if (metadata === null || typeof metadata !== "object" || Array.isArray(metadata)) {
+        return null;
+    }
+    if (!("scope" in metadata) || metadata.scope === undefined || metadata.scope === null) {
+        return null;
+    }
+    return typeof metadata.scope === "string" ? metadata.scope : "always";
 }
 
 // The default budget for turns created without an explicit maxModelCalls:

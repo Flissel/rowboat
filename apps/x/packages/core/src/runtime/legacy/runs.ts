@@ -64,8 +64,34 @@ export async function createMessage(runId: string, message: UserMessageContentTy
     return id;
 }
 
-export async function authorizePermission(runId: string, ev: z.infer<typeof ToolPermissionAuthorizePayload>): Promise<void> {
+// answeredBy (VibeMind #330, Task 17 fix round 1, review I-2): "delegated" is
+// a restricted caller (scoped server key, embed bridge). It may only give a
+// one-time answer and may not approve a human-only request.
+export async function authorizePermission(
+    runId: string,
+    ev: z.infer<typeof ToolPermissionAuthorizePayload>,
+    answeredBy: "human" | "delegated" = "human",
+): Promise<void> {
     const { scope, ...rest } = ev;
+
+    if (answeredBy === "delegated") {
+        if (scope === "always" || scope === "session") {
+            throw new Error(`this caller may not answer with scope "${scope}"; only a one-time answer is accepted`);
+        }
+        if (rest.response === "approve") {
+            const run = await container.resolve<IRunsRepo>('runsRepo').fetch(runId);
+            const request = run.log.find(
+                (e): e is z.infer<typeof ToolPermissionRequestEvent> =>
+                    e.type === "tool-permission-request"
+                    && e.toolCall.toolCallId === rest.toolCallId
+                    && JSON.stringify(e.subflow) === JSON.stringify(rest.subflow)
+            );
+            // A request not in the log cannot be shown to be ordinary: fails closed.
+            if (!request || isHumanOnlyRequest(request.permission)) {
+                throw new Error(`tool call ${rest.toolCallId} needs the human's own answer; this caller may only deny it`);
+            }
+        }
+    }
 
     // For "always" scope, derive command from the run log and persist to security config
     if (rest.response === "approve" && scope === "always") {

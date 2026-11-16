@@ -489,12 +489,14 @@ export class SessionsImpl implements ISessions {
         toolCallId: string,
         decision: "allow" | "deny",
         metadata?: JsonValue,
+        answeredBy?: "human" | "delegated",
     ): Promise<void> {
         await this.advanceWithInput(turnId, {
             type: "permission_decision",
             toolCallId,
             decision,
             ...(metadata === undefined ? {} : { metadata }),
+            ...(answeredBy === "delegated" ? { answeredBy } : {}),
         });
     }
 

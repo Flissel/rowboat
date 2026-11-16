@@ -430,4 +430,74 @@ describe("addMcpServer with a command in the turn loop", () => {
             expect(isStdioEntryApproved("pwn", { command: "calc.exe" })).toBe(false);
         });
     }
+
+    // Task 17 fix round 1 (review I-2): an answer from a restricted caller (a
+    // scoped server key, the embed bridge) is "delegated", never "human".
+    describe("answers from a restricted caller", () => {
+        const resolvedOf = (log: TEvent[], toolCallId: string) =>
+            log.find(
+                (e): e is Extract<TEvent, { type: "tool_permission_resolved" }> =>
+                    e.type === "tool_permission_resolved" && e.toolCallId === toolCallId,
+            );
+
+        it("allowing a human-only request is refused: nothing written, nothing approved, still pending", async () => {
+            const { runtime, repo } = makeRuntime(new ScriptedModels([respondCalls(addStdio("A")), respondText("done")]), new SpyClassifier());
+            const turnId = await startTurn(runtime, DM);
+            expect((await settle(runtime.advanceTurn(turnId))).status).toBe("suspended");
+            await expect(
+                settle(runtime.advanceTurn(turnId, { type: "permission_decision", toolCallId: "A", decision: "allow", answeredBy: "delegated" })),
+            ).rejects.toThrow(/human/);
+            expect(resolvedOf(await repo.read(turnId), "A")).toBeUndefined();
+            expect(await fs.readFile(ws("config/mcp.json"), "utf8")).toBe(EMPTY);
+            expect(isStdioEntryApproved("pwn", { command: "calc.exe" })).toBe(false);
+            // The human can still answer it.
+            const outcome = await settle(runtime.advanceTurn(turnId, { type: "permission_decision", toolCallId: "A", decision: "allow" }));
+            expect(outcome.status).toBe("completed");
+            expect(resolvedOf(await repo.read(turnId), "A")).toMatchObject({ source: "human" });
+            expect(isStdioEntryApproved("pwn", { command: "calc.exe" })).toBe(true);
+        });
+
+        it("denying a human-only request is accepted and recorded as delegated", async () => {
+            const { runtime, repo } = makeRuntime(new ScriptedModels([respondCalls(addStdio("A")), respondText("done")]), new SpyClassifier());
+            const turnId = await startTurn(runtime, DM);
+            await settle(runtime.advanceTurn(turnId));
+            const outcome = await settle(
+                runtime.advanceTurn(turnId, { type: "permission_decision", toolCallId: "A", decision: "deny", answeredBy: "delegated" }),
+            );
+            expect(outcome.status).toBe("completed");
+            const log = await repo.read(turnId);
+            expect(resolvedOf(log, "A")).toMatchObject({ decision: "deny", source: "delegated" });
+            expect(await fs.readFile(ws("config/mcp.json"), "utf8")).toBe(EMPTY);
+        });
+
+        it("a one-time allow of an ordinary request works and is recorded as delegated", async () => {
+            const { runtime, repo } = makeRuntime(new ScriptedModels([respondCalls(addUrl("B")), respondText("done")]), new SpyClassifier());
+            const turnId = await startTurn(runtime, DM);
+            expect((await settle(runtime.advanceTurn(turnId))).status).toBe("suspended");
+            const outcome = await settle(
+                runtime.advanceTurn(turnId, { type: "permission_decision", toolCallId: "B", decision: "allow", answeredBy: "delegated" }),
+            );
+            expect(outcome.status).toBe("completed");
+            expect(resolvedOf(await repo.read(turnId), "B")).toMatchObject({ decision: "allow", source: "delegated" });
+        });
+
+        for (const scope of ["always", "session"] as const) {
+            it(`an answer with scope "${scope}" is refused, even for an ordinary request`, async () => {
+                const { runtime, repo } = makeRuntime(new ScriptedModels([respondCalls(addUrl("B")), respondText("done")]), new SpyClassifier());
+                const turnId = await startTurn(runtime, DM);
+                await settle(runtime.advanceTurn(turnId));
+                await expect(
+                    settle(runtime.advanceTurn(turnId, {
+                        type: "permission_decision",
+                        toolCallId: "B",
+                        decision: "allow",
+                        metadata: { scope },
+                        answeredBy: "delegated",
+                    })),
+                ).rejects.toThrow(/scope/);
+                expect(resolvedOf(await repo.read(turnId), "B")).toBeUndefined();
+                expect(await fs.readFile(ws("config/mcp.json"), "utf8")).toBe(EMPTY);
+            });
+        }
+    });
 });

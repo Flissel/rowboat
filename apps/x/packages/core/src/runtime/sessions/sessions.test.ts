@@ -667,6 +667,19 @@ describe("external input routing (13.5)", () => {
         ]);
     });
 
+    // VibeMind #330 (Task 17 fix round 1): who answered reaches the runtime.
+    it("respondToPermission passes a delegated answer through as answeredBy", async () => {
+        const { sessions, fake, turnId } = await setupSuspended();
+        await sessions.respondToPermission(turnId, "tc1", "deny", undefined, "delegated");
+        expect(fake.advanceCalls).toEqual([
+            {
+                turnId,
+                input: { type: "permission_decision", toolCallId: "tc1", decision: "deny", answeredBy: "delegated" },
+                takeInputs: expect.any(Function),
+            },
+        ]);
+    });
+
     it("respondToAskHuman is a dedicated async_tool_result wrapper", async () => {
         const { sessions, fake, turnId } = await setupSuspended();
         await sessions.respondToAskHuman(turnId, "B", "the answer is 42");

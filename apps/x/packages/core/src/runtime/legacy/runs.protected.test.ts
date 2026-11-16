@@ -91,3 +91,51 @@ describe("legacy authorizePermission and human-only requests", () => {
         expect(JSON.parse(await fs.readFile(securityPath, "utf8")).allowedCommands).toContain("rm");
     });
 });
+
+// Task 17 fix round 1 (review I-2): an answer from a restricted caller (scoped
+// server key, embed bridge).
+describe("legacy authorizePermission from a restricted caller", () => {
+    const ordinary = () => [permissionRequest("C", { command: "rm x" }, { kind: "command", commandNames: ["rm"] })];
+
+    for (const scope of ["always", "session"] as const) {
+        it(`refuses scope "${scope}": allow-list and run log unchanged`, async () => {
+            state.log = ordinary();
+            await expect(
+                authorizePermission("r1", { toolCallId: "C", response: "approve", scope, subflow: [] }, "delegated"),
+            ).rejects.toThrow(/scope/);
+            expect(await fs.readFile(securityPath, "utf8")).toBe(SECURITY);
+            expect(state.appended).toEqual([]);
+        });
+    }
+
+    it("refuses approving a human-only request", async () => {
+        state.log = [permissionRequest("B", { command: "echo x > config\\security.json" }, {
+            kind: "command", commandNames: ["echo"], humanOnly: true,
+        })];
+        await expect(
+            authorizePermission("r1", { toolCallId: "B", response: "approve", scope: "once", subflow: [] }, "delegated"),
+        ).rejects.toThrow(/human/);
+        expect(state.appended).toEqual([]);
+    });
+
+    it("accepts a one-time approve of an ordinary request and a deny of a human-only one", async () => {
+        state.log = [
+            ...ordinary(),
+            permissionRequest("B", { command: "echo x > config\\security.json" }, { kind: "command", commandNames: ["echo"], humanOnly: true }),
+        ];
+        await authorizePermission("r1", { toolCallId: "C", response: "approve", scope: "once", subflow: [] }, "delegated");
+        await authorizePermission("r1", { toolCallId: "B", response: "deny", subflow: [] }, "delegated");
+        expect(state.appended).toMatchObject([
+            { toolCallId: "C", response: "approve" },
+            { toolCallId: "B", response: "deny" },
+        ]);
+        expect(await fs.readFile(securityPath, "utf8")).toBe(SECURITY);
+    });
+
+    it("a request missing from the run log fails closed for an approve", async () => {
+        state.log = [];
+        await expect(
+            authorizePermission("r1", { toolCallId: "Z", response: "approve", subflow: [] }, "delegated"),
+        ).rejects.toThrow(/human/);
+    });
+});
