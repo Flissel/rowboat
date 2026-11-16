@@ -1,3 +1,4 @@
+// Modified for VibeMind (Flissel/rowboat vibemind): humanOnly requests for protected paths and commands, redirects off the fast path (ticket #330).
 // Deterministic tool-permission metadata: decides whether a builtin tool
 // call needs human approval (command allowlist, workspace file boundaries,
 // file-access grants). Shared by both engines — extracted from the legacy
@@ -9,7 +10,8 @@ import { ToolAttachment } from "@x/shared/dist/agent.js";
 import { ToolCallPart } from "@x/shared/dist/message.js";
 import { z } from "zod";
 import { ToolPermissionMetadata } from "@x/shared/dist/runs.js";
-import { isBlocked, extractCommandNames } from "../../application/lib/command-executor.js";
+import { isBlocked, extractCommandNames, hasOutputRedirect } from "../../application/lib/command-executor.js";
+import { isProtectedWrite } from "../tools/protected-paths.js";
 import { getFileAccessAllowList, type FileAccessGrant, type FileAccessOperation } from "../../config/security.js";
 import { isPathInside, resolveFilePathForPermission } from "../../filesystem/files.js";
 
@@ -108,12 +110,17 @@ export async function getToolPermissionMetadata(
             return null;
         }
         const command = String((args as { command: unknown }).command);
-        if (!isBlocked(command, sessionAllowedCommands)) {
+        // VibeMind (ticket #330): a command that writes to a file or names a
+        // protected workspace entry is never on the allow-list fast path; one
+        // that names a protected entry is for a human to decide.
+        const humanOnly = await isProtectedWrite('executeCommand', args as Record<string, unknown>);
+        if (!humanOnly && !hasOutputRedirect(command) && !isBlocked(command, sessionAllowedCommands)) {
             return null;
         }
         return {
             kind: 'command',
             commandNames: extractCommandNames(command),
+            ...(humanOnly ? { humanOnly: true } : {}),
         };
     }
 
@@ -126,6 +133,19 @@ export async function getToolPermissionMetadata(
     }
 
     const resolvedTargets = await Promise.all(targets.paths.map(p => resolveFilePathForPermission(p)));
+    // VibeMind (ticket #330): a write to a protected path (config/, keys,
+    // channels/, ...) asks the human, inside the workspace too and whatever
+    // file grants are stored.
+    if (await isProtectedWrite(underlyingTool.name, args)) {
+        const paths = resolvedTargets.map(target => target.canonicalPath);
+        return {
+            kind: 'file',
+            operation: targets.operation,
+            paths,
+            pathPrefix: grantPrefixForTool(underlyingTool.name, paths),
+            humanOnly: true,
+        };
+    }
     const outsideWorkspacePaths = resolvedTargets
         .filter(target => !target.isInsideWorkspace)
         .map(target => target.canonicalPath);
