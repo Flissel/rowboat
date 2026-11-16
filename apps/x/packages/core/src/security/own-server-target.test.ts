@@ -31,6 +31,7 @@ function deps(overrides: Partial<Deps> = {}): Deps {
         ports: async () => PORTS,
         interfaces: () => ["127.0.0.1", "::1", "192.168.1.50", "fe80::1%eth0"],
         hostname: () => "MyHost",
+        appsPorts: () => new Set([3210]),
         ...overrides,
     };
 }
@@ -64,6 +65,15 @@ const TABLE: Array<[string, boolean]> = [
     ["http://lan-alias.example:3220/", true],
     ["http://unresolvable.example:3220/", true],
     // Not the own server.
+    // Fix round 3 (review I-A): the apps server (host API /_rowboat/* incl.
+    // the fetch proxy) counts as own for fetch-url, in every host form.
+    ["http://127.0.0.1:3210/_rowboat/fetch", true],
+    ["http://demo.apps.localhost:3210/", true],
+    ["http://[::1]:3210/index.html", true],
+    ["http://192.168.1.50:3210/_rowboat/fetch", true],
+    ["http://rebind.example:3210/", true],
+    ["http://example.com:3210/", false],
+    ["http://127.0.0.1:3211/", false],
     ["http://example.com:3220/", false],
     ["http://127.0.0.1:3230/", false],
     ["http://127.0.0.1:5173/", false],
@@ -182,6 +192,33 @@ describe("installOwnServerBlock", () => {
         ];
         for (const details of requests) {
             expect(await decide(listener, details), details.url).toEqual({ cancel: true });
+        }
+    });
+
+    it("fix round 3: on the apps server only the host API (/_rowboat/...) is cancelled, app pages load", async () => {
+        const ses = fakeSession();
+        installOwnServerBlock(ses, deps());
+        const [listener] = ses.listeners;
+        for (const url of [
+            "http://demo.apps.localhost:3210/_rowboat/fetch",
+            "http://demo.apps.localhost:3210/_rowboat/data/x.json",
+            "http://demo.apps.localhost:3210/_rowboat/events",
+            "http://demo.apps.localhost:3210/_rowboat",
+            "http://demo.apps.localhost:3210/%5Frowboat/fetch",
+            "http://demo.apps.localhost:3210/_ROWBOAT/fetch",
+            "http://demo.apps.localhost:3210//_rowboat/fetch",
+            "http://127.0.0.1:3210/_rowboat/copilot/run",
+            "http://[::1]:3210/_rowboat/tools/execute",
+        ]) {
+            expect(await decide(listener, { url, resourceType: "xhr" }), url).toEqual({ cancel: true });
+        }
+        for (const url of [
+            "http://demo.apps.localhost:3210/",
+            "http://demo.apps.localhost:3210/index.html",
+            "http://demo.apps.localhost:3210/assets/app.js",
+            "http://demo.apps.localhost:3210/?__rowboat_embed=1",
+        ]) {
+            expect(await decide(listener, { url, resourceType: "mainFrame" }), url).toEqual({});
         }
     });
 

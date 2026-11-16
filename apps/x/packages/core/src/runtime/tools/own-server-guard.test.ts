@@ -93,9 +93,34 @@ describe("ownServerRefusal", () => {
     it("leaves other loopback ports and other hosts alone (ticket #325 covers them)", async () => {
         const lookup = async () => ["93.184.215.14"];
         expect(await ownServerRefusal(new URL("http://127.0.0.1:8080/x"), { lookup: noDns })).toBeNull();
-        expect(await ownServerRefusal(new URL("http://localhost:3210/x"), { lookup: noDns })).toBeNull();
+        expect(await ownServerRefusal(new URL("http://localhost:3211/x"), { lookup: noDns })).toBeNull();
         expect(await ownServerRefusal(new URL("https://example.com/x"), { lookup })).toBeNull();
         expect(await ownServerRefusal(new URL("http://example.com:3220/x"), { lookup })).toBeNull();
+    });
+
+    it("fix round 3 (review I-A): refuses the apps server and its host API (the fetch proxy relay)", async () => {
+        for (const target of [
+            "http://127.0.0.1:3210/_rowboat/fetch?url=http://127.0.0.1:3220/rpc/workspace:writeFile",
+            "http://localhost:3210/_rowboat/fetch",
+            "http://demo.apps.localhost:3210/_rowboat/fetch",
+            "http://[::1]:3210/",
+        ]) {
+            expect(await ownServerRefusal(new URL(target), { lookup: noDns }), target).toMatch(/own/i);
+        }
+    });
+
+    it("fix round 3: fetch-url POST to 127.0.0.1:3210/_rowboat/fetch is refused before any request", async () => {
+        const stub = stubFetch();
+        const result = await guardedFetch(
+            "http://127.0.0.1:3210/_rowboat/fetch",
+            "POST",
+            { "X-Rowboat-App": "1", "Content-Type": "application/json" },
+            JSON.stringify({ url: "http://127.0.0.1:3220/rpc/workspace:writeFile", method: "POST" }),
+            { fetch: stub.fetch, lookup: noDns },
+        );
+        expect(result).toMatchObject({ ok: false, status: 0 });
+        expect(String((result as { error?: string }).error)).toMatch(/own/i);
+        expect(stub.calls).toEqual([]);
     });
 });
 

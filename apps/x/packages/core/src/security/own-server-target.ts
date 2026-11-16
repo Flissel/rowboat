@@ -16,6 +16,7 @@ import fs from "node:fs/promises";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
+import { APPS_PORT } from "../apps/constants.js";
 import { WorkDir } from "../config/config.js";
 import { expandV6, parseV4 } from "../runtime/tools/channel-fetch.js";
 
@@ -35,6 +36,10 @@ export interface OwnServerDeps {
     interfaces?: () => string[];
     // The machine's host name (default: os.hostname()).
     hostname?: () => string;
+    // The Rowboat Apps server's port(s) (default: APPS_PORT, 3210). Fix round
+    // 3 (review I-A): its host API (/_rowboat/fetch, /tools/execute,
+    // /copilot/run, PUT /data) is a relay, so it counts as own too.
+    appsPorts?: () => Set<number>;
 }
 
 export const defaultOwnServerDeps: OwnServerDeps = {
@@ -149,35 +154,78 @@ function isOwnName(hostname: string, ownHostname: string): boolean {
     return h === "localhost" || h.endsWith(".localhost") || h === own || h === `${own}.local`;
 }
 
-// True when the URL goes to Rowboat's own server: an http(s)/ws(s) URL whose
-// port is one the server may listen on and whose host is a loopback form, the
-// machine's own name, one of its own addresses, or a name that resolves to
-// one of these (or cannot be resolved: fails closed).
-export async function isOwnServerTarget(url: URL, deps: OwnServerDeps = defaultOwnServerDeps): Promise<boolean> {
-    if (!WEB_PROTOCOLS.has(url.protocol)) return false;
-    const ports = await (deps.ports ?? ownServerPorts)();
-    if (!ports.has(effectivePort(url))) return false;
-    const host = url.hostname.replace(/^\[|\]$/g, "");
+function hostIsOwn(host: string, deps: OwnServerDeps): Promise<boolean> | boolean {
     if (isOwnName(host, (deps.hostname ?? os.hostname)())) return true;
     const interfaces = new Set((deps.interfaces ?? defaultInterfaces)().map(normalizeAddress));
     if (net.isIP(host)) return isOwnAddress(host, interfaces);
-    let addresses: string[];
+    return deps.lookup(host).then(
+        (addresses) => addresses.length === 0 || addresses.some((a) => isOwnAddress(a, interfaces)),
+        // Cannot tell where it goes: fails closed.
+        () => true,
+    );
+}
+
+function appsPortsOf(deps: OwnServerDeps): Set<number> {
+    return (deps.appsPorts ?? (() => new Set([APPS_PORT])))();
+}
+
+// Which own local server the URL goes to: "server" (apps/server, /rpc/*),
+// "apps" (the Rowboat Apps server and its host API) or null. An http(s)/ws(s)
+// URL on one of their ports whose host is a loopback form, the machine's own
+// name, one of its own addresses, or a name that resolves to one of these (or
+// cannot be resolved: fails closed).
+export async function ownTargetKind(url: URL, deps: OwnServerDeps = defaultOwnServerDeps): Promise<"server" | "apps" | null> {
+    if (!WEB_PROTOCOLS.has(url.protocol)) return null;
+    const port = effectivePort(url);
+    const ports = await (deps.ports ?? ownServerPorts)();
+    const kind = ports.has(port) ? "server" : appsPortsOf(deps).has(port) ? "apps" : null;
+    if (kind === null) return null;
+    const host = url.hostname.replace(/^\[|\]$/g, "");
+    return (await hostIsOwn(host, deps)) ? kind : null;
+}
+
+// fetch-url: the own server and the whole apps server (fetch-url has no
+// legitimate use for app pages; on Windows *.apps.localhost does not even
+// resolve outside Chromium).
+export async function isOwnServerTarget(url: URL, deps: OwnServerDeps = defaultOwnServerDeps): Promise<boolean> {
+    return (await ownTargetKind(url, deps)) !== null;
+}
+
+// The apps server's host API: /_rowboat and everything below it. Checked on
+// the decoded, lower-cased path and anywhere in it (fails closed for
+// %5Frowboat, //_rowboat and the like).
+export function isAppsHostApiPath(url: URL): boolean {
+    let decoded: string;
     try {
-        addresses = await deps.lookup(host);
+        decoded = decodeURIComponent(url.pathname);
     } catch {
         return true;
     }
-    return addresses.length === 0 || addresses.some((a) => isOwnAddress(a, interfaces));
+    return decoded.toLowerCase().includes("/_rowboat");
+}
+
+// The agent browser session: the own server always; on the apps server only
+// the host API — app pages themselves still load (the browser pane is the
+// user's browser too, and an app opened there is a page like any other).
+export async function isAgentBrowserBlocked(url: URL, deps: OwnServerDeps = defaultOwnServerDeps): Promise<boolean> {
+    const kind = await ownTargetKind(url, deps);
+    return kind === "server" || (kind === "apps" && isAppsHostApiPath(url));
+}
+
+// Loopback/unspecified or one of the machine's own interface addresses (LAN,
+// Tailscale, ...), whatever the port.
+export function isOwnMachineAddress(ip: string, deps: Pick<OwnServerDeps, "interfaces"> = {}): boolean {
+    const interfaces = new Set((deps.interfaces ?? defaultInterfaces)().map(normalizeAddress));
+    return isOwnAddress(ip, interfaces);
 }
 
 // The connect-time half (fix round 2, DNS rebinding): is this resolved
-// address, on this port, the own server? Used by fetch-url's transport on the
-// address it is about to connect to.
+// address, on this port, the own server (or the apps server)? Used by
+// fetch-url's transport on the address it is about to connect to.
 export async function isOwnServerAddress(ip: string, port: number, deps: OwnServerDeps = defaultOwnServerDeps): Promise<boolean> {
     const ports = await (deps.ports ?? ownServerPorts)();
-    if (!ports.has(port)) return false;
-    const interfaces = new Set((deps.interfaces ?? defaultInterfaces)().map(normalizeAddress));
-    return isOwnAddress(ip, interfaces);
+    if (!ports.has(port) && !appsPortsOf(deps).has(port)) return false;
+    return isOwnMachineAddress(ip, deps);
 }
 
 // Second layer only, for executeCommand (fix round 2): a command whose text
@@ -231,7 +279,8 @@ export interface OwnServerBlockSession {
 }
 
 // Network-level block for a session the agent can drive (the embedded
-// browser): every request to the own server is cancelled — every resource
+// browser): every request to the own server, and to the apps server's host
+// API (/_rowboat/..., fix round 3), is cancelled — every resource
 // type, form posts from data: pages, each redirect hop (Chromium asks again
 // for the redirect target) and WebSockets. Only for the sessions it is
 // installed on; the app's own renderer session must keep reaching its server.
@@ -242,7 +291,7 @@ export function installOwnServerBlock(session: OwnServerBlockSession, deps: OwnS
     session.webRequest.onBeforeRequest((details, callback) => {
         let decision: Promise<boolean>;
         try {
-            decision = isOwnServerTarget(new URL(details.url), blockDeps);
+            decision = isAgentBrowserBlocked(new URL(details.url), blockDeps);
         } catch {
             decision = Promise.resolve(true);
         }
