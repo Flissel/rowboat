@@ -135,6 +135,21 @@ describe("isProtectedWrite — executeCommand", () => {
         }
     });
 
+    it("flags a redirect whose target the shell may build (fail closed, second layer)", async () => {
+        for (const command of [
+            "echo x > c%X%onfig\\security.json",
+            "echo x > conf*\\mcp.json",
+            "echo x > con^fig\\mcp.json",
+            "echo x > \"con\"fig\\mcp.json",
+            "echo x > $HOME/.rowboat/c$Xonfig/mcp.json",
+        ]) {
+            expect(await isProtectedWrite("executeCommand", { command }), command).toBe(true);
+        }
+        // Without a redirect, expansion alone does not count.
+        expect(await isProtectedWrite("executeCommand", { command: "echo %PATH%" })).toBe(false);
+        expect(await isProtectedWrite("executeCommand", { command: "echo hi > \"notes.txt\"" })).toBe(false);
+    });
+
     it("flags a command whose cwd is a protected entry", async () => {
         expect(await isProtectedWrite("executeCommand", { command: "echo x > security.json", cwd: "config" })).toBe(true);
     });

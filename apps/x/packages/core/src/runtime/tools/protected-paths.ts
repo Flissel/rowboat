@@ -11,6 +11,7 @@
 
 import fs from "node:fs/promises";
 import path from "node:path";
+import { hasOutputRedirect, stripHarmlessRedirects } from "../../application/lib/command-executor.js";
 import { WorkDir } from "../../config/config.js";
 import { isPathInside, resolveFilePathForPermission } from "../../filesystem/files.js";
 import { filePermissionTargets } from "../assembly/permission-metadata.js";
@@ -85,16 +86,41 @@ export function commandNamesProtectedEntry(command: string): boolean {
     );
 }
 
+// Characters with which the shell builds a name the text check cannot see
+// (c%X%onfig, conf*, $env:..., con^fig, `...`).
+const SHELL_BUILT_NAME = /[*?[%$!^`]/;
+
+// Quotes that are not one whole word ("con"fig, con'fi'g, or unbalanced):
+// the shell joins the pieces into one name.
+function hasWordSplittingQuotes(command: string): boolean {
+    const wholeWordsRemoved = command.replace(
+        /(?<=^|[\s<>|&;()])(?:"[^"]*"|'[^']*')(?=$|[\s<>|&;()])/g,
+        " ",
+    );
+    return /["']/.test(wholeWordsRemoved);
+}
+
+// Fail closed (review addition to #330): a command that writes a file AND
+// may build a name in the shell is treated like one that names a protected
+// entry. A plain redirect to a literal path is not. This text check is a
+// second layer only; the consumers of config/ are hardened separately.
+export function commandMayBuildProtectedName(command: string): boolean {
+    if (!hasOutputRedirect(command)) return false;
+    const rest = stripHarmlessRedirects(command);
+    return SHELL_BUILT_NAME.test(rest) || hasWordSplittingQuotes(rest);
+}
+
 function asString(value: unknown): string | undefined {
     return typeof value === "string" && value.length > 0 ? value : undefined;
 }
 
 // True when the tool call writes, moves, copies onto or removes a protected
-// path, or (executeCommand) names a protected entry or runs inside one.
+// path, or (executeCommand) names a protected entry, runs inside one, or
+// writes a file through a name the shell may build.
 export async function isProtectedWrite(toolName: string, args: Record<string, unknown>): Promise<boolean> {
     if (toolName === "executeCommand") {
         const command = typeof args.command === "string" ? args.command : String(args.command ?? "");
-        if (commandNamesProtectedEntry(command)) return true;
+        if (commandNamesProtectedEntry(command) || commandMayBuildProtectedName(command)) return true;
         const cwd = asString(args.cwd);
         return cwd !== undefined && (await isProtectedPath(cwd));
     }

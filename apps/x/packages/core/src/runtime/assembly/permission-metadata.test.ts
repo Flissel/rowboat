@@ -80,6 +80,32 @@ describe("executeCommand fast path", () => {
         });
     });
 
+    it("a redirect with a name the shell may build (expansion, wildcard, ^, split quotes) is human-only", async () => {
+        for (const command of [
+            "echo x > c%X%onfig\\security.json",
+            "echo x > conf*\\mcp.json",
+            "echo x > con^fig\\mcp.json",
+            "echo x > \"con\"fig\\mcp.json",
+            "echo x > co$Xnfig/mcp.json",
+            "echo x > c?nfig/mcp.json",
+            "echo x > `printf co`nfig/mcp.json",
+        ]) {
+            expect(await check("executeCommand", { command }), command).toMatchObject({
+                required: true,
+                request: { kind: "command", humanOnly: true },
+            });
+        }
+    });
+
+    it("whole quoted words and expansion without a redirect do not make a request human-only", async () => {
+        for (const command of ["echo hi > \"notes.txt\"", "echo \"a b\" > 'my notes.txt'"]) {
+            const result = await check("executeCommand", { command });
+            expect(result, command).toMatchObject({ required: true, request: { kind: "command" } });
+            expect((result as { request: object }).request, command).not.toHaveProperty("humanOnly");
+        }
+        expect(await check("executeCommand", { command: "echo %PATH%" })).toEqual({ required: false });
+    });
+
     it("an ordinary redirect needs a normal (not human-only) request", async () => {
         for (const command of ["echo hi > notes.txt", "echo hi >> notes.txt", "echo hi 1>notes.txt"]) {
             const result = await check("executeCommand", { command });
