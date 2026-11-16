@@ -49,6 +49,19 @@ export function isHumanOnlyRequest(request: unknown): boolean {
     );
 }
 
+// The legacy engine's auto mode: human-only candidates go straight to the
+// human prompt, only the others to the classifier.
+export function partitionHumanOnly<T extends { permission?: unknown }>(
+    candidates: T[],
+): { humanOnly: T[]; classifiable: T[] } {
+    const humanOnly: T[] = [];
+    const classifiable: T[] = [];
+    for (const candidate of candidates) {
+        (isHumanOnlyRequest(candidate.permission) ? humanOnly : classifiable).push(candidate);
+    }
+    return { humanOnly, classifiable };
+}
+
 export interface PermissionClassificationInput {
     toolCallId: string;
     toolName: string;

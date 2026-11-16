@@ -7,6 +7,7 @@ import { ICodeSessionsRepo } from "../../code-mode/sessions/repo.js";
 import { IAgentRuntime } from "./engine.js";
 import { IBus } from "../../application/lib/bus.js";
 import { IAbortRegistry } from "../turns/abort-registry.js";
+import { isHumanOnlyRequest } from "../turns/permission.js";
 import { IRunsLock } from "./lock.js";
 import { forceCloseAllMcpClients } from "../../mcp/mcp.js";
 import { extractCommandNames } from "../../application/lib/command-executor.js";
@@ -76,7 +77,12 @@ export async function authorizePermission(runId: string, ev: z.infer<typeof Tool
                 && e.toolCall.toolCallId === rest.toolCallId
                 && JSON.stringify(e.subflow) === JSON.stringify(rest.subflow)
         );
-        if (permReqEvent?.permission?.kind === "file") {
+        // Modified for VibeMind (Flissel/rowboat vibemind): ticket #330. A
+        // human-only request (protected path) is approved for this call only;
+        // "always" never becomes a stored grant.
+        if (isHumanOnlyRequest(permReqEvent?.permission)) {
+            // nothing persisted
+        } else if (permReqEvent?.permission?.kind === "file") {
             await addFileAccessGrant({
                 operation: permReqEvent.permission.operation,
                 pathPrefix: permReqEvent.permission.pathPrefix,

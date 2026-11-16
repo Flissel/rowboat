@@ -36,7 +36,7 @@ describe("file tools on protected paths", () => {
             required: true,
             request: { kind: "file", operation: "write", humanOnly: true },
         });
-        const request = (result as { request: { paths: string[] } }).request;
+        const request = (result as unknown as { request: { paths: string[] } }).request;
         expect(request.paths).toEqual([path.join(root, "config", "mcp.json")]);
     });
 
