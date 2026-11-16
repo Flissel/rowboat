@@ -14,7 +14,17 @@ vi.mock("../../knowledge/version_history.js", () => ({
     initRepo: async () => undefined,
 }));
 
+// The catalog sweep table below must never start a live-note agent or
+// upload to a space, even if the gate were missing.
+vi.mock("../../knowledge/live-note/runner.js", () => ({
+    runLiveNoteAgent: async () => ({ runId: "stub", action: "none", summary: "stub", contentAfter: "STUB-RAN", error: undefined }),
+}));
+vi.mock("../../spaces/orgs.js", () => ({
+    getClient: () => ({ uploadBlob: async () => ({ hash: "stub", size: 0, mime: "text/plain" }) }),
+}));
+
 const { execTool } = await import("./exec-tool.js");
+const { RealPermissionChecker } = await import("../turns/bridges/real-permission-checker.js");
 const { EMPTY_SANDBOX } = await import("./headless-sandbox.js");
 const { InMemoryAbortRegistry } = await import("../turns/abort-registry.js");
 type Ctx = NonNullable<Parameters<typeof execTool>[2]>;
@@ -187,6 +197,48 @@ describe("execTool protected reads (fix round 1, review C1)", () => {
         const text = JSON.stringify(result);
         expect(text).toContain("k.md");
         expect(text).not.toContain("server-key");
+    });
+
+    // Fix round 1, catalog sweep: every builtin that reads a local file's
+    // content. Directory listings without content (file-list / file-glob on
+    // the root) stay unguarded.
+    const LOCAL_READERS: Array<[string, Record<string, unknown>]> = [
+        ["file-readText", { path: "server-key" }],
+        ["parseFile", { path: "server-key" }],
+        ["LLMParse", { path: "server-key" }],
+        ["deck-review", { path: "server-key" }],
+        ["transcribe-audio", { path: "server-key" }],
+        ["file-exists", { path: "server-key" }],
+        ["file-stat", { path: "server-key" }],
+        ["file-copy", { from: "server-key", to: "knowledge/k.txt" }],
+        ["file-rename", { from: "server-key", to: "knowledge/k.txt" }],
+        ["file-grep", { pattern: ".", searchPath: "server-key" }],
+        ["spaces-upload-blob", { spaceId: "s", filePath: "server-key" }],
+        ["run-live-note-agent", { filePath: "knowledge/../server-key" }],
+        // A junction apps/evil/data -> workspace root (set up below).
+        ["app-read-data", { appFolder: "evil", file: "server-key" }],
+        // analyzeAgent always appends ".md": the nearest protected target.
+        ["analyzeAgent", { agentName: "../config/mcp" }],
+    ];
+
+    it("every local reader is human-only in the checker and refused by execTool for server-key", async () => {
+        await fs.mkdir(ws("apps/evil"), { recursive: true });
+        await fs.writeFile(ws("apps/evil/rowboat-app.json"), "{}");
+        await fs.rm(ws("apps/evil/data"), { recursive: true, force: true });
+        await fs.symlink(root, ws("apps/evil/data"), process.platform === "win32" ? "junction" : "dir");
+        const checker = new RealPermissionChecker();
+        for (const [name, input] of LOCAL_READERS) {
+            const label = `${name} ${JSON.stringify(input)}`;
+            expect(
+                await checker.check({ turnId: "t", toolCallId: "c", toolId: `builtin:${name}`, toolName: name, input }),
+                label,
+            ).toMatchObject({ required: true, request: { humanOnly: true } });
+            const result = await execTool(builtin(name), input, ctx());
+            expect(JSON.stringify(result), label).toMatch(/protected workspace path/);
+            expect(JSON.stringify(result), label).not.toMatch(/KEYVALUE|STUB-RAN/);
+        }
+        expect(fsSync.existsSync(ws("server-key"))).toBe(true);
+        expect(fsSync.existsSync(ws("knowledge/k.txt"))).toBe(false);
     });
 
     it("leaves ordinary reads alone", async () => {

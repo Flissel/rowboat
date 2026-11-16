@@ -215,6 +215,52 @@ export async function isProtectedWrite(toolName: string, args: Record<string, un
     return false;
 }
 
+// Fix round 1 (review C1, catalog sweep): builtins outside
+// filePermissionTargets that read a local file's CONTENT. They are kept out
+// of filePermissionTargets on purpose: that table also drives the ordinary
+// outside-workspace prompts (legacy engine), which these tools never had.
+//   spaces-upload-blob  filePath           uploads the bytes to a space
+//   app-read-data       apps/<appFolder>/data/<file>  (appFolder is not
+//                       validated by the tool; a junction under apps/ can
+//                       point data/ anywhere)
+//   analyzeAgent        agents/<agentName>.md          returned in full
+//   run-live-note-agent knowledge/<filePath>           returned as contentAfter
+export function extraProtectedReadTargets(toolName: string, args: Record<string, unknown>): string[] | null {
+    switch (toolName) {
+        case "spaces-upload-blob": {
+            const filePath = asString(args.filePath);
+            return filePath ? [filePath] : null;
+        }
+        case "app-read-data": {
+            const appFolder = asString(args.appFolder);
+            const file = asString(args.file);
+            return appFolder && file ? [path.join("apps", appFolder, "data", file)] : null;
+        }
+        case "analyzeAgent": {
+            const agentName = asString(args.agentName);
+            return agentName ? [path.join("agents", `${agentName}.md`)] : null;
+        }
+        case "run-live-note-agent": {
+            const filePath = asString(args.filePath);
+            return filePath ? [path.join("knowledge", filePath.replace(/^knowledge\//, ""))] : null;
+        }
+        default:
+            return null;
+    }
+}
+
+// The paths a protected-access request names: the file-tool targets, else
+// the extra readers (as a read). Null when the tool touches no local path.
+export function protectedAccessTargets(
+    toolName: string,
+    args: Record<string, unknown>,
+): { operation: "read" | "list" | "search" | "write" | "delete"; paths: string[] } | null {
+    const targets = filePermissionTargets(toolName, args);
+    if (targets) return targets;
+    const extra = extraProtectedReadTargets(toolName, args);
+    return extra ? { operation: "read", paths: extra } : null;
+}
+
 // Fix round 1 (review C1): reading a protected entry needs the human as well
 // — server-key opens every RPC of the local server. True when the call reads
 // the content of a protected path (file-readText, parseFile, LLMParse,
@@ -223,6 +269,13 @@ export async function isProtectedWrite(toolName: string, args: Record<string, un
 // workspace itself (or an ancestor) does not count; a workspace-wide
 // file-grep drops matches in protected files instead (protectedContentFilter).
 export async function isProtectedRead(toolName: string, args: Record<string, unknown>): Promise<boolean> {
+    const extra = extraProtectedReadTargets(toolName, args);
+    if (extra) {
+        for (const target of extra) {
+            if (await isProtectedPath(target)) return true;
+        }
+        return false;
+    }
     const targets = filePermissionTargets(toolName, args);
     if (!targets) return false;
     if (toolName === "file-copy") {

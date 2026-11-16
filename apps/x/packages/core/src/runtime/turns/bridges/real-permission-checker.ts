@@ -1,5 +1,5 @@
 import { z } from "zod";
-// Modified for VibeMind (Flissel/rowboat vibemind): trusted MCP tools (vertraute-mcp-werkzeuge.ts) need no prompt; code_agent_run on a protected cwd asks the human (#330).
+// Modified for VibeMind (Flissel/rowboat vibemind): trusted MCP tools (vertraute-mcp-werkzeuge.ts) need no prompt; "none"/"prompt" builtins on a protected path ask the human only (#330).
 import type { JsonValue } from "@x/shared/dist/turns.js";
 import {
     istVertrauterMcpName,
@@ -8,7 +8,9 @@ import {
 import { effectiveServerUrl } from "../../../mcp/mcp.js";
 import { getToolPermissionMetadata } from "../../assembly/permission-metadata.js";
 import { BuiltinTools } from "../../tools/catalog.js";
+import { protectedAccessTargets } from "../../tools/protected-paths.js";
 import type { BuiltinToolPermission } from "../../tools/types.js";
+import { isHumanOnlyRequest } from "../permission.js";
 import type {
     IPermissionChecker,
     PermissionCheckAllowed,
@@ -112,28 +114,29 @@ export class RealPermissionChecker implements IPermissionChecker {
 
         const name = input.toolId.slice("builtin:".length);
         const policy = this.getPolicy(name);
-        switch (policy) {
-            case "none": {
-                // VibeMind (ticket #330): code_agent_run is prompt-free except
-                // when its cwd reaches a protected path (human-only request).
-                if (name === "code_agent_run") {
-                    const metadata = await this.getMetadata(
-                        {
-                            type: "tool-call",
-                            toolCallId: input.toolCallId,
-                            toolName: input.toolName,
-                            arguments: input.input,
-                        },
-                        { type: "builtin", name },
-                        new Set<string>(),
-                        [],
-                    );
-                    if (metadata) {
-                        return { required: true, request: metadata as JsonValue };
-                    }
-                }
-                return { required: false };
+        // VibeMind (ticket #330): a "none" or "prompt" builtin that touches a
+        // local path (code_agent_run's cwd, the file targets, the local
+        // readers of protected-paths.ts) raises the human-only request when
+        // that path is protected; otherwise its policy applies unchanged.
+        if ((policy === "none" || policy === "prompt") && touchesLocalPath(name, input.input)) {
+            const metadata = await this.getMetadata(
+                {
+                    type: "tool-call",
+                    toolCallId: input.toolCallId,
+                    toolName: input.toolName,
+                    arguments: input.input,
+                },
+                { type: "builtin", name },
+                new Set<string>(),
+                [],
+            );
+            if (isHumanOnlyRequest(metadata)) {
+                return { required: true, request: metadata as JsonValue };
             }
+        }
+        switch (policy) {
+            case "none":
+                return { required: false };
             case "prompt":
                 return { required: true, request: genericRequest(input) };
             case "composio-execute": {
@@ -203,6 +206,12 @@ function parseMcpToolId(toolId: string): { server: string; tool: string } | null
         return null;
     }
     return { server: rest.slice(0, separator), tool: rest.slice(separator + 1) };
+}
+
+function touchesLocalPath(name: string, input: unknown): boolean {
+    if (name === "code_agent_run") return true;
+    const args = input && typeof input === "object" && !Array.isArray(input) ? (input as Record<string, unknown>) : {};
+    return protectedAccessTargets(name, args) !== null;
 }
 
 function genericRequest(input: PermissionCheckInput): JsonValue {

@@ -11,7 +11,7 @@ import { ToolCallPart } from "@x/shared/dist/message.js";
 import { z } from "zod";
 import { ToolPermissionMetadata } from "@x/shared/dist/runs.js";
 import { isBlocked, extractCommandNames } from "../../application/lib/command-executor.js";
-import { canonicalCodeAgentCwd, isProtectedWrite, needsHumanForProtectedPath } from "../tools/protected-paths.js";
+import { canonicalCodeAgentCwd, isProtectedWrite, needsHumanForProtectedPath, protectedAccessTargets } from "../tools/protected-paths.js";
 import { getFileAccessAllowList, type FileAccessGrant, type FileAccessOperation } from "../../config/security.js";
 import { isPathInside, resolveFilePathForPermission } from "../../filesystem/files.js";
 
@@ -137,25 +137,28 @@ export async function getToolPermissionMetadata(
         }
         return { kind: 'file', operation: 'write', paths: [cwd], pathPrefix: cwd, humanOnly: true };
     }
-    const targets = filePermissionTargets(underlyingTool.name, args);
-    if (!targets) {
-        return null;
-    }
-
-    const resolvedTargets = await Promise.all(targets.paths.map(p => resolveFilePathForPermission(p)));
     // VibeMind (ticket #330): a write to a protected path (config/, keys,
     // channels/, ...) asks the human, inside the workspace too and whatever
-    // file grants are stored. Fix round 1: reading one as well.
-    if (await needsHumanForProtectedPath(underlyingTool.name, args)) {
-        const paths = resolvedTargets.map(target => target.canonicalPath);
+    // file grants are stored. Fix round 1: reading one as well, including the
+    // local readers outside filePermissionTargets (spaces-upload-blob, ...).
+    const access = protectedAccessTargets(underlyingTool.name, args);
+    if (access && (await needsHumanForProtectedPath(underlyingTool.name, args))) {
+        const paths = (await Promise.all(access.paths.map(p => resolveFilePathForPermission(p))))
+            .map(target => target.canonicalPath);
         return {
             kind: 'file',
-            operation: targets.operation,
+            operation: access.operation,
             paths,
             pathPrefix: grantPrefixForTool(underlyingTool.name, paths),
             humanOnly: true,
         };
     }
+
+    const targets = filePermissionTargets(underlyingTool.name, args);
+    if (!targets) {
+        return null;
+    }
+    const resolvedTargets = await Promise.all(targets.paths.map(p => resolveFilePathForPermission(p)));
     const outsideWorkspacePaths = resolvedTargets
         .filter(target => !target.isInsideWorkspace)
         .map(target => target.canonicalPath);
