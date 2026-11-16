@@ -13,6 +13,7 @@ import { watcher as watcherCore, workspace } from '@x/core';
 import { WorkDir } from '@x/core/dist/config/config.js';
 import { workspace as workspaceShared } from '@x/shared';
 import * as mcpCore from '@x/core/dist/mcp/mcp.js';
+import { afterHumanWorkspaceWrite } from '@x/core/dist/config/human-config-writes.js';
 import * as runsCore from '@x/core/dist/runtime/legacy/runs.js';
 import { bus } from '@x/core/dist/runtime/legacy/bus.js';
 import { serviceBus } from '@x/core/dist/services/service_bus.js';
@@ -1202,20 +1203,33 @@ export function setupIpcHandlers() {
     'workspace:readFile': async (_event, args) => {
       return workspace.readFile(args.path, args.encoding);
     },
+    // VibeMind (ticket #330, Task 17): these are human write paths (Settings
+    // and the file UI). A successful write to config/mcp.json or
+    // config/security.json takes effect now (stdio entries approved, the
+    // allow-lists replaced); a change made any other way only after a restart.
     'workspace:writeFile': async (_event, args) => {
-      return workspace.writeFile(args.path, args.data, args.opts);
+      const result = await workspace.writeFile(args.path, args.data, args.opts);
+      await afterHumanWorkspaceWrite(args.path, { data: args.data, encoding: args.opts?.encoding });
+      return result;
     },
     'workspace:mkdir': async (_event, args) => {
       return workspace.mkdir(args.path, args.recursive);
     },
     'workspace:rename': async (_event, args) => {
-      return workspace.rename(args.from, args.to, args.overwrite);
+      const result = await workspace.rename(args.from, args.to, args.overwrite);
+      await afterHumanWorkspaceWrite(args.from);
+      await afterHumanWorkspaceWrite(args.to);
+      return result;
     },
     'workspace:copy': async (_event, args) => {
-      return workspace.copy(args.from, args.to, args.overwrite);
+      const result = await workspace.copy(args.from, args.to, args.overwrite);
+      await afterHumanWorkspaceWrite(args.to);
+      return result;
     },
     'workspace:remove': async (_event, args) => {
-      return workspace.remove(args.path, args.opts);
+      const result = await workspace.remove(args.path, args.opts);
+      await afterHumanWorkspaceWrite(args.path);
+      return result;
     },
     'workspace:pickImage': async (event) => {
       const win = senderWindow(event.sender);

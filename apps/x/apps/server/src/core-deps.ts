@@ -16,6 +16,7 @@ import { isSignedIn } from '@x/core/dist/account/account.js';
 import { getRowboatConfig } from '@x/core/dist/config/rowboat.js';
 import { getAccessToken } from '@x/core/dist/auth/tokens.js';
 import * as mcpCore from '@x/core/dist/mcp/mcp.js';
+import { afterHumanWorkspaceWrite } from '@x/core/dist/config/human-config-writes.js';
 import * as runsCore from '@x/core/dist/runtime/legacy/runs.js';
 import { getModelCatalog } from '@x/core/dist/models/catalog.js';
 import { listModelsForProvider } from '@x/core/dist/models/models.js';
@@ -338,11 +339,32 @@ export function createCoreRpcHandlers(opts?: { sessionsIndexReady?: Promise<void
     'turnLimits:getSettings': async () => loadTurnLimitsSettings(),
     'retention:getSettings': async () => loadRetentionSettings(),
     // ── Phase 2: workspace & knowledge writes, todo/home/deck, settings setters ──
-    'workspace:writeFile': async (args) => workspaceCore.writeFile(args.path, args.data, args.opts),
+    // VibeMind (ticket #330, Task 17): human write paths (the connected
+    // client's Settings / file UI). A successful write to config/mcp.json or
+    // config/security.json takes effect now; a change made any other way
+    // (e.g. a hand edit on the server box) after a restart (trust on boot).
+    'workspace:writeFile': async (args) => {
+      const result = await workspaceCore.writeFile(args.path, args.data, args.opts);
+      await afterHumanWorkspaceWrite(args.path, { data: args.data, encoding: args.opts?.encoding });
+      return result;
+    },
     'workspace:mkdir': async (args) => workspaceCore.mkdir(args.path, args.recursive),
-    'workspace:rename': async (args) => workspaceCore.rename(args.from, args.to, args.overwrite),
-    'workspace:copy': async (args) => workspaceCore.copy(args.from, args.to, args.overwrite),
-    'workspace:remove': async (args) => workspaceCore.remove(args.path, args.opts),
+    'workspace:rename': async (args) => {
+      const result = await workspaceCore.rename(args.from, args.to, args.overwrite);
+      await afterHumanWorkspaceWrite(args.from);
+      await afterHumanWorkspaceWrite(args.to);
+      return result;
+    },
+    'workspace:copy': async (args) => {
+      const result = await workspaceCore.copy(args.from, args.to, args.overwrite);
+      await afterHumanWorkspaceWrite(args.to);
+      return result;
+    },
+    'workspace:remove': async (args) => {
+      const result = await workspaceCore.remove(args.path, args.opts);
+      await afterHumanWorkspaceWrite(args.path);
+      return result;
+    },
     'deck:generateOutline': async (args) => {
       try {
         const outline = await generateDeckOutline(args);
