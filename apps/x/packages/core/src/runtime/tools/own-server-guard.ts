@@ -335,7 +335,44 @@ export function connectGuardedFetch(deps: OwnServerDeps = defaultOwnServerDeps, 
 
 const MAX_REDIRECTS = 20; // fetch's own limit
 const MAX_BODY = 200_000;
-const CREDENTIAL_HEADERS = new Set(["authorization", "cookie", "proxy-authorization"]);
+// Fix round 3: one set of redirect rules for fetch-url and the apps fetch
+// proxy (the way fetch follows redirects, with a wider credential filter).
+const CREDENTIAL_HEADERS = new Set(["authorization", "proxy-authorization", "cookie", "cookie2"]);
+// Any other header that looks like it carries a credential.
+const CREDENTIAL_LIKE = /(^|[-_])(auth|authorization|token|api[-_]?key|apikey|secret|password|session|signature)([-_]|$)/i;
+// Headers that describe a request body (dropped with the body).
+const BODY_HEADERS = new Set(["content-type", "content-encoding", "content-language", "content-location"]);
+
+export interface RedirectRequest {
+    url: URL;
+    method: string;
+    headers: Record<string, string> | undefined;
+    body: string | undefined;
+}
+
+// The request for the next hop after a 3xx with a Location header: 303, and
+// 301/302 after anything but GET/HEAD, become GET without a body (and
+// without body headers); a cross-origin hop drops every credential header.
+export function nextRedirectRequest(status: number, location: string, current: RedirectRequest): RedirectRequest {
+    const url = new URL(location, current.url);
+    let { method, headers, body } = current;
+    if (status === 303 || ((status === 301 || status === 302) && method !== "GET" && method !== "HEAD")) {
+        if (method !== "HEAD") method = "GET";
+        body = undefined;
+        if (headers) {
+            headers = Object.fromEntries(Object.entries(headers).filter(([name]) => !BODY_HEADERS.has(name.trim().toLowerCase())));
+        }
+    }
+    if (url.origin !== current.url.origin && headers) {
+        headers = Object.fromEntries(
+            Object.entries(headers).filter(([name]) => {
+                const lower = name.trim().toLowerCase();
+                return !CREDENTIAL_HEADERS.has(lower) && !CREDENTIAL_LIKE.test(lower);
+            }),
+        );
+    }
+    return { url, method, headers, body };
+}
 
 type FetchUrlResult =
     | { ok: boolean; status: number; statusText: string; body: string; truncated: boolean }
@@ -379,17 +416,11 @@ export async function guardedFetch(
             if (res.status >= 300 && res.status < 400 && location) {
                 await res.body?.cancel().catch(() => undefined);
                 if (hop >= MAX_REDIRECTS) return { ok: false, status: 0, error: "Too many redirects." };
-                const next = new URL(location, url);
-                if (res.status === 303 || ((res.status === 301 || res.status === 302) && method === "POST")) {
-                    if (method !== "HEAD") method = "GET";
-                    sendBody = undefined;
-                }
-                if (next.origin !== url.origin && sendHeaders) {
-                    sendHeaders = Object.fromEntries(
-                        Object.entries(sendHeaders).filter(([name]) => !CREDENTIAL_HEADERS.has(name.toLowerCase())),
-                    );
-                }
-                url = next;
+                const next = nextRedirectRequest(res.status, location, { url, method, headers: sendHeaders, body: sendBody });
+                url = next.url;
+                method = next.method;
+                sendHeaders = next.headers;
+                sendBody = next.body;
                 continue;
             }
             // Read at most MAX_BODY characters, then cancel: the transport

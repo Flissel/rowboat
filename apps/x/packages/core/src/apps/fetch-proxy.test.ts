@@ -54,7 +54,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
     await close();
-    await fs.rm(root, { recursive: true, force: true });
+    await fs.rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
 });
 
 async function proxy(body: Record<string, unknown>, deps: Deps): Promise<{ status: number; json: Record<string, unknown> }> {
@@ -127,6 +127,44 @@ describe("apps fetch proxy (fix round 3, review I-A)", () => {
             expect((json.error as { code: string }).code).toBe("credential_forbidden");
         }
         expect(calls).toEqual([]);
+    });
+
+    it("follows redirects with fetch-url's rules: cross-origin drops credentials, 303 after POST becomes GET without body", async () => {
+        const calls: Call[] = [];
+        const replies: Response[] = [
+            new Response(null, { status: 302, headers: { location: "https://other.test/landing" } }),
+            new Response("cross", { status: 200 }),
+        ];
+        const deps: Deps = {
+            lookup: lookupTable({ "public.test": ["93.184.216.34"], "other.test": ["93.184.216.35"] }),
+            interfaces: () => OWN_INTERFACES,
+            transport: async (url, init) => {
+                calls.push({ url, method: init.method, headers: { ...(init.headers ?? {}) }, body: init.body });
+                return replies.shift() ?? new Response("done", { status: 200 });
+            },
+        };
+        const cross = await proxy(
+            {
+                url: "https://public.test/start",
+                method: "GET",
+                headers: { Authorization: "Bearer someone-elses-token", "X-Api-Key": "k", "X-Other": "1" },
+            },
+            deps,
+        );
+        expect(cross).toMatchObject({ status: 200, json: { text: "cross" } });
+        expect(calls.map((c) => c.url)).toEqual(["https://public.test/start", "https://other.test/landing"]);
+        expect(Object.keys(calls[1].headers).map((h) => h.toLowerCase())).toEqual(["x-other"]);
+
+        calls.length = 0;
+        replies.push(new Response(null, { status: 303, headers: { location: "/done" } }), new Response("after", { status: 200 }));
+        const seeOther = await proxy(
+            { url: "https://public.test/form", method: "POST", body: "{\"a\":1}", headers: { "Content-Type": "application/json", Authorization: "Bearer x" } },
+            deps,
+        );
+        expect(seeOther).toMatchObject({ status: 200, json: { text: "after" } });
+        expect(calls[1]).toMatchObject({ url: "https://public.test/done", method: "GET" });
+        expect(calls[1].body).toBeUndefined();
+        expect(Object.keys(calls[1].headers).map((h) => h.toLowerCase())).toEqual(["authorization"]);
     });
 
     it("forwards to a public host unchanged (minus Host, Origin, Cookie and hop-by-hop headers)", async () => {

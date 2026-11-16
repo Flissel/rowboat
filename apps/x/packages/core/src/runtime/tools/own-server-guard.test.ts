@@ -165,6 +165,26 @@ describe("guardedFetch", () => {
         expect(Object.keys(stub.calls[1].init.headers ?? {}).map((h) => h.toLowerCase())).toEqual(["x-other"]);
     });
 
+    it("fix round 3: the shared redirect rules (credential-like headers cross-origin, body headers on a switch to GET)", async () => {
+        const stub = stubFetch((url) => {
+            if (url === "http://127.0.0.1:8080/a") {
+                return new Response(null, { status: 302, headers: { location: "http://127.0.0.1:8081/b" } });
+            }
+            return new Response("done", { status: 200 });
+        });
+        const result = await guardedFetch(
+            "http://127.0.0.1:8080/a",
+            "POST",
+            { "X-Api-Key": "k", "X-Auth-Token": "t", Cookie: "a=b", "Content-Type": "application/json", "X-Other": "1" },
+            "{}",
+            { fetch: stub.fetch, lookup: noDns },
+        );
+        expect(result).toMatchObject({ ok: true, body: "done" });
+        expect(stub.calls[1].init.method).toBe("GET");
+        expect(stub.calls[1].init.body).toBeUndefined();
+        expect(Object.keys(stub.calls[1].init.headers ?? {}).map((h) => h.toLowerCase())).toEqual(["x-other"]);
+    });
+
     it("passes an ordinary request through unchanged", async () => {
         const stub = stubFetch(() => new Response("{\"a\":1}", { status: 200 }));
         const result = await guardedFetch("http://127.0.0.1:8080/api", "POST", { "Content-Type": "application/json" }, "{}", {

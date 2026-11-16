@@ -15,7 +15,7 @@ import type { RowboatAppManifest } from "@x/shared/dist/rowboat-app.js";
 import { MAX_LLM_REQUEST_BYTES, MAX_PROXY_RESPONSE_BYTES, PROXY_TIMEOUT_MS } from "./constants.js";
 import { readBody, sendError } from "./server.js";
 import { isPrivateAddress } from "../runtime/tools/channel-fetch.js";
-import { connectGuardedFetch, sanitizedRequestHeaders, type Transport } from "../runtime/tools/own-server-guard.js";
+import { connectGuardedFetch, nextRedirectRequest, sanitizedRequestHeaders, type Transport } from "../runtime/tools/own-server-guard.js";
 import {
     carriesOwnServerCredential,
     defaultOwnServerDeps,
@@ -137,6 +137,9 @@ export async function handleFetchProxy(
     });
     try {
         let current = target;
+        let hopMethod = method;
+        let hopHeaders: Record<string, string> | undefined = headers;
+        let hopBody = method === "POST" ? requestBody : undefined;
         for (let hop = 0; hop < 5; hop++) {
             const violation = await ssrfCheck(current, deps);
             if (violation) return sendError(res, 403, "address_forbidden", violation);
@@ -145,9 +148,9 @@ export async function handleFetchProxy(
             }
 
             const upstream = await transport(current.toString(), {
-                method,
-                headers,
-                ...(method === "POST" && requestBody !== undefined ? { body: requestBody } : {}),
+                method: hopMethod,
+                ...(hopHeaders ? { headers: hopHeaders } : {}),
+                ...(hopBody !== undefined ? { body: hopBody } : {}),
                 redirect: "manual",
                 signal: controller.signal,
             });
@@ -156,7 +159,18 @@ export async function handleFetchProxy(
                 const location = upstream.headers.get("location");
                 await upstream.body?.cancel().catch(() => undefined);
                 if (!location) break;
-                current = new URL(location, current);
+                // Same rules as fetch-url (fix round 3): cross-origin drops
+                // credentials; 303, and 301/302 after POST, become GET.
+                const next = nextRedirectRequest(upstream.status, location, {
+                    url: current,
+                    method: hopMethod,
+                    headers: hopHeaders,
+                    body: hopBody,
+                });
+                current = next.url;
+                hopMethod = next.method;
+                hopHeaders = next.headers;
+                hopBody = next.body;
                 continue;
             }
 
