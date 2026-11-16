@@ -73,6 +73,7 @@ describe("isProtectedWrite — file tools", () => {
             path.join(root, "config", "mcp.json"),
             "knowledge/link/mcp.json",
             "CONFIG~1/mcp.json",
+            "SERVER~1",
         ]) {
             expect(await write(p), p).toBe(true);
         }
@@ -86,6 +87,8 @@ describe("isProtectedWrite — file tools", () => {
             "config.bak",
             path.join(os.tmpdir(), "elsewhere.txt"),
             "~/elsewhere.txt",
+            // Fix round 1 (M3): a "~" that is not the 8.3 shape (~ + digit).
+            "knowledge/a~b.md",
         ]) {
             expect(await write(p), p).toBe(false);
         }
@@ -154,9 +157,19 @@ describe("isProtectedWrite — executeCommand", () => {
         expect(await isProtectedWrite("executeCommand", { command: "echo x > mcp.json", cwd: "knowledge" })).toBe(true);
         // Without a redirect, expansion alone does not count.
         expect(await isProtectedWrite("executeCommand", { command: "echo %PATH%" })).toBe(false);
-        // "~" anywhere (8.3 short names such as CONFIG~1) counts as naming a protected entry.
+        // The 8.3 short-name shape (CONFIG~1) counts as naming a protected entry.
         expect(commandNamesProtectedEntry("type CONFIG~1\\mcp.json")).toBe(true);
         expect(await isProtectedWrite("executeCommand", { command: "dir CONFIG~1" })).toBe(true);
+    });
+
+    it("fix round 1 (M3): only the 8.3 shape of \"~\" counts, not the home shorthand", async () => {
+        for (const command of ["type SERVER~1", "type EMBED~1.JSO", "dir ELECTR~1", "git log HEAD~3"]) {
+            expect(commandNamesProtectedEntry(command), command).toBe(true);
+        }
+        for (const command of ["cd ~", "ls ~/Downloads", "dir ~\\Documents", "echo a~b"]) {
+            expect(commandNamesProtectedEntry(command), command).toBe(false);
+            expect(await isProtectedWrite("executeCommand", { command }), command).toBe(false);
+        }
     });
 
     it("flags a command whose cwd is a protected entry", async () => {

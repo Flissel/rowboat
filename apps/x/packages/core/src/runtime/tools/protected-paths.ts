@@ -36,6 +36,9 @@ export function isProtectedEntryName(name: string): boolean {
     return normalized.length > 0 && PROTECTED_WORKSPACE_ENTRIES.includes(normalized);
 }
 
+// Fix round 1 (M3): the 8.3 short-name shape — a name character, "~", a digit.
+const SHORT_NAME_SHAPE = /[^\s\\/]~\d/;
+
 // A ":" after the drive letter is an NTFS stream ("server-key::$DATA",
 // "config:x") or another device syntax: treated as protected.
 function hasStreamSyntax(inputPath: string): boolean {
@@ -66,9 +69,9 @@ async function canonicalWorkspaceRoot(): Promise<string> {
 // target exists) are checked.
 export async function isProtectedPath(inputPath: string): Promise<boolean> {
     if (hasStreamSyntax(inputPath)) return true;
-    // A "~" other than the leading home shorthand can be an 8.3 short name
-    // (CONFIG~1) that the lexical check does not resolve.
-    if (inputPath.replace(/^~(?=$|[\\/])/, "").includes("~")) return true;
+    // An 8.3 short name (SERVER~1, CONFIG~1) is not resolved by the lexical
+    // check: the 8.3 shape counts as protected.
+    if (SHORT_NAME_SHAPE.test(inputPath)) return true;
     const resolved = await resolveFilePathForPermission(inputPath);
     if (protectedUnder(path.resolve(WorkDir), resolved.resolvedPath)) return true;
     return protectedUnder(await canonicalWorkspaceRoot(), resolved.canonicalPath);
@@ -80,9 +83,10 @@ export async function isProtectedPath(inputPath: string): Promise<boolean> {
 const COMMAND_PIECE_SPLIT = /[\s/\\;&|<>()=,:*?$%!@{}[\]+]+/;
 
 export function commandNamesProtectedEntry(command: string): boolean {
-    // "~" can be an 8.3 short name (CONFIG~1) that no text check resolves:
-    // treated as naming a protected entry.
-    if (command.includes("~")) return true;
+    // An 8.3 short name (CONFIG~1) is resolved by no text check: its shape
+    // counts as naming a protected entry. "cd ~" and "~/x" do not match;
+    // "HEAD~3" does (accepted, fail closed).
+    if (SHORT_NAME_SHAPE.test(command)) return true;
     const variants = [
         command.replace(/[\^"'`]/g, ""),
         command.replace(/[\^"'`\\]/g, ""),
