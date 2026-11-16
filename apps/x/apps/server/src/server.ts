@@ -1,3 +1,4 @@
+// Modified for VibeMind (Flissel/rowboat vibemind): ?token= only for GET/HEAD, never for RPC POSTs (#330, fix round 2).
 import type { Server as HttpServer } from 'node:http';
 import os from 'node:os';
 import { createAdaptorServer } from '@hono/node-server';
@@ -153,7 +154,11 @@ export async function createRowboatServer(opts: RowboatServerOptions): Promise<R
   );
 
   app.use('*', async (c, next) => {
-    const token = extractBearer(c.req.header('authorization'), c.req.query('token'));
+    // VibeMind (#330, fix round 2, review N2): ?token= exists for browser
+    // WebSocket clients (handled by ws-hub) and plain GETs; a state-changing
+    // request must carry the key in the Authorization header.
+    const readOnly = c.req.method === 'GET' || c.req.method === 'HEAD';
+    const token = extractBearer(c.req.header('authorization'), readOnly ? c.req.query('token') : null);
     if (token && tokenMatches(token, key)) {
       await next();
       return;
