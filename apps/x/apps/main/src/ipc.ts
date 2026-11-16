@@ -13,11 +13,13 @@ import { watcher as watcherCore, workspace } from '@x/core';
 import { WorkDir } from '@x/core/dist/config/config.js';
 import { workspace as workspaceShared } from '@x/shared';
 import * as mcpCore from '@x/core/dist/mcp/mcp.js';
+import { AsyncLocalStorage } from 'node:async_hooks';
+import { applyHumanWorkspaceOp } from '@x/core/dist/config/human-config-writes.js';
 import {
-  applyHumanWorkspaceOp,
-  workspaceOpTouchesProtected,
-  type HumanWorkspaceOp,
-} from '@x/core/dist/config/human-config-writes.js';
+  filterRestrictedReaddir,
+  RESTRICTED_REFUSAL,
+  restrictedCallRefused,
+} from '@x/core/dist/security/restricted-principal.js';
 import * as runsCore from '@x/core/dist/runtime/legacy/runs.js';
 import { bus } from '@x/core/dist/runtime/legacy/bus.js';
 import { serviceBus } from '@x/core/dist/services/service_bus.js';
@@ -406,51 +408,47 @@ export function listInvokeChannels(): InvokeChannels[] {
   return [...invokeTable.keys()];
 }
 
-// VibeMind (ticket #330, Task 17): the workspace:* write channels as an
-// operation on paths, for the embed-bridge check below.
-function workspaceOpOf(channel: string, args: unknown): HumanWorkspaceOp | null {
-  const a = (args ?? {}) as Record<string, unknown>;
-  const s = (v: unknown) => (typeof v === 'string' ? v : '');
-  switch (channel) {
-    case 'workspace:writeFile':
-      return { kind: 'writeFile', path: s(a.path), data: s(a.data) };
-    case 'workspace:mkdir':
-      return { kind: 'mkdir', path: s(a.path) };
-    case 'workspace:rename':
-      return { kind: 'rename', from: s(a.from), to: s(a.to) };
-    case 'workspace:copy':
-      return { kind: 'copy', from: s(a.from), to: s(a.to) };
-    case 'workspace:remove':
-      return { kind: 'remove', path: s(a.path) };
-    default:
-      return null;
-  }
+// VibeMind (ticket #330, Task 17 fix round 1): who called the handler running
+// now. 'embed' = the embed bridge (embed-host.ts): its token sits in
+// embed.json and is also used by other local programs (the rowboat-ui access
+// for agents), so it is not the human. Handlers read it with currentIpcOrigin().
+type IpcOrigin = 'renderer' | 'embed';
+const ipcOrigin = new AsyncLocalStorage<IpcOrigin>();
+function currentIpcOrigin(): IpcOrigin {
+  return ipcOrigin.getStore() ?? 'renderer';
+}
+function answeredByForOrigin(): 'human' | 'delegated' {
+  return currentIpcOrigin() === 'embed' ? 'delegated' : 'human';
 }
 
 export async function invokeIpcChannel(
   channel: string,
   event: Electron.IpcMainInvokeEvent,
   rawArgs: unknown,
-  // 'embed': the VibeMind embed bridge (embed-host.ts). Its token sits in
-  // embed.json and is also used by other local programs (the rowboat-ui
-  // access for agents), so it is not a human write path.
-  origin: 'renderer' | 'embed' = 'renderer',
+  origin: IpcOrigin = 'renderer',
 ): Promise<unknown> {
   const handler = invokeTable.get(channel as InvokeChannels);
   if (!handler) throw new Error(`No handler registered for '${channel}'`);
   const typed = channel as InvokeChannels;
   // Validate request payload
   const args = ipc.validateRequest(typed, rawArgs);
-  if (origin === 'embed') {
-    const op = workspaceOpOf(typed, args);
-    if (op && (await workspaceOpTouchesProtected(op))) {
-      throw new Error('The embed access may not change protected workspace entries (config/, keys, channels/, app data).');
-    }
+  const restricted = origin === 'embed';
+  // Review I-1: the embed bridge may neither read nor change protected
+  // workspace entries through any path-taking channel (the core table also
+  // covers the main-only channels: shell:*, spreadsheet:*, exportCopy).
+  if (restricted && (await restrictedCallRefused(typed, args))) {
+    throw new Error(RESTRICTED_REFUSAL);
   }
   // Strangler-fig: channels migrated to rowboat-server cross localhost HTTP
   // instead of calling their in-process handler (which stays in the map as
-  // the ROWBOAT_FORWARD_MIGRATED=0 kill switch).
-  const result = shouldForwardChannel(typed) ? await forwardRpc(typed, args) : await handler(event, args);
+  // the ROWBOAT_FORWARD_MIGRATED=0 kill switch). A forwarded embed call is
+  // marked restricted, so the server applies the same rules.
+  let result = shouldForwardChannel(typed)
+    ? await forwardRpc(typed, args, { restricted })
+    : await ipcOrigin.run(origin, () => handler(event, args));
+  if (restricted && typed === 'workspace:readdir' && Array.isArray(result)) {
+    result = await filterRestrictedReaddir(args, result as Array<{ path: string }>);
+  }
   // Validate response payload
   return ipc.validateResponse(typed, result);
 }
@@ -1459,7 +1457,8 @@ export function setupIpcHandlers() {
       return { messageId: await runsCore.createMessage(args.runId, args.message, args.voiceInput, args.voiceOutput, args.searchEnabled, args.middlePaneContext, args.codeMode, args.codeCwd, args.codePolicy) };
     },
     'runs:authorizePermission': async (_event, args) => {
-      await runsCore.authorizePermission(args.runId, args.authorization);
+      // VibeMind #330 (Task 17 fix round 1): an embed answer is delegated.
+      await runsCore.authorizePermission(args.runId, args.authorization, answeredByForOrigin());
       return { success: true };
     },
     'codeRun:resolvePermission': async (_event, args) => {
@@ -1554,7 +1553,8 @@ export function setupIpcHandlers() {
       return { removed: removed ?? null };
     },
     'sessions:respondToPermission': async (_event, args) => {
-      await container.resolve<ISessions>('sessions').respondToPermission(args.turnId, args.toolCallId, args.decision, args.metadata);
+      // VibeMind #330 (Task 17 fix round 1): an embed answer is delegated.
+      await container.resolve<ISessions>('sessions').respondToPermission(args.turnId, args.toolCallId, args.decision, args.metadata, answeredByForOrigin());
       return { success: true };
     },
     'sessions:respondToAskHuman': async (_event, args) => {
@@ -3320,7 +3320,10 @@ export function setupIpcHandlers() {
     // Rowboat server (phone pairing) — client-local: answered by main, which
     // hosts the transport.
     'server:getPairingInfo': async () => {
-      return getPairingInfo();
+      const info = await getPairingInfo();
+      // VibeMind #330 (Task 17 fix round 1): the token IS the owner key
+      // (server-key content); the embed bridge never gets it.
+      return currentIpcOrigin() === 'embed' ? { ...info, token: null } : info;
     },
     'server:setLanEnabled': async (_event, args) => {
       await setServerLanEnabled(args.enabled);
