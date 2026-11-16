@@ -11,6 +11,7 @@
 // Residual: a host name is resolved again by the network stack itself (DNS
 // rebinding between this check and the connect is not prevented).
 
+import crypto from "node:crypto";
 import dns from "node:dns/promises";
 import fs from "node:fs/promises";
 import net from "node:net";
@@ -226,6 +227,40 @@ export async function isOwnServerAddress(ip: string, port: number, deps: OwnServ
     const ports = await (deps.ports ?? ownServerPorts)();
     if (!ports.has(port) && !appsPortsOf(deps).has(port)) return false;
     return isOwnMachineAddress(ip, deps);
+}
+
+// Fix round 3 (review I-A): true when any of the strings carries a key that
+// authenticates against the own server — the server key (anywhere in the
+// string) or a scoped key (any token whose sha256 is in scoped-keys.json).
+// Missing or unreadable key files count as no keys.
+export async function carriesOwnServerCredential(values: string[], workDir: string = WorkDir): Promise<boolean> {
+    let serverKey = "";
+    try {
+        serverKey = (await fs.readFile(path.join(workDir, "server-key"), "utf8")).trim();
+    } catch {
+        serverKey = "";
+    }
+    const scoped = new Set<string>();
+    try {
+        const raw = JSON.parse(await fs.readFile(path.join(workDir, "scoped-keys.json"), "utf8")) as { keys?: unknown };
+        for (const k of Array.isArray(raw.keys) ? raw.keys : []) {
+            const hash = (k as { sha256?: unknown } | null)?.sha256;
+            if (typeof hash === "string") scoped.add(hash.toLowerCase());
+        }
+    } catch {
+        // no scoped keys
+    }
+    if (!serverKey && scoped.size === 0) return false;
+    for (const value of values) {
+        if (serverKey && value.includes(serverKey)) return true;
+        if (scoped.size === 0) continue;
+        for (const token of value.split(/[\s,;&?=:"']+/)) {
+            if (token.length < 16) continue;
+            const digest = crypto.createHash("sha256").update(token).digest("hex");
+            if (scoped.has(digest)) return true;
+        }
+    }
+    return false;
 }
 
 // Second layer only, for executeCommand (fix round 2): a command whose text
