@@ -72,6 +72,7 @@ describe("isProtectedWrite — file tools", () => {
             "knowledge/x.md:hidden",
             path.join(root, "config", "mcp.json"),
             "knowledge/link/mcp.json",
+            "CONFIG~1/mcp.json",
         ]) {
             expect(await write(p), p).toBe(true);
         }
@@ -84,6 +85,7 @@ describe("isProtectedWrite — file tools", () => {
             "configuration.md",
             "config.bak",
             path.join(os.tmpdir(), "elsewhere.txt"),
+            "~/elsewhere.txt",
         ]) {
             expect(await write(p), p).toBe(false);
         }
@@ -153,6 +155,9 @@ describe("isProtectedWrite — executeCommand", () => {
         expect(await isProtectedWrite("executeCommand", { command: "echo x > mcp.json", cwd: "knowledge" })).toBe(false);
         // Without a redirect, expansion alone does not count.
         expect(await isProtectedWrite("executeCommand", { command: "echo %PATH%" })).toBe(false);
+        // "~" anywhere (8.3 short names such as CONFIG~1) counts as naming a protected entry.
+        expect(commandNamesProtectedEntry("type CONFIG~1\\mcp.json")).toBe(true);
+        expect(await isProtectedWrite("executeCommand", { command: "dir CONFIG~1" })).toBe(true);
     });
 
     it("flags a command whose cwd is a protected entry", async () => {

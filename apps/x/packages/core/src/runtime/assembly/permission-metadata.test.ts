@@ -125,6 +125,14 @@ describe("executeCommand fast path", () => {
             "Set-Location knowledge; echo x > a.txt",
             "sl knowledge; echo x > a.txt",
             "cd.. & echo x > a.txt",
+            // Final allow shape for the whole command.
+            "cd,config&echo x>mcp.json",
+            "cmd /c \"echo x>mcp.json\"",
+            "echo x > CONFIG~1\\mcp.json",
+            "pushd knowledge > a.txt",
+            "powershell -c x > a.txt",
+            "echo a & echo b > a.txt",
+            "echo x > a.txt:stream",
         ]) {
             expect(await check("executeCommand", { command }), command).toMatchObject({
                 required: true,
@@ -144,6 +152,7 @@ describe("executeCommand fast path", () => {
             "echo hi 1>notes.txt",
             "echo hi > knowledge/out-1.txt 2>&1",
             "echo hi > knowledge\\a.b",
+            "echo hi > C:\\temp\\out.txt",
         ]) {
             const result = await check("executeCommand", { command });
             expect(result, command).toMatchObject({ required: true, request: { kind: "command" } });

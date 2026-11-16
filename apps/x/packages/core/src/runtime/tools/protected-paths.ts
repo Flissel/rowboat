@@ -66,6 +66,9 @@ async function canonicalWorkspaceRoot(): Promise<string> {
 // target exists) are checked.
 export async function isProtectedPath(inputPath: string): Promise<boolean> {
     if (hasStreamSyntax(inputPath)) return true;
+    // A "~" other than the leading home shorthand can be an 8.3 short name
+    // (CONFIG~1) that the lexical check does not resolve.
+    if (inputPath.replace(/^~(?=$|[\\/])/, "").includes("~")) return true;
     const resolved = await resolveFilePathForPermission(inputPath);
     if (protectedUnder(path.resolve(WorkDir), resolved.resolvedPath)) return true;
     return protectedUnder(await canonicalWorkspaceRoot(), resolved.canonicalPath);
@@ -77,6 +80,9 @@ export async function isProtectedPath(inputPath: string): Promise<boolean> {
 const COMMAND_PIECE_SPLIT = /[\s/\\;&|<>()=,:*?$%!@{}[\]+]+/;
 
 export function commandNamesProtectedEntry(command: string): boolean {
+    // "~" can be an 8.3 short name (CONFIG~1) that no text check resolves:
+    // treated as naming a protected entry.
+    if (command.includes("~")) return true;
     const variants = [
         command.replace(/[\^"'`]/g, ""),
         command.replace(/[\^"'`\\]/g, ""),
@@ -86,46 +92,44 @@ export function commandNamesProtectedEntry(command: string): boolean {
     );
 }
 
-// The only redirect target shape the text check accepts: one bare literal
-// token. Quotes, variables (%X%, $X, !X!), wildcards, carets, backticks,
-// parentheses, "+", "&" ... all fall outside it.
-const LITERAL_REDIRECT_TARGET = /^[A-Za-z0-9._/\\-]+$/;
+// The only shape of a command with an output redirect that stays an
+// ordinary request (controller's final ruling for #330): letters, digits,
+// "._/\-", whitespace and ">" — no quotes, variables, wildcards, carets,
+// backticks, separators (& ; | ,), parentheses, "~" or ":". A drive letter
+// at the start of a token ("C:\...") is the one ":" allowed.
+const PLAIN_REDIRECT_COMMAND = /^[A-Za-z0-9._/\\\s>-]+$/;
+const DRIVE_LETTER_AT_TOKEN_START = /(?<=^|[\s>])[A-Za-z]:(?=[\\/])/g;
+const LITERAL_REDIRECT_TARGET = /^(?:[A-Za-z]:)?[A-Za-z0-9._/\\-]+$/;
 const REDIRECT_OPERATOR = />>?/g;
 
-// Characters with which the shell builds text the check cannot see
-// (c%X%onfig, conf*, $env:..., con^fig, `...`).
-const SHELL_BUILT_TEXT = /[*?[%$!^`]/;
+// Commands that change directory, start another shell / program, or create
+// links: relative redirect targets or the written path cannot be trusted.
+const UNTRUSTED_COMMAND_WORDS = new Set([
+    "cd", "chdir", "pushd", "popd", "set-location", "push-location", "sl",
+    "start", "cmd", "powershell", "pwsh", "sh", "bash", "env", "mklink", "ln", "new-item",
+]);
 
-// Quotes that are not one whole word ("con"fig, con'fi'g, or unbalanced):
-// the shell joins the pieces into one word.
-function hasWordSplittingQuotes(command: string): boolean {
-    const wholeWordsRemoved = command.replace(
-        /(?<=^|[\s<>|&;()])(?:"[^"]*"|'[^']*')(?=$|[\s<>|&;()])/g,
-        " ",
-    );
-    return /["']/.test(wholeWordsRemoved);
+function isUntrustedCommandWord(token: string): boolean {
+    // "cd..", "cd\", "cd/d", "cmd.exe" count as the word they start with.
+    const word = token.toLowerCase().split(/[./\\]/)[0] ?? "";
+    return UNTRUSTED_COMMAND_WORDS.has(word);
 }
 
-// A directory change (cd, chdir, pushd, Set-Location, sl) makes a relative
-// redirect target resolve somewhere else than the command's cwd.
-const DIRECTORY_CHANGE = /(?:^|[\s;&|()])(?:cd|chdir|pushd|set-location|sl)(?=$|[\s;&|()/\\.])/i;
-
-// Fail closed (controller rulings for #330). A command with an output
-// redirect is for a human when
-//   1. any redirect target is not a bare literal token outside the protected
-//      entries (relative targets resolve against the command's cwd; a
-//      missing target or one starting with "-" is not literal), or
-//   2. the command anywhere contains shell-built text (wildcard, expansion,
-//      caret, backtick) or word-splitting quotes, or
-//   3. the command changes directory before the redirect.
-// The harmless redirects (2>&1, nul, /dev/null) are removed first. This
-// text check is a second layer only; the consumers of config/ are hardened
-// separately (Task 17).
+// Fail closed (controller's final ruling for #330). A command with an output
+// redirect is an ordinary request only when, after the harmless redirects
+// (2>&1, nul, /dev/null) are removed,
+//   - the whole text has the plain shape above,
+//   - no token is a directory-change / shell / link command, and
+//   - every redirect target is a literal path outside the protected entries
+//     (relative targets resolve against the command's cwd; a missing target
+//     or one starting with "-" is not literal).
+// Everything else with a redirect is human-only. This text check is a second
+// layer only; the consumers of config/ are hardened separately (Task 17).
 export async function redirectNeedsHuman(command: string, cwd?: string): Promise<boolean> {
     if (!hasOutputRedirect(command)) return false;
     const rest = stripHarmlessRedirects(command);
-    if (SHELL_BUILT_TEXT.test(rest) || hasWordSplittingQuotes(rest)) return true;
-    if (DIRECTORY_CHANGE.test(rest.slice(0, rest.lastIndexOf(">")))) return true;
+    if (!PLAIN_REDIRECT_COMMAND.test(rest.replace(DRIVE_LETTER_AT_TOKEN_START, ""))) return true;
+    if (rest.split(/[\s>]+/).some(isUntrustedCommandWord)) return true;
     for (const match of rest.matchAll(REDIRECT_OPERATOR)) {
         const after = rest.slice((match.index ?? 0) + match[0].length);
         if (after.startsWith(">")) continue; // first half of ">>"
