@@ -1,4 +1,4 @@
-// Modified for VibeMind (Flissel/rowboat vibemind): ?token= only for GET/HEAD, never for RPC POSTs (#330, fix round 2).
+// Modified for VibeMind (Flissel/rowboat vibemind): ?token= only for GET/HEAD, never for RPC POSTs (#330, fix round 2); auth kind for handlers (#330, Task 17).
 import type { Server as HttpServer } from 'node:http';
 import os from 'node:os';
 import { createAdaptorServer } from '@hono/node-server';
@@ -8,6 +8,7 @@ import type { SessionBusEvent } from '@x/shared/dist/sessions.js';
 import { WorkspaceChangeEvent } from '@x/shared/dist/workspace.js';
 import { z } from 'zod';
 import { extractBearer, findScopedKey, loadOrCreateServerKey, loadScopedKeys, tokenMatches } from './auth.js';
+import { runWithAuth } from './auth-context.js';
 import type { RpcHandlers } from './channels.js';
 import { loadServerConfig } from './config.js';
 import { acquireWorkdirLock } from './lock.js';
@@ -159,8 +160,10 @@ export async function createRowboatServer(opts: RowboatServerOptions): Promise<R
     // request must carry the key in the Authorization header.
     const readOnly = c.req.method === 'GET' || c.req.method === 'HEAD';
     const token = extractBearer(c.req.header('authorization'), readOnly ? c.req.query('token') : null);
+    // VibeMind (#330, Task 17): the handlers see which kind of key this was
+    // (auth-context.ts); only the owner key is a human write path.
     if (token && tokenMatches(token, key)) {
-      await next();
+      await runWithAuth('owner', () => next());
       return;
     }
     const scoped = token ? findScopedKey(token, await loadScopedKeys(opts.workDir)) : null;
@@ -170,7 +173,7 @@ export async function createRowboatServer(opts: RowboatServerOptions): Promise<R
     if (!scopedRouteAllowed(c.req.method, new URL(c.req.url).pathname, scoped.channels)) {
       return c.json({ error: { code: 'forbidden', message: 'key not allowed for this route' } }, 403);
     }
-    await next();
+    await runWithAuth('scoped', () => next());
   });
 
   app.route('/', createRpcRoutes(opts.handlers));

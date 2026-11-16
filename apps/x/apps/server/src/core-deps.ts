@@ -16,7 +16,12 @@ import { isSignedIn } from '@x/core/dist/account/account.js';
 import { getRowboatConfig } from '@x/core/dist/config/rowboat.js';
 import { getAccessToken } from '@x/core/dist/auth/tokens.js';
 import * as mcpCore from '@x/core/dist/mcp/mcp.js';
-import { afterHumanWorkspaceWrite } from '@x/core/dist/config/human-config-writes.js';
+import {
+  applyHumanWorkspaceOp,
+  workspaceOpTouchesProtected,
+  type HumanWorkspaceOp,
+} from '@x/core/dist/config/human-config-writes.js';
+import { currentAuthKind } from './auth-context.js';
 import * as runsCore from '@x/core/dist/runtime/legacy/runs.js';
 import { getModelCatalog } from '@x/core/dist/models/catalog.js';
 import { listModelsForProvider } from '@x/core/dist/models/models.js';
@@ -152,6 +157,21 @@ const appInstallPreviews = new Map<string, Awaited<ReturnType<typeof appsInstall
 let lastAppsFingerprint: string | null = null;
 import type { RpcHandlers } from './channels.js';
 import type { EventSources } from './server.js';
+
+// VibeMind (ticket #330, Task 17): a workspace:* write is a human write path
+// only when the owner key authenticated it. Any other caller (a scoped key, or
+// no request context at all) may not touch a protected workspace entry
+// (config/, keys, channels/, ... — Task 16 list) and never runs the
+// approval/reload of mcp.json / security.json.
+async function workspaceWrite<T>(op: HumanWorkspaceOp, perform: () => Promise<T>): Promise<T> {
+  if (currentAuthKind() === 'owner') {
+    return applyHumanWorkspaceOp(op, perform);
+  }
+  if (await workspaceOpTouchesProtected(op)) {
+    throw new Error('This key may not change protected workspace entries (config/, keys, channels/, app data).');
+  }
+  return perform();
+}
 
 // Canonical implementations of the exposed channels against the @x/core DI
 // container — the same thin pass-throughs Electron main registers in
@@ -339,32 +359,24 @@ export function createCoreRpcHandlers(opts?: { sessionsIndexReady?: Promise<void
     'turnLimits:getSettings': async () => loadTurnLimitsSettings(),
     'retention:getSettings': async () => loadRetentionSettings(),
     // ── Phase 2: workspace & knowledge writes, todo/home/deck, settings setters ──
-    // VibeMind (ticket #330, Task 17): human write paths (the connected
-    // client's Settings / file UI). A successful write to config/mcp.json or
+    // VibeMind (ticket #330, Task 17): with the owner key these are human
+    // write paths (the connected client's Settings / file UI, the Electron
+    // renderer via main's forwarder): a write to config/mcp.json or
     // config/security.json takes effect now; a change made any other way
     // (e.g. a hand edit on the server box) after a restart (trust on boot).
-    'workspace:writeFile': async (args) => {
-      const result = await workspaceCore.writeFile(args.path, args.data, args.opts);
-      await afterHumanWorkspaceWrite(args.path, { data: args.data, encoding: args.opts?.encoding });
-      return result;
-    },
-    'workspace:mkdir': async (args) => workspaceCore.mkdir(args.path, args.recursive),
-    'workspace:rename': async (args) => {
-      const result = await workspaceCore.rename(args.from, args.to, args.overwrite);
-      await afterHumanWorkspaceWrite(args.from);
-      await afterHumanWorkspaceWrite(args.to);
-      return result;
-    },
-    'workspace:copy': async (args) => {
-      const result = await workspaceCore.copy(args.from, args.to, args.overwrite);
-      await afterHumanWorkspaceWrite(args.to);
-      return result;
-    },
-    'workspace:remove': async (args) => {
-      const result = await workspaceCore.remove(args.path, args.opts);
-      await afterHumanWorkspaceWrite(args.path);
-      return result;
-    },
+    'workspace:writeFile': async (args) =>
+      workspaceWrite({ kind: 'writeFile', path: args.path, data: args.data, encoding: args.opts?.encoding }, () =>
+        workspaceCore.writeFile(args.path, args.data, args.opts)),
+    'workspace:mkdir': async (args) =>
+      workspaceWrite({ kind: 'mkdir', path: args.path }, () => workspaceCore.mkdir(args.path, args.recursive)),
+    'workspace:rename': async (args) =>
+      workspaceWrite({ kind: 'rename', from: args.from, to: args.to }, () =>
+        workspaceCore.rename(args.from, args.to, args.overwrite)),
+    'workspace:copy': async (args) =>
+      workspaceWrite({ kind: 'copy', from: args.from, to: args.to }, () =>
+        workspaceCore.copy(args.from, args.to, args.overwrite)),
+    'workspace:remove': async (args) =>
+      workspaceWrite({ kind: 'remove', path: args.path }, () => workspaceCore.remove(args.path, args.opts)),
     'deck:generateOutline': async (args) => {
       try {
         const outline = await generateDeckOutline(args);
