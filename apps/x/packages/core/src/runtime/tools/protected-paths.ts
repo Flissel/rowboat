@@ -29,6 +29,10 @@ export const PROTECTED_WORKSPACE_ENTRIES: readonly string[] = [
     // cwd and the approval policy, e.g. "yolo").
     "scoped-keys.json",
     "code-mode",
+    // Unpacked Chrome extensions: apps/main/src/browser/extensions.ts loads
+    // every extensions/<name>/manifest.json into the browser session at start,
+    // with no install step (their scripts then run in every browser page).
+    "extensions",
 ];
 
 // Windows ignores trailing dots and spaces in a name ("config." is

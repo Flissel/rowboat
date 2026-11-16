@@ -34,7 +34,7 @@ afterAll(async () => {
 });
 
 describe("protected workspace entries", () => {
-    it("lists the six entries of the ticket plus the two of fix round 1", () => {
+    it("lists the six entries of the ticket plus the three of fix round 1", () => {
         expect([...PROTECTED_WORKSPACE_ENTRIES]).toEqual([
             "config",
             "server-key",
@@ -45,6 +45,8 @@ describe("protected workspace entries", () => {
             // Fix round 1 (C1/I3): server auth keys and code-session policy.
             "scoped-keys.json",
             "code-mode",
+            // Unpacked Chrome extensions, loaded into the browser session at start.
+            "extensions",
         ]);
     });
 });
@@ -65,6 +67,8 @@ describe("isProtectedWrite — file tools", () => {
             "Scoped-Keys.JSON",
             "code-mode/sessions-meta/s1.json",
             "code-mode",
+            "extensions/x/index.js",
+            "extensions/x/manifest.json",
         ]) {
             expect(await write(p), p).toBe(true);
         }

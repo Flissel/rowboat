@@ -58,6 +58,15 @@ describe("file tools on protected paths", () => {
         });
     });
 
+    it("fix round 1: scoped-keys.json, code-mode/ and extensions/ writes are human-only", async () => {
+        for (const p of ["scoped-keys.json", "code-mode/sessions-meta/s1.json", "extensions/x/index.js"]) {
+            expect(await check("file-writeText", { path: p, data: "x" }), p).toMatchObject({
+                required: true,
+                request: { kind: "file", operation: "write", humanOnly: true },
+            });
+        }
+    });
+
     it("knowledge/x.md stays prompt-free", async () => {
         expect(await check("file-writeText", { path: "knowledge/x.md", data: "# x" })).toEqual({ required: false });
     });
