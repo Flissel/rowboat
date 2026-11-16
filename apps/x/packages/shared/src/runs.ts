@@ -117,10 +117,12 @@ export const ToolPermissionMetadata = z.discriminatedUnion("kind", [
         toolName: z.string(),
     }),
     // Generic fail-closed request: a tool with no more specific policy.
+    // humanOnly (VibeMind #330, Task 17): addMcpServer with a command.
     z.object({
         kind: z.literal("tool"),
         toolId: z.string(),
         toolName: z.string(),
+        humanOnly: z.boolean().optional(),
     }),
 ]);
 

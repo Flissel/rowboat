@@ -20,6 +20,16 @@ describe("ToolPermissionMetadata humanOnly", () => {
         expect(command).toMatchObject({ humanOnly: true });
     });
 
+    it("keeps humanOnly on a generic tool request (addMcpServer with a command, Task 17)", () => {
+        const tool = ToolPermissionMetadata.parse({
+            kind: "tool",
+            toolId: "builtin:addMcpServer",
+            toolName: "addMcpServer",
+            humanOnly: true,
+        });
+        expect(tool).toMatchObject({ humanOnly: true });
+    });
+
     it("leaves humanOnly absent on ordinary requests", () => {
         const plain = ToolPermissionMetadata.parse({ kind: "command", commandNames: ["rm"] });
         expect(plain).not.toHaveProperty("humanOnly");

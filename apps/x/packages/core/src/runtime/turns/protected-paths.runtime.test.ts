@@ -36,6 +36,7 @@ const { TurnRepoContextResolver } = await import("./context-resolver.js");
 const { RealPermissionChecker } = await import("./bridges/real-permission-checker.js");
 const { RealToolRegistry } = await import("./bridges/real-tool-registry.js");
 const { resetSecurityAllowListCache } = await import("../../config/security.js");
+const { isStdioEntryApproved, resetStdioApprovalsForTests } = await import("../../mcp/stdio-approvals.js");
 
 type TEvent = z.infer<typeof TurnEvent>;
 type CreateInput = Parameters<InstanceType<typeof TurnRuntime>["createTurn"]>[0];
@@ -51,7 +52,12 @@ const agent: z.infer<typeof ResolvedAgent> = {
     agentId: "copilot",
     systemPrompt: "SYS",
     model: { provider: "fake", model: "m" },
-    tools: [builtinDescriptor("file-writeText"), builtinDescriptor("executeCommand"), builtinDescriptor("file-readText")],
+    tools: [
+        builtinDescriptor("file-writeText"),
+        builtinDescriptor("executeCommand"),
+        builtinDescriptor("file-readText"),
+        builtinDescriptor("addMcpServer"),
+    ],
 };
 
 type Call = { id: string; name: string; args: JsonValue };
@@ -372,4 +378,56 @@ describe("protected paths in the turn loop", () => {
         expect(required(log, "A")).toBeUndefined();
         expect(await fs.readFile(ws("knowledge/x.md"), "utf8")).toBe("# x\n");
     });
+});
+
+// Task 17: addMcpServer with a command asks a human only. Nothing connects or
+// starts a process here (the tool only writes mcp.json and records the approval).
+describe("addMcpServer with a command in the turn loop", () => {
+    const EMPTY = "{\"mcpServers\":{}}";
+    const addStdio = (id: string): Call => ({ id, name: "addMcpServer", args: { serverName: "pwn", config: { command: "calc.exe" } } });
+    const addUrl = (id: string): Call => ({ id, name: "addMcpServer", args: { serverName: "web", config: { url: "http://127.0.0.1:9000/mcp" } } });
+
+    beforeEach(async () => {
+        await fs.writeFile(ws("config/mcp.json"), EMPTY);
+        resetStdioApprovalsForTests();
+    });
+
+    it("DM: a human-only request; after the human's allow the entry is written and approved", async () => {
+        const { runtime, repo } = makeRuntime(new ScriptedModels([respondCalls(addStdio("A")), respondText("done")]), new SpyClassifier());
+        const turnId = await startTurn(runtime, DM);
+        expect((await settle(runtime.advanceTurn(turnId))).status).toBe("suspended");
+        expect(required(await repo.read(turnId), "A")?.request).toMatchObject({ kind: "tool", toolName: "addMcpServer", humanOnly: true });
+        expect(await fs.readFile(ws("config/mcp.json"), "utf8")).toBe(EMPTY);
+        const outcome = await settle(runtime.advanceTurn(turnId, { type: "permission_decision", toolCallId: "A", decision: "allow" }));
+        expect(outcome.status).toBe("completed");
+        expect(result(await repo.read(turnId), "A")?.result).toMatchObject({ isError: false });
+        expect(JSON.parse(await fs.readFile(ws("config/mcp.json"), "utf8"))).toEqual({ mcpServers: { pwn: { command: "calc.exe" } } });
+        expect(isStdioEntryApproved("pwn", { command: "calc.exe" })).toBe(true);
+    });
+
+    it("DA: the classifier never sees it; it reaches the human (a URL entry is still classified)", async () => {
+        const classifier = new SpyClassifier(() => "defer");
+        const { runtime, repo } = makeRuntime(new ScriptedModels([respondCalls(addStdio("A"), addUrl("B"))]), classifier);
+        const turnId = await startTurn(runtime, DA);
+        expect((await settle(runtime.advanceTurn(turnId))).status).toBe("suspended");
+        expect(classifier.batches.map((b) => b.map((r) => r.toolCallId))).toEqual([["B"]]);
+        const log = await repo.read(turnId);
+        expect(required(log, "A")?.request).toMatchObject({ humanOnly: true });
+        expect(required(log, "B")?.request).not.toHaveProperty("humanOnly");
+        expect(await fs.readFile(ws("config/mcp.json"), "utf8")).toBe(EMPTY);
+    });
+
+    for (const [label, mode] of [["SS (to-do run)", SS], ["HL (headless)", HL]] as const) {
+        it(`${label}: denied without a human, classifier untouched, file unchanged`, async () => {
+            const classifier = new SpyClassifier();
+            const { runtime, repo } = makeRuntime(new ScriptedModels([respondCalls(addStdio("A")), respondText("done")]), classifier);
+            const turnId = await startTurn(runtime, mode);
+            expect((await settle(runtime.advanceTurn(turnId))).status).toBe("completed");
+            expect(classifier.batches).toEqual([]);
+            const log = await repo.read(turnId);
+            expect(result(log, "A")?.result).toMatchObject({ isError: true });
+            expect(await fs.readFile(ws("config/mcp.json"), "utf8")).toBe(EMPTY);
+            expect(isStdioEntryApproved("pwn", { command: "calc.exe" })).toBe(false);
+        });
+    }
 });

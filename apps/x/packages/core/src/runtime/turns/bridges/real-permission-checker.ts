@@ -1,5 +1,5 @@
 import { z } from "zod";
-// Modified for VibeMind (Flissel/rowboat vibemind): trusted MCP tools (vertraute-mcp-werkzeuge.ts) need no prompt; "none"/"prompt" builtins on a protected path ask the human only (#330).
+// Modified for VibeMind (Flissel/rowboat vibemind): trusted MCP tools (vertraute-mcp-werkzeuge.ts) need no prompt; "none"/"prompt" builtins on a protected path ask the human only (#330); so does addMcpServer with a command (#330 Task 17).
 import type { JsonValue } from "@x/shared/dist/turns.js";
 import {
     istVertrauterMcpName,
@@ -138,6 +138,15 @@ export class RealPermissionChecker implements IPermissionChecker {
             case "none":
                 return { required: false };
             case "prompt":
+                // VibeMind (ticket #330, Task 17): addMcpServer with a
+                // `command` starts a process — a human only (never
+                // classified, denied where no human is available).
+                if (name === "addMcpServer" && addsStdioServer(input.input)) {
+                    return {
+                        required: true,
+                        request: { kind: "tool", toolId: input.toolId, toolName: input.toolName, humanOnly: true },
+                    };
+                }
                 return { required: true, request: genericRequest(input) };
             case "composio-execute": {
                 const parsed = ComposioExecuteInput.safeParse(input.input);
@@ -212,6 +221,15 @@ function touchesLocalPath(name: string, input: unknown): boolean {
     if (name === "code_agent_run") return true;
     const args = input && typeof input === "object" && !Array.isArray(input) ? (input as Record<string, unknown>) : {};
     return protectedAccessTargets(name, args) !== null;
+}
+
+// Any `command` key counts (fails closed): the tool itself decides on the
+// validated definition and refuses a stdio entry without humanApproved.
+function addsStdioServer(input: unknown): boolean {
+    const config = input && typeof input === "object" && !Array.isArray(input)
+        ? (input as Record<string, unknown>).config
+        : undefined;
+    return Boolean(config && typeof config === "object" && !Array.isArray(config) && "command" in config);
 }
 
 function genericRequest(input: PermissionCheckInput): JsonValue {
