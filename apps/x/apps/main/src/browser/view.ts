@@ -1,3 +1,4 @@
+// Modified for VibeMind (Flissel/rowboat vibemind): the browser session never reaches Rowboat's own server (#330, fix round 2).
 import { randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import { BrowserWindow, Menu, WebContentsView, clipboard, desktopCapturer, session, shell, type Session, type WebContents } from 'electron';
@@ -9,6 +10,7 @@ import type {
   DisplayMediaRequest,
   HttpAuthRequest,
 } from '@x/shared/dist/browser-control.js';
+import { installOwnServerBlock } from '@x/core/dist/security/own-server-target.js';
 import { normalizeNavigationTarget } from './navigation.js';
 import { buildBrowserContextMenu } from './context-menu.js';
 import {
@@ -262,6 +264,15 @@ export class BrowserViewManager extends EventEmitter {
       }
       callback({ requestHeaders });
     });
+
+    // VibeMind (ticket #330, fix round 2, review N2): the agent drives this
+    // session (browser-control), so it never reaches Rowboat's own local
+    // server — every request there is cancelled at network level (all
+    // resource types, form posts from data: pages, redirect hops,
+    // WebSockets). Same host+port predicate as fetch-url. This is the only
+    // onBeforeRequest listener on this session (Electron keeps one); the
+    // app's own session (main.ts) is not touched.
+    installOwnServerBlock(browserSession);
 
     // getDisplayMedia() from pages (e.g. Google Meet "Present now"). When the
     // browser pane is on screen, forward a source picker to the renderer and
