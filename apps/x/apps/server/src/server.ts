@@ -163,7 +163,12 @@ export async function createRowboatServer(opts: RowboatServerOptions): Promise<R
     // VibeMind (#330, Task 17): the handlers see which kind of key this was
     // (auth-context.ts); only the owner key is a human write path.
     if (token && tokenMatches(token, key)) {
-      await runWithAuth('owner', () => next());
+      // Fix round 1 (review I-1/I-2): the owner key may lower itself to a
+      // restricted caller — the Electron main process does so for calls it
+      // forwards from the embed bridge (x-rowboat-principal: restricted).
+      // A header can never raise a caller's rights.
+      const restricted = c.req.header('x-rowboat-principal') === 'restricted';
+      await runWithAuth(restricted ? 'scoped' : 'owner', () => next());
       return;
     }
     const scoped = token ? findScopedKey(token, await loadScopedKeys(opts.workDir)) : null;

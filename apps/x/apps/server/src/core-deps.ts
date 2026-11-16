@@ -22,6 +22,12 @@ import {
   type HumanWorkspaceOp,
 } from '@x/core/dist/config/human-config-writes.js';
 import { currentAuthKind } from './auth-context.js';
+import {
+  filterRestrictedReaddir,
+  RESTRICTED_PATH_CHANNELS,
+  RESTRICTED_REFUSAL,
+  restrictedCallRefused,
+} from '@x/core/dist/security/restricted-principal.js';
 import * as runsCore from '@x/core/dist/runtime/legacy/runs.js';
 import { getModelCatalog } from '@x/core/dist/models/catalog.js';
 import { listModelsForProvider } from '@x/core/dist/models/models.js';
@@ -181,7 +187,7 @@ async function workspaceWrite<T>(op: HumanWorkspaceOp, perform: () => Promise<T>
 
 export function createCoreRpcHandlers(opts?: { sessionsIndexReady?: Promise<void> }): RpcHandlers {
   const sessions = () => container.resolve<ISessions>('sessions');
-  return {
+  const handlers: RpcHandlers = {
     'projects:list': async () => {
       await opts?.sessionsIndexReady;
       return { projects: await listProjects(container.resolve<ISessions>('sessions')) };
@@ -199,7 +205,7 @@ export function createCoreRpcHandlers(opts?: { sessionsIndexReady?: Promise<void
     'sessions:getTurn': async (args) => sessions().getTurn(args.turnId),
     'sessions:sendMessage': async (args) => sessions().sendMessage(args.sessionId, args.input, args.config),
     'sessions:respondToPermission': async (args) => {
-      await sessions().respondToPermission(args.turnId, args.toolCallId, args.decision, args.metadata);
+      await sessions().respondToPermission(args.turnId, args.toolCallId, args.decision, args.metadata, answeredBy());
       return { success: true };
     },
     'sessions:respondToAskHuman': async (args) => {
@@ -1074,7 +1080,7 @@ export function createCoreRpcHandlers(opts?: { sessionsIndexReady?: Promise<void
       return { messageId: await runsCore.createMessage(args.runId, args.message, args.voiceInput, args.voiceOutput, args.searchEnabled, args.middlePaneContext, args.codeMode, args.codeCwd, args.codePolicy) };
     },
     'runs:authorizePermission': async (args) => {
-      await runsCore.authorizePermission(args.runId, args.authorization);
+      await runsCore.authorizePermission(args.runId, args.authorization, answeredBy());
       return { success: true };
     },
     'runs:provideHumanInput': async (args) => {
@@ -1635,6 +1641,39 @@ export function createCoreRpcHandlers(opts?: { sessionsIndexReady?: Promise<void
     // Rowboat Apps handlers (spec §13)
 
   };
+  return guardRestrictedCallers(handlers);
+}
+
+// VibeMind (ticket #330, Task 17 fix round 1, review I-1): a caller that is not
+// the owner (a scoped key, the owner key lowered by x-rowboat-principal for the
+// embed bridge, or no request context) may neither read nor change protected
+// workspace entries through any channel that takes a path
+// (@x/core security/restricted-principal.ts names them). A recursive listing
+// of the workspace drops what lies inside protected entries.
+function guardRestrictedCallers(handlers: RpcHandlers): RpcHandlers {
+  const guarded: Record<string, (args: unknown) => unknown> = {};
+  for (const [channel, handler] of Object.entries(handlers) as Array<[string, (args: unknown) => unknown]>) {
+    if (!RESTRICTED_PATH_CHANNELS.has(channel)) {
+      guarded[channel] = handler;
+      continue;
+    }
+    guarded[channel] = async (args: unknown) => {
+      if (currentAuthKind() === 'owner') return handler(args);
+      if (await restrictedCallRefused(channel, args)) throw new Error(RESTRICTED_REFUSAL);
+      const result = await handler(args);
+      if (channel === 'workspace:readdir' && Array.isArray(result)) {
+        return filterRestrictedReaddir(args, result as Array<{ path: string }>);
+      }
+      return result;
+    };
+  }
+  return guarded as RpcHandlers;
+}
+
+// VibeMind (ticket #330, Task 17 fix round 1, review I-2): only the owner key
+// answers a permission request as the human.
+function answeredBy(): 'human' | 'delegated' {
+  return currentAuthKind() === 'owner' ? 'human' : 'delegated';
 }
 
 // Turn/session feeds come from core's in-process buses. workspace:didChange
