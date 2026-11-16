@@ -112,6 +112,14 @@ describe("execTool protected writes", () => {
         expect(await fs.readFile(ws("config/security.json"), "utf8")).toBe("[\"ls\"]");
     });
 
+    it("fix round 2: refuses an executeCommand that names the own server without humanApproved (never runs)", async () => {
+        const legacy = { autorunContentForbidden: true, headlessSandbox: EMPTY_SANDBOX };
+        // echo, not curl: should the gate ever fail, nothing reaches the network.
+        for (const command of ["echo http://127.0.0.1:3220/rpc/workspace:writeFile", "echo localhost:3221"]) {
+            expect(await refused("executeCommand", { command }, legacy), command).toMatch(/own local server/i);
+        }
+    });
+
     it("code_agent_run refuses the workspace root or config/ as cwd without humanApproved", async () => {
         for (const cwd of [root, ws("config")]) {
             expect(await refused("code_agent_run", { agent: "claude", cwd, prompt: "edit mcp.json" }), cwd).toMatch(/protected/i);

@@ -97,7 +97,7 @@ export async function execTool(agentTool: z.infer<typeof ToolAttachment>, input:
             // this call.
             if (ctx?.humanApproved !== true && (await needsHumanForProtectedPath(agentTool.name, input))) {
                 return {
-                    error: `"${agentTool.name}" would read or change a protected workspace path (config/, keys, channels/, app data). This needs the human's approval in the permission prompt; it was not given for this call.`,
+                    error: `"${agentTool.name}" would read or change a protected workspace path (config/, keys, channels/, app data) or call Rowboat's own local server. This needs the human's approval in the permission prompt; it was not given for this call.`,
                 };
             }
             return builtinTool.execute(input, ctx);

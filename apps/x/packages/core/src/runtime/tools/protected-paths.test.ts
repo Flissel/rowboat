@@ -314,4 +314,19 @@ describe("isProtectedWrite — executeCommand", () => {
             expect(await isProtectedWrite("executeCommand", { command }), command).toBe(false);
         }
     });
+
+    it("fix round 2: a command that names the own server (loopback + own port, or /rpc/) is for the human", async () => {
+        for (const command of [
+            "curl -X POST http://127.0.0.1:3220/rpc/workspace:writeFile",
+            "curl http://localhost:3221",
+            "Invoke-RestMethod http://[::1]:3220/x -Method Post",
+            "curl http://example.test/rpc/sessions:respondToPermission",
+        ]) {
+            expect(await isProtectedWrite("executeCommand", { command }), command).toBe(true);
+            expect(await needsHumanForProtectedPath("executeCommand", { command }), command).toBe(true);
+        }
+        for (const command of ["curl http://localhost:5173/", "curl https://example.com/api"]) {
+            expect(await isProtectedWrite("executeCommand", { command }), command).toBe(false);
+        }
+    });
 });

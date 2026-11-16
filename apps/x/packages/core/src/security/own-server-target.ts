@@ -170,6 +170,42 @@ export async function isOwnServerTarget(url: URL, deps: OwnServerDeps = defaultO
     return addresses.length === 0 || addresses.some((a) => isOwnAddress(a, interfaces));
 }
 
+// Second layer only, for executeCommand (fix round 2): a command whose text
+// names a loopback host form together with an own-server port, or the literal
+// "/rpc/" path, is for the human. Text matching is evadable (own LAN address
+// or host name, a DNS name, ports or hosts assembled by the shell, a script
+// file); the first layer is that the server key is protected and fetch-url /
+// the browser session cannot reach the server at all.
+const LOOPBACK_HOST_FORMS = [
+    /localhost/i,
+    /(?<![\d.])127\.\d/,
+    /(?<![\d.])0\.0\.0\.0(?![\d.])/,
+    /::1(?![\d:a-f])/i,
+    /\[::\]/,
+    /(?<![\da-f])(?:0{1,4}:){7}0{0,3}1(?![\da-f:])/i,
+    /::ffff:7f/i,
+    /0x7f/i,
+    /2130706433/,
+];
+
+export async function commandMentionsOwnServer(
+    command: string,
+    ports: () => Promise<Set<number>> = ownServerPorts,
+): Promise<boolean> {
+    // Same normalisation as the protected-name check: cmd.exe drops "^", the
+    // shells drop quotes and (bash) "\" escapes.
+    const variants = [command.replace(/[\^"'`]/g, ""), command.replace(/[\^"'`\\]/g, "")];
+    if (variants.some((v) => /\/rpc\//i.test(v))) return true;
+    const ownPorts = await ports();
+    return variants.some((v) => {
+        if (!LOOPBACK_HOST_FORMS.some((form) => form.test(v))) return false;
+        for (const match of v.matchAll(/(?<!\d)\d{2,5}(?!\d)/g)) {
+            if (ownPorts.has(Number(match[0]))) return true;
+        }
+        return false;
+    });
+}
+
 // The part of an Electron Session this module uses (kept structural so core
 // does not depend on electron and tests can pass a fake).
 export interface RequestDetailsLike {

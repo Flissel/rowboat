@@ -16,6 +16,7 @@ import { hasOutputRedirect } from "../../application/lib/command-executor.js";
 import { WorkDir } from "../../config/config.js";
 import { expandHomePath, isPathInside, resolveFilePathForPermission } from "../../filesystem/files.js";
 import { filePermissionTargets } from "../assembly/permission-metadata.js";
+import { commandMentionsOwnServer } from "../../security/own-server-target.js";
 
 export const PROTECTED_WORKSPACE_ENTRIES: readonly string[] = [
     "config",
@@ -195,6 +196,10 @@ export async function isProtectedWrite(toolName: string, args: Record<string, un
     if (toolName === "executeCommand") {
         const command = typeof args.command === "string" ? args.command : String(args.command ?? "");
         if (commandNamesProtectedEntry(command)) return true;
+        // Fix round 2 (review N2 ruling): a command naming the own server
+        // (loopback + own port, or /rpc/) is for the human. Second layer
+        // only — text matching is evadable.
+        if (await commandMentionsOwnServer(command)) return true;
         const cwd = asString(args.cwd);
         if (cwd !== undefined && (await isProtectedPath(cwd))) return true;
         // Controller's final ruling (#330): ANY output redirect other than

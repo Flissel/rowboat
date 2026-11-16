@@ -120,6 +120,15 @@ describe("executeCommand fast path", () => {
         });
     });
 
+    it("fix round 2: a command naming the own server (loopback + own port, or /rpc/) is human-only", async () => {
+        for (const command of ["curl -X POST http://127.0.0.1:3220/rpc/workspace:writeFile", "curl http://localhost:3221/x"]) {
+            expect(await check("executeCommand", { command }), command).toMatchObject({
+                required: true,
+                request: { kind: "command", humanOnly: true },
+            });
+        }
+    });
+
     it("every output redirect (other than the harmless ones) is human-only, whatever the target", async () => {
         for (const command of [
             // Controller's final ruling: plain file redirects too.

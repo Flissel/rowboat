@@ -11,7 +11,7 @@ import { afterAll, describe, expect, it } from "vitest";
 const root = fsSync.realpathSync(fsSync.mkdtempSync(path.join(os.tmpdir(), "own-server-target-")));
 process.env.ROWBOAT_WORKDIR = root;
 
-const { installOwnServerBlock, isOwnServerTarget, memoizePorts } = await import("./own-server-target.js");
+const { commandMentionsOwnServer, installOwnServerBlock, isOwnServerTarget, memoizePorts } = await import("./own-server-target.js");
 type Deps = NonNullable<Parameters<typeof isOwnServerTarget>[1]>;
 
 afterAll(async () => {
@@ -88,6 +88,40 @@ describe("isOwnServerTarget", () => {
         const d = deps({ lookup: async (host) => (lookups.push(host), ["127.0.0.1"]) });
         expect(await isOwnServerTarget(new URL("http://anything.example:8080/"), d)).toBe(false);
         expect(lookups).toEqual([]);
+    });
+});
+
+describe("commandMentionsOwnServer (second layer for executeCommand, evadable)", () => {
+    const ports = async () => PORTS;
+    it.each([
+        "curl -X POST http://127.0.0.1:3220/rpc/workspace:writeFile",
+        "curl http://localhost:3221",
+        "Invoke-WebRequest -Uri http://LOCALHOST:3229 -Method Post",
+        "curl -d @x http://[::1]:3220",
+        "curl http://0.0.0.0:3225/x",
+        "curl http://0x7f000001:3220/",
+        "curl http://2130706433:3220/",
+        "curl http://[::ffff:7f00:1]:3220/",
+        "curl http://app.localhost:3220/",
+        "curl 127.0.0.1 --port 3220",
+        "curl ht\"\"tp://127.0.0.1:32^20/",
+        // The literal /rpc/ path alone counts, whatever the host.
+        "curl http://myhost:9999/rpc/x",
+        "wget -qO- http://192.168.1.50:3220/RPC/sessions:respondToPermission",
+    ])("flags %s", async (command) => {
+        expect(await commandMentionsOwnServer(command, ports)).toBe(true);
+    });
+
+    it.each([
+        "curl http://127.0.0.1:5173/",
+        "curl http://localhost:8080/api",
+        "npm run dev -- --port 3220",
+        "echo 3220",
+        "ping 127.0.0.1",
+        "curl https://example.com:3220/",
+        "git log --oneline -5",
+    ])("leaves %s alone", async (command) => {
+        expect(await commandMentionsOwnServer(command, ports)).toBe(false);
     });
 });
 
