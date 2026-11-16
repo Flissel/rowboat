@@ -86,28 +86,31 @@ export function commandNamesProtectedEntry(command: string): boolean {
     );
 }
 
-// Characters with which the shell builds a name the text check cannot see
-// (c%X%onfig, conf*, $env:..., con^fig, `...`).
-const SHELL_BUILT_NAME = /[*?[%$!^`]/;
+// The only redirect target shape the text check accepts: one bare literal
+// token. Quotes, variables (%X%, $X, !X!), wildcards, carets, backticks,
+// parentheses, "+", "&" ... all fall outside it.
+const LITERAL_REDIRECT_TARGET = /^[A-Za-z0-9._/\\-]+$/;
+const REDIRECT_OPERATOR = />>?/g;
 
-// Quotes that are not one whole word ("con"fig, con'fi'g, or unbalanced):
-// the shell joins the pieces into one name.
-function hasWordSplittingQuotes(command: string): boolean {
-    const wholeWordsRemoved = command.replace(
-        /(?<=^|[\s<>|&;()])(?:"[^"]*"|'[^']*')(?=$|[\s<>|&;()])/g,
-        " ",
-    );
-    return /["']/.test(wholeWordsRemoved);
-}
-
-// Fail closed (review addition to #330): a command that writes a file AND
-// may build a name in the shell is treated like one that names a protected
-// entry. A plain redirect to a literal path is not. This text check is a
-// second layer only; the consumers of config/ are hardened separately.
-export function commandMayBuildProtectedName(command: string): boolean {
+// Fail closed (controller ruling for #330): a command with an output
+// redirect is for a human unless EVERY redirect target is a bare literal
+// token that does not resolve into a protected entry (relative targets
+// resolve against the command's cwd). The harmless targets (2>&1, nul,
+// /dev/null) are removed first. A missing target or one starting with "-"
+// counts as not literal. This text check is a second layer only; the
+// consumers of config/ are hardened separately (Task 17).
+export async function redirectNeedsHuman(command: string, cwd?: string): Promise<boolean> {
     if (!hasOutputRedirect(command)) return false;
     const rest = stripHarmlessRedirects(command);
-    return SHELL_BUILT_NAME.test(rest) || hasWordSplittingQuotes(rest);
+    for (const match of rest.matchAll(REDIRECT_OPERATOR)) {
+        const after = rest.slice((match.index ?? 0) + match[0].length);
+        if (after.startsWith(">")) continue; // first half of ">>"
+        const target = after.trimStart().split(/\s/)[0] ?? "";
+        if (!LITERAL_REDIRECT_TARGET.test(target) || target.startsWith("-")) return true;
+        const resolved = path.isAbsolute(target) || !cwd ? target : path.join(cwd, target);
+        if (await isProtectedPath(resolved)) return true;
+    }
+    return false;
 }
 
 function asString(value: unknown): string | undefined {
@@ -116,13 +119,14 @@ function asString(value: unknown): string | undefined {
 
 // True when the tool call writes, moves, copies onto or removes a protected
 // path, or (executeCommand) names a protected entry, runs inside one, or
-// writes a file through a name the shell may build.
+// redirects output to anything but a literal, unprotected path.
 export async function isProtectedWrite(toolName: string, args: Record<string, unknown>): Promise<boolean> {
     if (toolName === "executeCommand") {
         const command = typeof args.command === "string" ? args.command : String(args.command ?? "");
-        if (commandNamesProtectedEntry(command) || commandMayBuildProtectedName(command)) return true;
+        if (commandNamesProtectedEntry(command)) return true;
         const cwd = asString(args.cwd);
-        return cwd !== undefined && (await isProtectedPath(cwd));
+        if (cwd !== undefined && (await isProtectedPath(cwd))) return true;
+        return redirectNeedsHuman(command, cwd);
     }
     const targets = filePermissionTargets(toolName, args);
     if (!targets || (targets.operation !== "write" && targets.operation !== "delete")) {

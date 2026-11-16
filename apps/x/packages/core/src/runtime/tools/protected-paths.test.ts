@@ -142,12 +142,17 @@ describe("isProtectedWrite — executeCommand", () => {
             "echo x > con^fig\\mcp.json",
             "echo x > \"con\"fig\\mcp.json",
             "echo x > $HOME/.rowboat/c$Xonfig/mcp.json",
+            "echo x > (\"con\"+\"fig\\mcp.json\")",
+            "echo hi > \"notes.txt\"",
+            "echo hi >",
         ]) {
             expect(await isProtectedWrite("executeCommand", { command }), command).toBe(true);
         }
+        // A literal redirect target resolves against the command's cwd.
+        expect(await isProtectedWrite("executeCommand", { command: "echo x > ..\\config\\mcp.json", cwd: "knowledge" })).toBe(true);
+        expect(await isProtectedWrite("executeCommand", { command: "echo x > mcp.json", cwd: "knowledge" })).toBe(false);
         // Without a redirect, expansion alone does not count.
         expect(await isProtectedWrite("executeCommand", { command: "echo %PATH%" })).toBe(false);
-        expect(await isProtectedWrite("executeCommand", { command: "echo hi > \"notes.txt\"" })).toBe(false);
     });
 
     it("flags a command whose cwd is a protected entry", async () => {

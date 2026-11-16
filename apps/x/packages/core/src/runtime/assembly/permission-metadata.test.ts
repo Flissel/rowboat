@@ -89,6 +89,12 @@ describe("executeCommand fast path", () => {
             "echo x > co$Xnfig/mcp.json",
             "echo x > c?nfig/mcp.json",
             "echo x > `printf co`nfig/mcp.json",
+            "echo x > (\"con\"+\"fig\\mcp.json\")",
+            // Allow shape: anything but one bare literal token after > / >>.
+            "echo hi > \"notes.txt\"",
+            "echo hi >",
+            "echo hi >> -f",
+            "echo hi > notes.txt&del x",
         ]) {
             expect(await check("executeCommand", { command }), command).toMatchObject({
                 required: true,
@@ -97,17 +103,18 @@ describe("executeCommand fast path", () => {
         }
     });
 
-    it("whole quoted words and expansion without a redirect do not make a request human-only", async () => {
-        for (const command of ["echo hi > \"notes.txt\"", "echo \"a b\" > 'my notes.txt'"]) {
-            const result = await check("executeCommand", { command });
-            expect(result, command).toMatchObject({ required: true, request: { kind: "command" } });
-            expect((result as { request: object }).request, command).not.toHaveProperty("humanOnly");
-        }
+    it("expansion without a redirect is not human-only (not allow-listed commands already need a request)", async () => {
         expect(await check("executeCommand", { command: "echo %PATH%" })).toEqual({ required: false });
     });
 
     it("an ordinary redirect needs a normal (not human-only) request", async () => {
-        for (const command of ["echo hi > notes.txt", "echo hi >> notes.txt", "echo hi 1>notes.txt"]) {
+        for (const command of [
+            "echo hi > notes.txt",
+            "echo hi >> notes.txt",
+            "echo hi 1>notes.txt",
+            "echo hi > knowledge/out-1.txt 2>&1",
+            "echo hi > knowledge\\a.b",
+        ]) {
             const result = await check("executeCommand", { command });
             expect(result, command).toMatchObject({ required: true, request: { kind: "command" } });
             expect((result as { request: object }).request, command).not.toHaveProperty("humanOnly");
