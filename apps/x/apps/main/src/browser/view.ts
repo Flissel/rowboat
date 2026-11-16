@@ -1,4 +1,4 @@
-// Modified for VibeMind (Flissel/rowboat vibemind): the browser session never reaches Rowboat's own server (#330, fix round 2).
+// Modified for VibeMind (Flissel/rowboat vibemind): the browser session never reaches Rowboat's own server (#330, fix round 2); only mailto: leaves for the OS (fix round 3).
 import { randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import { BrowserWindow, Menu, WebContentsView, clipboard, desktopCapturer, session, shell, type Session, type WebContents } from 'electron';
@@ -10,6 +10,7 @@ import type {
   DisplayMediaRequest,
   HttpAuthRequest,
 } from '@x/shared/dist/browser-control.js';
+import { externalOpenDecision } from '@x/core/dist/security/browser-external-open.js';
 import { installOwnServerBlock } from '@x/core/dist/security/own-server-target.js';
 import { normalizeNavigationTarget } from './navigation.js';
 import { buildBrowserContextMenu } from './context-menu.js';
@@ -583,7 +584,13 @@ export class BrowserViewManager extends EventEmitter {
       return { action: 'deny' };
     }
 
-    void shell.openExternal(url);
+    // VibeMind (#330, fix round 3, review m5): pages here are agent-driven;
+    // only mailto: goes to the OS handler, every other scheme is dropped.
+    if (externalOpenDecision(url) === 'open') {
+      void shell.openExternal(url);
+    } else {
+      console.warn(`[Browser] dropped a non-web URL from a page: ${url.slice(0, 200)}`);
+    }
     return { action: 'deny' };
   }
 
