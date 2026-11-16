@@ -2,7 +2,10 @@
 // No network: fetch is a stub everywhere (global stub for the execTool path), DNS is a stub.
 import fsSync from "node:fs";
 import fs from "node:fs/promises";
+import http from "node:http";
+import type { AddressInfo } from "node:net";
 import os from "node:os";
+import zlib from "node:zlib";
 import path from "node:path";
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -188,9 +191,101 @@ describe("fetch-url through execTool (global fetch stubbed)", () => {
         expect(spy).not.toHaveBeenCalled();
     });
 
-    it("another loopback port is unchanged", async () => {
-        const result = await fetchUrl({ url: "http://127.0.0.1:8080/api" });
-        expect(result).toMatchObject({ ok: true });
-        expect(spy).toHaveBeenCalledTimes(1);
+    it("another loopback port is unchanged (served by a local test server, not the global fetch)", async () => {
+        const local = await startServer((_req, res) => res.end("local"));
+        try {
+            const result = await fetchUrl({ url: `http://127.0.0.1:${local.port}/api` });
+            expect(result).toMatchObject({ ok: true, body: "local" });
+            expect(local.hits).toHaveLength(1);
+            expect(spy).not.toHaveBeenCalled();
+        } finally {
+            await local.close();
+        }
+    });
+});
+
+// A loopback HTTP server on an OS-chosen port; it records every request it gets.
+async function startServer(handler: (req: http.IncomingMessage, res: http.ServerResponse) => void) {
+    const hits: string[] = [];
+    const server = http.createServer((req, res) => {
+        hits.push(`${req.method} ${req.url}`);
+        handler(req, res);
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const port = (server.address() as AddressInfo).port;
+    return {
+        port,
+        hits,
+        close: () => new Promise<void>((resolve) => server.close(() => resolve())),
+    };
+}
+
+// Fix round 2 (DNS rebinding): the address fetch-url really connects to is
+// checked, on every hop. Only loopback test servers; the ".test" names cannot
+// resolve through the system DNS, so a transport that ignored the injected
+// lookup would fail instead of going anywhere.
+describe("guardedFetch connect-time check (no stubbed transport)", () => {
+    it("a name that resolves public for the check and to 127.0.0.1 at connect never reaches the own-server port", async () => {
+        const own = await startServer((_req, res) => res.end("own server reached"));
+        try {
+            const answers: string[][] = [["93.184.216.34"], ["127.0.0.1"], ["127.0.0.1"]];
+            const lookups: string[] = [];
+            const lookup = async (host: string) => {
+                lookups.push(host);
+                return answers.shift() ?? ["127.0.0.1"];
+            };
+            const deps = { lookup, ports: async () => new Set([own.port]), interfaces: () => [], hostname: () => "testhost" };
+            const result = await guardedFetch(`http://rebind.test:${own.port}/rpc/workspace:writeFile`, "POST", { "Content-Type": "application/json" }, "{}", deps);
+            expect(result).toMatchObject({ ok: false, status: 0 });
+            expect(String((result as { error?: string }).error)).toMatch(/own/i);
+            expect(own.hits).toEqual([]);
+            // The pre-check and the connect each resolved the name.
+            expect(lookups.length).toBeGreaterThanOrEqual(2);
+        } finally {
+            await own.close();
+        }
+    });
+
+    it("checks the connect address on a redirect hop too", async () => {
+        const own = await startServer((_req, res) => res.end("own server reached"));
+        const outside = await startServer((_req, res) => {
+            res.writeHead(307, { location: `http://rebind.test:${own.port}/rpc/workspace:writeFile` });
+            res.end();
+        });
+        try {
+            let rebindCalls = 0;
+            const lookup = async (host: string) => {
+                if (host === "rebind.test") return rebindCalls++ === 0 ? ["93.184.216.34"] : ["127.0.0.1"];
+                return ["127.0.0.1"];
+            };
+            const deps = { lookup, ports: async () => new Set([own.port]), interfaces: () => [], hostname: () => "testhost" };
+            const result = await guardedFetch(`http://plain.test:${outside.port}/start`, "GET", undefined, undefined, deps);
+            expect(result).toMatchObject({ ok: false, status: 0 });
+            expect(String((result as { error?: string }).error)).toMatch(/own/i);
+            expect(outside.hits).toEqual(["GET /start"]);
+            expect(own.hits).toEqual([]);
+        } finally {
+            await own.close();
+            await outside.close();
+        }
+    });
+
+    it("connects through the checked address when it is not the own server (headers, body, gzip)", async () => {
+        const server = await startServer((req, res) => {
+            let body = "";
+            req.on("data", (c) => (body += c));
+            req.on("end", () => {
+                res.writeHead(200, { "content-type": "text/plain", "content-encoding": "gzip" });
+                res.end(zlib.gzipSync(`${req.headers["x-probe"]}:${req.headers["content-type"]}:${body}`));
+            });
+        });
+        try {
+            const deps = { lookup: async () => ["127.0.0.1"], ports: async () => new Set([1]), interfaces: () => [], hostname: () => "testhost" };
+            const result = await guardedFetch(`http://plain.test:${server.port}/api`, "POST", { "X-Probe": "p" }, "hello", deps);
+            expect(result).toMatchObject({ ok: true, status: 200, body: "p:text/plain;charset=UTF-8:hello" });
+            expect(server.hits).toEqual(["POST /api"]);
+        } finally {
+            await server.close();
+        }
     });
 });

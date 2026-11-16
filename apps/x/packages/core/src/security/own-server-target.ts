@@ -170,6 +170,16 @@ export async function isOwnServerTarget(url: URL, deps: OwnServerDeps = defaultO
     return addresses.length === 0 || addresses.some((a) => isOwnAddress(a, interfaces));
 }
 
+// The connect-time half (fix round 2, DNS rebinding): is this resolved
+// address, on this port, the own server? Used by fetch-url's transport on the
+// address it is about to connect to.
+export async function isOwnServerAddress(ip: string, port: number, deps: OwnServerDeps = defaultOwnServerDeps): Promise<boolean> {
+    const ports = await (deps.ports ?? ownServerPorts)();
+    if (!ports.has(port)) return false;
+    const interfaces = new Set((deps.interfaces ?? defaultInterfaces)().map(normalizeAddress));
+    return isOwnAddress(ip, interfaces);
+}
+
 // Second layer only, for executeCommand (fix round 2): a command whose text
 // names a loopback host form together with an own-server port, or the literal
 // "/rpc/" path, is for the human. Text matching is evadable (own LAN address

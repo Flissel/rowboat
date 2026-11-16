@@ -6,7 +6,7 @@
 import { z } from "zod";
 import type { ToolContext } from "../exec-tool.js";
 import { channelFetch, defaultChannelFetchDeps } from "../channel-fetch.js";
-import { guardedFetch, ownServerRefusal } from "../own-server-guard.js";
+import { connectGuardedFetch, guardedFetch, ownServerRefusal } from "../own-server-guard.js";
 import * as path from "path";
 import * as fs from "fs/promises";
 import { WorkDir } from "../../../config/config.js";
@@ -161,7 +161,12 @@ export const fetchUrlTools: z.infer<typeof BuiltinToolsSchema> = {
                     return { ok: false, status: 0, error: 'fetch-url with custom headers is not allowed in channel runs.' };
                 }
                 // Fix round 1 (#330): never the own server, on any hop.
-                return channelFetch(url, method, { ...defaultChannelFetchDeps, checkUrl: (u) => ownServerRefusal(u) });
+                // Fix round 2: the transport checks the connect address too.
+                return channelFetch(url, method, {
+                    ...defaultChannelFetchDeps,
+                    fetch: connectGuardedFetch(),
+                    checkUrl: (u) => ownServerRefusal(u),
+                });
             }
             // Fix round 1 (#330, review C1): never Rowboat's own local server,
             // the first request and every redirect hop.
