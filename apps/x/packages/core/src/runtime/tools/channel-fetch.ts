@@ -208,7 +208,7 @@ export async function channelFetch(
 
 // Reads at most `limit` characters, then cancels the stream instead of
 // downloading the rest.
-async function readLimited(res: Response, limit: number): Promise<{ text: string; truncated: boolean }> {
+export async function readLimited(res: Response, limit: number): Promise<{ text: string; truncated: boolean }> {
     if (!res.body) {
         return { text: "", truncated: false };
     }

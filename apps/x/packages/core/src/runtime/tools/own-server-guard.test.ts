@@ -17,7 +17,7 @@ vi.mock("../../knowledge/version_history.js", () => ({
     initRepo: async () => undefined,
 }));
 
-const { guardedFetch, ownServerRefusal } = await import("./own-server-guard.js");
+const { connectGuardedFetch, guardedFetch, ownServerRefusal } = await import("./own-server-guard.js");
 const { execTool } = await import("./exec-tool.js");
 const { InMemoryAbortRegistry } = await import("../turns/abort-registry.js");
 type Ctx = NonNullable<Parameters<typeof execTool>[2]>;
@@ -216,7 +216,11 @@ async function startServer(handler: (req: http.IncomingMessage, res: http.Server
     return {
         port,
         hits,
-        close: () => new Promise<void>((resolve) => server.close(() => resolve())),
+        close: () =>
+            new Promise<void>((resolve) => {
+                server.close(() => resolve());
+                server.closeAllConnections();
+            }),
     };
 }
 
@@ -284,6 +288,201 @@ describe("guardedFetch connect-time check (no stubbed transport)", () => {
             const result = await guardedFetch(`http://plain.test:${server.port}/api`, "POST", { "X-Probe": "p" }, "hello", deps);
             expect(result).toMatchObject({ ok: true, status: 200, body: "p:text/plain;charset=UTF-8:hello" });
             expect(server.hits).toEqual(["POST /api"]);
+        } finally {
+            await server.close();
+        }
+    });
+});
+
+// Fix round 3 (review I-A, I-B, m2, m3): the transport against loopback test
+// servers only. ".test" names resolve through the injected lookup.
+const LOCAL = { lookup: async () => ["127.0.0.1"], ports: async () => new Set([1]), interfaces: () => [] as string[], hostname: () => "testhost" };
+
+function closedWithin(ms: number, closed: Promise<void>): Promise<"closed" | "open"> {
+    return Promise.race([closed.then(() => "closed" as const), new Promise<"open">((r) => setTimeout(() => r("open"), ms))]);
+}
+
+// A server that streams without end until the client goes away.
+async function endlessServer(encoding: "identity" | "gzip") {
+    let resolveClosed: () => void = () => undefined;
+    const closed = new Promise<void>((r) => (resolveClosed = r));
+    const server = await startServer((req, res) => {
+        req.socket.once("close", () => resolveClosed());
+        const chunk = Buffer.alloc(64 * 1024, "a");
+        if (encoding === "gzip") {
+            res.writeHead(200, { "content-type": "text/plain", "content-encoding": "gzip" });
+            const gz = zlib.createGzip();
+            gz.pipe(res);
+            const timer = setInterval(() => {
+                gz.write(chunk);
+                gz.flush();
+            }, 5);
+            req.socket.once("close", () => clearInterval(timer));
+        } else {
+            res.writeHead(200, { "content-type": "text/plain" });
+            const timer = setInterval(() => res.write(chunk), 5);
+            req.socket.once("close", () => clearInterval(timer));
+        }
+    });
+    return { ...server, closed };
+}
+
+describe("fix round 3: fetch-url transport", () => {
+    it("never sends an agent-supplied Host, Origin or hop-by-hop header", async () => {
+        let seen: http.IncomingHttpHeaders = {};
+        const server = await startServer((req, res) => {
+            seen = req.headers;
+            res.end("ok");
+        });
+        try {
+            const result = await guardedFetch(
+                `http://plain.test:${server.port}/x`,
+                "GET",
+                {
+                    Host: "demo.apps.localhost:3210",
+                    Origin: "http://demo.apps.localhost:3210",
+                    Connection: "keep-alive, x-secret",
+                    "Keep-Alive": "timeout=5",
+                    "Transfer-Encoding": "chunked",
+                    Upgrade: "websocket",
+                    TE: "trailers",
+                    "Proxy-Authorization": "Basic eA==",
+                    "X-Keep": "1",
+                },
+                undefined,
+                LOCAL,
+            );
+            expect(result).toMatchObject({ ok: true, body: "ok" });
+            expect(seen.host).toBe(`plain.test:${server.port}`);
+            for (const name of ["origin", "keep-alive", "transfer-encoding", "upgrade", "te", "proxy-authorization", "x-secret"]) {
+                expect(seen[name], name).toBeUndefined();
+            }
+            expect(String(seen.connection ?? "")).not.toMatch(/x-secret|keep-alive/i);
+            expect(seen["x-keep"]).toBe("1");
+        } finally {
+            await server.close();
+        }
+    });
+
+    it("returns a status outside 200-599 (999) with its body instead of throwing", async () => {
+        const server = await startServer((_req, res) => {
+            res.writeHead(999, "Request denied", { "content-type": "text/plain" });
+            res.end("nope");
+        });
+        try {
+            const result = await guardedFetch(`http://plain.test:${server.port}/x`, "GET", undefined, undefined, LOCAL);
+            expect(result).toEqual({ ok: false, status: 999, statusText: "Request denied", body: "nope", truncated: false });
+        } finally {
+            await server.close();
+        }
+    });
+
+    it.each([
+        ["gzip", (b: Buffer) => zlib.gzipSync(b)],
+        ["x-gzip", (b: Buffer) => zlib.gzipSync(b)],
+        ["deflate", (b: Buffer) => zlib.deflateSync(b)],
+        ["deflate (raw)", (b: Buffer) => zlib.deflateRawSync(b)],
+        ["br", (b: Buffer) => zlib.brotliCompressSync(b)],
+        ["gzip, br", (b: Buffer) => zlib.brotliCompressSync(zlib.gzipSync(b))],
+        ["deflate,gzip", (b: Buffer) => zlib.gzipSync(zlib.deflateSync(b))],
+        ["identity", (b: Buffer) => b],
+    ] as Array<[string, (b: Buffer) => Buffer]>)("decodes Content-Encoding %s", async (label, encode) => {
+        const header = label === "deflate (raw)" ? "deflate" : label;
+        const text = "hello ".repeat(2000);
+        const server = await startServer((_req, res) => {
+            res.writeHead(200, { "content-type": "text/plain", "content-encoding": header });
+            res.end(encode(Buffer.from(text)));
+        });
+        try {
+            const result = await guardedFetch(`http://plain.test:${server.port}/x`, "GET", undefined, undefined, LOCAL);
+            expect(result).toMatchObject({ ok: true, status: 200, body: text });
+        } finally {
+            await server.close();
+        }
+    });
+
+    it("returns the raw body with the header intact for an unknown coding", async () => {
+        for (const header of ["x-custom", "gzip, x-custom"]) {
+            const server = await startServer((_req, res) => {
+                res.writeHead(200, { "content-type": "text/plain", "content-encoding": header });
+                res.end("raw-bytes");
+            });
+            try {
+                const res = await connectGuardedFetch(LOCAL)(`http://plain.test:${server.port}/x`, { method: "GET", redirect: "manual" });
+                expect(res.headers.get("content-encoding"), header).toBe(header);
+                expect(await res.text(), header).toBe("raw-bytes");
+            } finally {
+                await server.close();
+            }
+        }
+    });
+
+    it.each(["identity", "gzip"] as const)("destroys the socket after the size limit (%s)", async (encoding) => {
+        const server = await endlessServer(encoding);
+        try {
+            const result = await guardedFetch(`http://plain.test:${server.port}/x`, "GET", undefined, undefined, LOCAL);
+            expect(result).toMatchObject({ ok: true, truncated: true });
+            expect((result as { body: string }).body).toHaveLength(200_000);
+            expect(await closedWithin(3000, server.closed)).toBe("closed");
+        } finally {
+            await server.close();
+        }
+    }, 15_000);
+
+    it.each(["identity", "gzip"] as const)("destroys the socket when the body is cancelled (%s)", async (encoding) => {
+        const server = await endlessServer(encoding);
+        try {
+            const res = await connectGuardedFetch(LOCAL)(`http://plain.test:${server.port}/x`, { method: "GET", redirect: "manual" });
+            const reader = res.body!.getReader();
+            await reader.read();
+            await reader.cancel();
+            expect(await closedWithin(3000, server.closed)).toBe("closed");
+        } finally {
+            await server.close();
+        }
+    }, 15_000);
+
+    it.each(["identity", "gzip"] as const)("destroys the socket on abort (%s)", async (encoding) => {
+        const server = await endlessServer(encoding);
+        try {
+            const controller = new AbortController();
+            const res = await connectGuardedFetch(LOCAL)(`http://plain.test:${server.port}/x`, {
+                method: "GET",
+                redirect: "manual",
+                signal: controller.signal,
+            });
+            const reader = res.body!.getReader();
+            await reader.read();
+            controller.abort();
+            await reader.read().catch(() => undefined);
+            expect(await closedWithin(3000, server.closed)).toBe("closed");
+        } finally {
+            await server.close();
+        }
+    }, 15_000);
+});
+
+describe("fix round 3: fetch-url through execTool drops a Host override", () => {
+    it("sends the URL's host, not the agent's", async () => {
+        let seenHost: string | undefined;
+        const server = await startServer((req, res) => {
+            seenHost = req.headers.host;
+            res.end("ok");
+        });
+        try {
+            const result = (await execTool(
+                { type: "builtin", name: "fetch-url" },
+                { url: `http://127.0.0.1:${server.port}/x`, headers: { Host: "demo.apps.localhost:3210" } },
+                {
+                    runId: "t1",
+                    toolCallId: "c1",
+                    signal: new AbortController().signal,
+                    abortRegistry: new InMemoryAbortRegistry(),
+                    publish: async () => undefined,
+                },
+            )) as { ok: boolean };
+            expect(result).toMatchObject({ ok: true });
+            expect(seenHost).toBe(`127.0.0.1:${server.port}`);
         } finally {
             await server.close();
         }

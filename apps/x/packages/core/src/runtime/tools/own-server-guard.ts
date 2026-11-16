@@ -12,7 +12,7 @@
 import http from "node:http";
 import https from "node:https";
 import net, { type LookupFunction } from "node:net";
-import { Readable } from "node:stream";
+import { pipeline, Readable, Transform, type TransformCallback } from "node:stream";
 import zlib from "node:zlib";
 import {
     defaultOwnServerDeps,
@@ -20,6 +20,7 @@ import {
     isOwnServerTarget,
     type OwnServerDeps,
 } from "../../security/own-server-target.js";
+import { readLimited } from "./channel-fetch.js";
 
 // The host+port predicate lives in security/own-server-target.ts (fix round 2,
 // review N2): the embedded browser's session uses the same one.
@@ -53,35 +54,172 @@ export interface GuardedFetchDeps extends OwnServerDeps {
 
 export const defaultGuardedFetchDeps: GuardedFetchDeps = { ...defaultOwnServerDeps };
 
+// A message when the transport must not connect to `address` on `port`
+// (the URL is the request's), else null.
+export type AddressRefusal = (address: string, port: number, url: URL) => Promise<string | null>;
+
 const IDLE_TIMEOUT_MS = 300_000; // undici's headers/body timeout
 const NULL_BODY_STATUS = new Set([101, 204, 205, 304]);
+
+// Fix round 3 (review I-A): the agent never sets these. Host and Origin come
+// from the URL only (undici ignored a Host override, so this restores the old
+// behaviour; a Host override addressed other local virtual hosts such as
+// <slug>.apps.localhost:3210). Hop-by-hop headers and framing are the
+// transport's own.
+const DROPPED_REQUEST_HEADERS = new Set([
+    "host",
+    "origin",
+    "connection",
+    "keep-alive",
+    "proxy-connection",
+    "proxy-authorization",
+    "transfer-encoding",
+    "te",
+    "trailer",
+    "upgrade",
+    "content-length",
+]);
+
+export function sanitizedRequestHeaders(headers: Record<string, string> | undefined): Record<string, string> {
+    const out: Record<string, string> = {};
+    for (const [name, value] of Object.entries(headers ?? {})) {
+        if (DROPPED_REQUEST_HEADERS.has(name.trim().toLowerCase())) continue;
+        out[name] = value;
+    }
+    return out;
+}
 
 function hasHeader(headers: Record<string, string>, name: string): boolean {
     return Object.keys(headers).some((k) => k.toLowerCase() === name);
 }
 
-function decodedBody(res: http.IncomingMessage): Readable {
-    const encoding = String(res.headers["content-encoding"] ?? "").trim().toLowerCase();
-    const decoder =
-        encoding === "gzip" || encoding === "x-gzip"
-            ? zlib.createGunzip()
-            : encoding === "deflate"
-              ? zlib.createInflate()
-              : encoding === "br"
-                ? zlib.createBrotliDecompress()
-                : null;
-    if (!decoder) return res;
-    res.on("error", (e) => decoder.destroy(e));
-    return res.pipe(decoder);
+// "deflate" is meant to be zlib-wrapped, but servers also send raw deflate:
+// pick by the first two bytes the way browsers and undici do.
+class DeflateAuto extends Transform {
+    private inner: zlib.Inflate | zlib.InflateRaw | null = null;
+    private head = Buffer.alloc(0);
+
+    private start(): void {
+        const zlibWrapped = this.head.length >= 2 && (this.head[0] & 0x0f) === 8 && ((this.head[0] << 8) | this.head[1]) % 31 === 0;
+        const inner = zlibWrapped ? zlib.createInflate() : zlib.createInflateRaw();
+        inner.on("data", (chunk: Buffer) => this.push(chunk));
+        inner.on("error", (error) => this.destroy(error));
+        this.inner = inner;
+        inner.write(this.head);
+    }
+
+    override _transform(chunk: Buffer, _encoding: BufferEncoding, callback: TransformCallback): void {
+        if (this.inner) {
+            this.inner.write(chunk);
+        } else {
+            this.head = Buffer.concat([this.head, chunk]);
+            if (this.head.length >= 2) this.start();
+        }
+        callback();
+    }
+
+    override _flush(callback: TransformCallback): void {
+        if (!this.inner) {
+            if (this.head.length === 0) return callback();
+            this.start();
+        }
+        this.inner!.once("end", () => callback());
+        this.inner!.end();
+    }
+
+    override _destroy(error: Error | null, callback: (error?: Error | null) => void): void {
+        this.inner?.destroy();
+        callback(error);
+    }
+}
+
+type ZstdFactory = () => Transform;
+const createZstd = (zlib as unknown as { createZstdDecompress?: ZstdFactory }).createZstdDecompress;
+
+function decoderFor(coding: string): (() => Transform) | null | undefined {
+    switch (coding) {
+        case "identity":
+            return null; // nothing to undo
+        case "gzip":
+        case "x-gzip":
+            return () => zlib.createGunzip();
+        case "deflate":
+            return () => new DeflateAuto();
+        case "br":
+            return () => zlib.createBrotliDecompress();
+        case "zstd":
+            return createZstd ? () => createZstd() : undefined;
+        default:
+            return undefined; // unknown
+    }
+}
+
+export const ACCEPT_ENCODING = createZstd ? "gzip, deflate, br, zstd" : "gzip, deflate, br";
+
+// Undoes Content-Encoding (a comma-separated chain, applied in order, so
+// undone in reverse). An unknown coding anywhere: the raw body, header intact.
+// Destroying the returned stream (a cancelled web stream) destroys the
+// response and with it the socket (review m3).
+export function decodedBody(res: Readable & { headers?: http.IncomingHttpHeaders }): Readable {
+    const header = String(res.headers?.["content-encoding"] ?? "");
+    const codings = header
+        .split(",")
+        .map((c) => c.trim().toLowerCase())
+        .filter((c) => c.length > 0);
+    const factories: Array<() => Transform> = [];
+    for (const coding of codings.reverse()) {
+        const factory = decoderFor(coding);
+        if (factory === undefined) return res;
+        if (factory) factories.push(factory);
+    }
+    if (factories.length === 0) return res;
+    const stages = factories.map((f) => f());
+    const last = stages[stages.length - 1];
+    pipeline([res, ...stages], () => undefined);
+    // pipeline destroys every stage on an error; a plain destroy() of the last
+    // stage (web stream cancel) must take the response down too.
+    last.once("close", () => {
+        if (!res.destroyed) res.destroy();
+    });
+    return last;
+}
+
+function defaultRefusal(deps: OwnServerDeps): AddressRefusal {
+    return async (address, port, url) => ((await isOwnServerAddress(address, port, deps)) ? refusalFor(url.host) : null);
+}
+
+// A Response for any status the server sends: Response itself only takes
+// 200-599 and a token status text, fetch returned the rest too (review I-B).
+function responseFor(
+    body: ReadableStream<Uint8Array> | null,
+    status: number,
+    statusText: string,
+    headers: Headers,
+): Response {
+    const inRange = status >= 200 && status <= 599;
+    let response: Response;
+    let textKept = true;
+    try {
+        response = new Response(body, { status: inRange ? status : 599, statusText, headers });
+    } catch {
+        response = new Response(body, { status: inRange ? status : 599, headers });
+        textKept = false;
+    }
+    if (!inRange) {
+        Object.defineProperty(response, "status", { value: status });
+        Object.defineProperty(response, "ok", { value: false });
+    }
+    if (!textKept) Object.defineProperty(response, "statusText", { value: statusText });
+    return response;
 }
 
 // An HTTP(S) transport with fetch's Response, built on node:http(s) so the
 // connect address can be checked: the request's own lookup resolves the host
-// and refuses the connection when any resolved address is the own server on
-// the requested port. Host names only — an IP literal is not looked up, the
-// URL pre-check (ownServerRefusal) covers it. Not followed: redirects
-// (redirect "manual" — the caller re-checks each hop), proxies.
-export function connectGuardedFetch(deps: OwnServerDeps = defaultOwnServerDeps): Transport {
+// and refuses the connection when any resolved address is refused (default:
+// the own server on the requested port). Host names only — an IP literal is
+// not looked up, the caller's URL pre-check covers it. Not followed:
+// redirects (redirect "manual" — the caller re-checks each hop), proxies.
+export function connectGuardedFetch(deps: OwnServerDeps = defaultOwnServerDeps, refuse: AddressRefusal = defaultRefusal(deps)): Transport {
     return (rawUrl, init) =>
         new Promise<Response>((resolve, reject) => {
             const url = new URL(rawUrl);
@@ -91,7 +229,8 @@ export function connectGuardedFetch(deps: OwnServerDeps = defaultOwnServerDeps):
                     const addresses = await deps.lookup(hostname);
                     if (addresses.length === 0) throw new Error(`Host ${hostname} could not be resolved.`);
                     for (const address of addresses) {
-                        if (await isOwnServerAddress(address, port, deps)) throw new Error(refusalFor(url.host));
+                        const refusal = await refuse(address, port, url);
+                        if (refusal) throw new Error(refusal);
                     }
                     const family = typeof options.family === "number" ? options.family : 0;
                     const entries = addresses
@@ -104,10 +243,10 @@ export function connectGuardedFetch(deps: OwnServerDeps = defaultOwnServerDeps):
                     callback(error instanceof Error ? error : new Error(String(error)), "", 0);
                 });
             };
-            const headers: Record<string, string> = { ...(init.headers ?? {}) };
+            const headers = sanitizedRequestHeaders(init.headers);
             if (!hasHeader(headers, "accept")) headers.accept = "*/*";
             if (!hasHeader(headers, "user-agent")) headers["user-agent"] = "node";
-            if (!hasHeader(headers, "accept-encoding")) headers["accept-encoding"] = "gzip, deflate, br";
+            if (!hasHeader(headers, "accept-encoding")) headers["accept-encoding"] = ACCEPT_ENCODING;
             if (init.body !== undefined) {
                 // fetch labels a string body text/plain unless told otherwise.
                 if (!hasHeader(headers, "content-type")) headers["content-type"] = "text/plain;charset=UTF-8";
@@ -131,7 +270,7 @@ export function connectGuardedFetch(deps: OwnServerDeps = defaultOwnServerDeps):
                         body = Readable.toWeb(decodedBody(res)) as unknown as ReadableStream<Uint8Array>;
                     }
                     try {
-                        resolve(new Response(body, { status, statusText: res.statusMessage ?? "", headers: responseHeaders }));
+                        resolve(responseFor(body, status, res.statusMessage ?? "", responseHeaders));
                     } catch (error) {
                         res.destroy();
                         reject(error);
@@ -203,9 +342,9 @@ export async function guardedFetch(
                 url = next;
                 continue;
             }
-            let text = await res.text();
-            const truncated = text.length > MAX_BODY;
-            if (truncated) text = text.slice(0, MAX_BODY);
+            // Read at most MAX_BODY characters, then cancel: the transport
+            // destroys the socket instead of downloading the rest (review m3).
+            const { text, truncated } = await readLimited(res, MAX_BODY);
             return { ok: res.ok, status: res.status, statusText: res.statusText, body: text, truncated };
         }
     } catch (e) {
