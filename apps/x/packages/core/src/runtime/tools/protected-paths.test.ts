@@ -13,6 +13,7 @@ const {
     PROTECTED_WORKSPACE_ENTRIES,
     commandNamesProtectedEntry,
     isProtectedWrite,
+    setNativeRealpathForTests,
 } = await import("./protected-paths.js");
 
 beforeAll(async () => {
@@ -84,6 +85,38 @@ describe("isProtectedWrite — file tools", () => {
         ]) {
             expect(await write(p), p).toBe(true);
         }
+    });
+
+    it("fix round 1 (I2): every UNC path counts, including a loopback share of the workspace", async () => {
+        const noDrive = root.replace(/^[a-zA-Z]:/, "");
+        const drive = /^([a-zA-Z]):/.exec(root)?.[1] ?? "C";
+        for (const p of [
+            `\\\\localhost\\${drive}$${noDrive}\\config\\mcp.json`,
+            `//localhost/${drive}$${noDrive.split("\\").join("/")}/config/mcp.json`,
+            `\\\\127.0.0.1\\${drive}$${noDrive}\\knowledge\\x.md`,
+            "\\\\server\\share\\notes.txt",
+            "\\\\?\\C:\\elsewhere.txt",
+        ]) {
+            expect(await write(p), p).toBe(true);
+        }
+    });
+
+    it.skipIf(process.platform !== "win32")("fix round 1 (I2): an alias drive is mapped back with the native realpath", async () => {
+        // subst / mapped drives would change machine state: the native
+        // realpath is injected instead. X:\ is an alias of the workspace.
+        setNativeRealpathForTests(async (p) => {
+            if (/^x:/i.test(p)) return path.join(root, p.slice(2));
+            return fs.realpath(p);
+        });
+        try {
+            expect(await write("X:\\config\\mcp.json")).toBe(true);
+            expect(await write("X:\\server-key")).toBe(true);
+            expect(await write("X:\\knowledge\\x.md")).toBe(false);
+        } finally {
+            setNativeRealpathForTests(undefined);
+        }
+        // Without the alias, X:\ is just some other drive.
+        expect(await write("X:\\config\\mcp.json")).toBe(false);
     });
 
     it("leaves ordinary workspace and outside writes alone", async () => {
@@ -170,7 +203,15 @@ describe("isProtectedWrite — executeCommand", () => {
     });
 
     it("fix round 1 (M3): only the 8.3 shape of \"~\" counts, not the home shorthand", async () => {
-        for (const command of ["type SERVER~1", "type EMBED~1.JSO", "dir ELECTR~1", "git log HEAD~3"]) {
+        for (const command of [
+            "type SERVER~1",
+            "type EMBED~1.JSO",
+            "dir ELECTR~1",
+            "git log HEAD~3",
+            // Same normalisation as the name check (escape and quotes removed).
+            "type CONFIG~^1\\mcp.json",
+            "type CONFIG~\"1\"\\mcp.json",
+        ]) {
             expect(commandNamesProtectedEntry(command), command).toBe(true);
         }
         for (const command of ["cd ~", "ls ~/Downloads", "dir ~\\Documents", "echo a~b"]) {

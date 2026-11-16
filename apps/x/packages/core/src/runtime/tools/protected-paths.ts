@@ -69,18 +69,61 @@ async function canonicalWorkspaceRoot(): Promise<string> {
     }
 }
 
+// Fix round 1 (review I2): the JS realpath resolves symlinks and junctions
+// but not a subst / mapped drive. The native one (GetFinalPathNameByHandle on
+// Windows) maps those back to the volume path. Injectable for tests, because
+// creating a real alias drive changes machine state.
+type RealpathFn = (p: string) => Promise<string>;
+const defaultNativeRealpath: RealpathFn = (p) => fs.realpath.native(p);
+let nativeRealpath: RealpathFn = defaultNativeRealpath;
+
+export function setNativeRealpathForTests(fn: RealpathFn | undefined): void {
+    nativeRealpath = fn ?? defaultNativeRealpath;
+}
+
+// Native real path of the nearest existing ancestor, plus the missing rest.
+async function nativeCanonical(resolvedPath: string): Promise<string> {
+    const missing: string[] = [];
+    let current = resolvedPath;
+    for (;;) {
+        try {
+            return path.join(await nativeRealpath(current), ...missing.reverse());
+        } catch {
+            const parent = path.dirname(current);
+            if (parent === current) return resolvedPath;
+            missing.push(path.basename(current));
+            current = parent;
+        }
+    }
+}
+
+// "\\server\share", "//server/share", "\\?\..." and "\\.\...": a UNC or
+// device path can name the workspace through a share (\\localhost\C$\...)
+// that no check maps back. Treated as protected (fails closed).
+function isUncOrDevicePath(p: string): boolean {
+    return /^[\\/]{2}/.test(p);
+}
+
 // True when the path (relative to the workspace root, or absolute) is a
-// protected entry, lies inside one, or contains the workspace. Both the
-// lexical path and the real path (symlinks / junctions resolved where the
-// target exists) are checked.
+// protected entry, lies inside one, or contains the workspace. The lexical
+// path, the real path (symlinks / junctions resolved where the target
+// exists) and the native real path (alias drives) are checked.
 export async function isProtectedPath(inputPath: string): Promise<boolean> {
     if (hasStreamSyntax(inputPath)) return true;
     // An 8.3 short name (SERVER~1, CONFIG~1) is not resolved by the lexical
     // check: the 8.3 shape counts as protected.
     if (SHORT_NAME_SHAPE.test(inputPath)) return true;
+    if (isUncOrDevicePath(inputPath.trim()) || isUncOrDevicePath(expandHomePath(inputPath))) return true;
     const resolved = await resolveFilePathForPermission(inputPath);
+    if (isUncOrDevicePath(resolved.canonicalPath) && !isUncOrDevicePath(path.resolve(WorkDir))) return true;
     if (protectedUnder(path.resolve(WorkDir), resolved.resolvedPath)) return true;
-    return protectedUnder(await canonicalWorkspaceRoot(), resolved.canonicalPath);
+    if (protectedUnder(await canonicalWorkspaceRoot(), resolved.canonicalPath)) return true;
+    const [nativeRoot, nativeTarget] = await Promise.all([
+        nativeCanonical(path.resolve(WorkDir)),
+        nativeCanonical(resolved.resolvedPath),
+    ]);
+    if (isUncOrDevicePath(nativeTarget) && !isUncOrDevicePath(nativeRoot)) return true;
+    return protectedUnder(nativeRoot, nativeTarget);
 }
 
 // cmd.exe drops "^", the shells drop quotes, bash drops "\" escapes: check
@@ -91,14 +134,14 @@ const COMMAND_PIECE_SPLIT = /[\s/\\;&|<>()=,:*?$%!@{}[\]+]+/;
 export function commandNamesProtectedEntry(command: string): boolean {
     // An 8.3 short name (CONFIG~1) is resolved by no text check: its shape
     // counts as naming a protected entry. "cd ~" and "~/x" do not match;
-    // "HEAD~3" does (accepted, fail closed).
-    if (SHORT_NAME_SHAPE.test(command)) return true;
+    // "HEAD~3" does (accepted, fail closed). Tested on the same normalized
+    // variants as the names, so CONFIG~^1 and CONFIG~"1" match too.
     const variants = [
         command.replace(/[\^"'`]/g, ""),
         command.replace(/[\^"'`\\]/g, ""),
     ];
     return variants.some((variant) =>
-        variant.split(COMMAND_PIECE_SPLIT).some(isProtectedEntryName),
+        SHORT_NAME_SHAPE.test(variant) || variant.split(COMMAND_PIECE_SPLIT).some(isProtectedEntryName),
     );
 }
 
