@@ -208,6 +208,34 @@ describe("isProtectedRead (fix round 1, review C1)", () => {
         expect(await isProtectedRead("file-glob", { pattern: "config/**" })).toBe(false);
     });
 
+    it("fix round 2 (m1): exists/stat/read on the workspace root or a parent folder do not count; on or inside an entry they do", async () => {
+        const parent = path.dirname(root);
+        for (const [name, input] of [
+            ["file-exists", { path: "." }],
+            ["file-exists", { path: root }],
+            ["file-stat", { path: "." }],
+            ["file-stat", { path: parent }],
+            ["file-exists", { path: path.parse(root).root }],
+            ["file-readText", { path: "." }],
+            ["file-list", { path: parent }],
+            ["file-list", { path: root }],
+            ["file-glob", { pattern: "*", cwd: parent }],
+            ["file-grep", { pattern: "x", searchPath: parent }],
+        ] as Array<[string, Record<string, unknown>]>) {
+            expect(await isProtectedRead(name, input), `${name} ${JSON.stringify(input)}`).toBe(false);
+            expect(await needsHumanForProtectedPath(name, input), `${name} ${JSON.stringify(input)}`).toBe(false);
+        }
+        for (const [name, input] of [
+            ["file-exists", { path: "config" }],
+            ["file-stat", { path: "config" }],
+            ["file-exists", { path: "config/mcp.json" }],
+            ["file-stat", { path: path.join(root, "channels", "x.json") }],
+            ["file-exists", { path: "extensions" }],
+        ] as Array<[string, Record<string, unknown>]>) {
+            expect(await isProtectedRead(name, input), `${name} ${JSON.stringify(input)}`).toBe(true);
+        }
+    });
+
     it("leaves ordinary reads alone", async () => {
         for (const [name, input] of [
             ["file-readText", { path: "knowledge/x.md" }],

@@ -293,8 +293,11 @@ export async function isProtectedRead(toolName: string, args: Record<string, unk
         return from !== undefined && (await isProtectedPath(from));
     }
     if (targets.operation === "read") {
+        // Fix round 2 (review m1): these ops read one file or its metadata,
+        // so only a target that IS a protected entry or lies inside one
+        // counts — not the workspace root or a parent folder of it.
         for (const target of targets.paths) {
-            if (await isProtectedPath(target)) return true;
+            if ((await protectedPathKind(target)) === "entry") return true;
         }
         return false;
     }
