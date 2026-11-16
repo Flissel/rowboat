@@ -127,6 +127,14 @@ export async function getToolPermissionMetadata(
     const args = toolCall.arguments && typeof toolCall.arguments === 'object'
         ? toolCall.arguments as Record<string, unknown>
         : {};
+    // VibeMind (ticket #330): the coding agent writes below its cwd itself.
+    if (underlyingTool.name === 'code_agent_run') {
+        if (typeof args.cwd !== 'string' || !(await isProtectedWrite('code_agent_run', args))) {
+            return null;
+        }
+        const cwd = (await resolveFilePathForPermission(args.cwd)).canonicalPath;
+        return { kind: 'file', operation: 'write', paths: [cwd], pathPrefix: cwd, humanOnly: true };
+    }
     const targets = filePermissionTargets(underlyingTool.name, args);
     if (!targets) {
         return null;

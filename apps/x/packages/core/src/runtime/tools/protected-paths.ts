@@ -128,6 +128,14 @@ export async function isProtectedWrite(toolName: string, args: Record<string, un
         if (cwd !== undefined && (await isProtectedPath(cwd))) return true;
         return redirectNeedsHuman(command, cwd);
     }
+    if (toolName === "code_agent_run") {
+        // The coding agent writes files itself: a cwd that is the workspace
+        // (or contains it), a protected entry or a path inside one counts.
+        // The cwd the run really uses (session pin, chip, default project)
+        // is checked again in code.ts.
+        const cwd = asString(args.cwd);
+        return cwd !== undefined && (await isProtectedPath(cwd));
+    }
     const targets = filePermissionTargets(toolName, args);
     if (!targets || (targets.operation !== "write" && targets.operation !== "delete")) {
         return false;

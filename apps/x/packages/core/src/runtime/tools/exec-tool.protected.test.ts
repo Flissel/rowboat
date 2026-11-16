@@ -102,6 +102,18 @@ describe("execTool protected writes", () => {
         expect(await fs.readFile(ws("config/security.json"), "utf8")).toBe("[\"ls\"]");
     });
 
+    it("code_agent_run refuses the workspace root or config/ as cwd without humanApproved", async () => {
+        for (const cwd of [root, ws("config")]) {
+            expect(await refused("code_agent_run", { agent: "claude", cwd, prompt: "edit mcp.json" }), cwd).toMatch(/protected/i);
+        }
+    });
+
+    it("code_agent_run also checks the effective cwd (session / chip cwd the model did not name)", async () => {
+        await expect(
+            execTool(builtin("code_agent_run"), { agent: "claude", prompt: "edit mcp.json" }, ctx({ codeCwd: root })),
+        ).rejects.toThrow(/protected/i);
+    });
+
     it("leaves ordinary writes alone", async () => {
         expect(await refused("file-writeText", { path: "knowledge/y.md", data: "# y\n" })).toBeUndefined();
         expect(await fs.readFile(ws("knowledge/y.md"), "utf8")).toBe("# y\n");

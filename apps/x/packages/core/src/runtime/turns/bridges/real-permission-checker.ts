@@ -1,5 +1,5 @@
 import { z } from "zod";
-// Modified for VibeMind (Flissel/rowboat vibemind): trusted MCP tools (vertraute-mcp-werkzeuge.ts) need no prompt.
+// Modified for VibeMind (Flissel/rowboat vibemind): trusted MCP tools (vertraute-mcp-werkzeuge.ts) need no prompt; code_agent_run on a protected cwd asks the human (#330).
 import type { JsonValue } from "@x/shared/dist/turns.js";
 import {
     istVertrauterMcpName,
@@ -113,8 +113,27 @@ export class RealPermissionChecker implements IPermissionChecker {
         const name = input.toolId.slice("builtin:".length);
         const policy = this.getPolicy(name);
         switch (policy) {
-            case "none":
+            case "none": {
+                // VibeMind (ticket #330): code_agent_run is prompt-free except
+                // when its cwd reaches a protected path (human-only request).
+                if (name === "code_agent_run") {
+                    const metadata = await this.getMetadata(
+                        {
+                            type: "tool-call",
+                            toolCallId: input.toolCallId,
+                            toolName: input.toolName,
+                            arguments: input.input,
+                        },
+                        { type: "builtin", name },
+                        new Set<string>(),
+                        [],
+                    );
+                    if (metadata) {
+                        return { required: true, request: metadata as JsonValue };
+                    }
+                }
                 return { required: false };
+            }
             case "prompt":
                 return { required: true, request: genericRequest(input) };
             case "composio-execute": {

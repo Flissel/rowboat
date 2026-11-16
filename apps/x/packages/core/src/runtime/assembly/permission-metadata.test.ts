@@ -63,6 +63,24 @@ describe("file tools on protected paths", () => {
     });
 });
 
+describe("code_agent_run working directory", () => {
+    it("the workspace root or a protected entry as cwd needs a human-only request", async () => {
+        for (const cwd of [root, path.join(root, "config")]) {
+            expect(await check("code_agent_run", { agent: "claude", cwd, prompt: "x" }), cwd).toMatchObject({
+                required: true,
+                request: { kind: "file", operation: "write", humanOnly: true },
+            });
+        }
+    });
+
+    it("a workspace subfolder without protected entries below it is unchanged", async () => {
+        expect(await check("code_agent_run", { agent: "claude", cwd: path.join(root, "knowledge"), prompt: "x" })).toEqual({
+            required: false,
+        });
+        expect(await check("code_agent_run", { agent: "claude", prompt: "x" })).toEqual({ required: false });
+    });
+});
+
 describe("executeCommand fast path", () => {
     it("a redirect into config/ is not on the fast path and is human-only", async () => {
         for (const command of ["echo x > config\\security.json", "awk '{print}' x > config/mcp.json"]) {
