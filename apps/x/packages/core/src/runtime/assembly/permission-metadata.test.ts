@@ -113,6 +113,18 @@ describe("executeCommand fast path", () => {
             "echo hi >",
             "echo hi >> -f",
             "echo hi > notes.txt&del x",
+            // Whole-command rule: shell-built text anywhere, not only in the target.
+            "cd c%X%onfig & echo x > mcp.json",
+            "echo %X% > notes.txt",
+            "echo hi* > notes.txt",
+            "echo con\"fi\"g > notes.txt",
+            // Directory change before the redirect: relative targets are not safe.
+            "cd knowledge & echo x > a.txt",
+            "pushd knowledge && echo x > a.txt",
+            "chdir knowledge & echo x > a.txt",
+            "Set-Location knowledge; echo x > a.txt",
+            "sl knowledge; echo x > a.txt",
+            "cd.. & echo x > a.txt",
         ]) {
             expect(await check("executeCommand", { command }), command).toMatchObject({
                 required: true,

@@ -92,16 +92,40 @@ export function commandNamesProtectedEntry(command: string): boolean {
 const LITERAL_REDIRECT_TARGET = /^[A-Za-z0-9._/\\-]+$/;
 const REDIRECT_OPERATOR = />>?/g;
 
-// Fail closed (controller ruling for #330): a command with an output
-// redirect is for a human unless EVERY redirect target is a bare literal
-// token that does not resolve into a protected entry (relative targets
-// resolve against the command's cwd). The harmless targets (2>&1, nul,
-// /dev/null) are removed first. A missing target or one starting with "-"
-// counts as not literal. This text check is a second layer only; the
-// consumers of config/ are hardened separately (Task 17).
+// Characters with which the shell builds text the check cannot see
+// (c%X%onfig, conf*, $env:..., con^fig, `...`).
+const SHELL_BUILT_TEXT = /[*?[%$!^`]/;
+
+// Quotes that are not one whole word ("con"fig, con'fi'g, or unbalanced):
+// the shell joins the pieces into one word.
+function hasWordSplittingQuotes(command: string): boolean {
+    const wholeWordsRemoved = command.replace(
+        /(?<=^|[\s<>|&;()])(?:"[^"]*"|'[^']*')(?=$|[\s<>|&;()])/g,
+        " ",
+    );
+    return /["']/.test(wholeWordsRemoved);
+}
+
+// A directory change (cd, chdir, pushd, Set-Location, sl) makes a relative
+// redirect target resolve somewhere else than the command's cwd.
+const DIRECTORY_CHANGE = /(?:^|[\s;&|()])(?:cd|chdir|pushd|set-location|sl)(?=$|[\s;&|()/\\.])/i;
+
+// Fail closed (controller rulings for #330). A command with an output
+// redirect is for a human when
+//   1. any redirect target is not a bare literal token outside the protected
+//      entries (relative targets resolve against the command's cwd; a
+//      missing target or one starting with "-" is not literal), or
+//   2. the command anywhere contains shell-built text (wildcard, expansion,
+//      caret, backtick) or word-splitting quotes, or
+//   3. the command changes directory before the redirect.
+// The harmless redirects (2>&1, nul, /dev/null) are removed first. This
+// text check is a second layer only; the consumers of config/ are hardened
+// separately (Task 17).
 export async function redirectNeedsHuman(command: string, cwd?: string): Promise<boolean> {
     if (!hasOutputRedirect(command)) return false;
     const rest = stripHarmlessRedirects(command);
+    if (SHELL_BUILT_TEXT.test(rest) || hasWordSplittingQuotes(rest)) return true;
+    if (DIRECTORY_CHANGE.test(rest.slice(0, rest.lastIndexOf(">")))) return true;
     for (const match of rest.matchAll(REDIRECT_OPERATOR)) {
         const after = rest.slice((match.index ?? 0) + match[0].length);
         if (after.startsWith(">")) continue; // first half of ">>"
