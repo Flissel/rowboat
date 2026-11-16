@@ -129,7 +129,12 @@ export const codeAgentRunTools: z.infer<typeof BuiltinToolsSchema> = {
             const refuseProtectedCwd = async (dir: string) => {
                 const canonical = (await canonicalCodeAgentCwd(dir)) ?? path.resolve(dir);
                 if ((await isProtectedPath(canonical)) && canonical !== approvedCwd) {
-                    throw new Error(`code_agent_run: the working directory ${canonical} contains or is a protected workspace path (config/, keys, channels/, app data). This needs the human's approval for exactly this directory in the permission prompt; it was not given for this call.`);
+                    // Review M2 (#330): without a cwd argument no prompt can
+                    // be raised; naming the directory explicitly does that.
+                    const hint = cwd
+                        ? ''
+                        : ` To ask the human, pass this directory explicitly as the \`cwd\` argument (${canonical}); that raises the permission prompt.`;
+                    throw new Error(`code_agent_run: the working directory ${canonical} contains or is a protected workspace path (config/, keys, channels/, app data). This needs the human's approval for exactly this directory in the permission prompt; it was not given for this call.${hint}`);
                 }
             };
             if (candidate) await refuseProtectedCwd(candidate);

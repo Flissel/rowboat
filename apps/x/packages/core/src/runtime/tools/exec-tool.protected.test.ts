@@ -124,6 +124,12 @@ describe("execTool protected writes", () => {
         ).rejects.toThrow(/protected/i);
     });
 
+    it("fix round 1 (M2): without a cwd argument the error says that passing the directory as cwd asks the human", async () => {
+        await expect(
+            execTool(builtin("code_agent_run"), { agent: "claude", prompt: "x" }, ctx({ codeCwd: root })),
+        ).rejects.toThrow(/pass .*as the `cwd` argument.*permission prompt/i);
+    });
+
     it("code_agent_run: an approval binds to the directory the request named, not the one that would run", async () => {
         const elsewhere = fsSync.realpathSync(fsSync.mkdtempSync(path.join(os.tmpdir(), "code-cwd-a-")));
         try {
