@@ -15,7 +15,7 @@ const { commandMentionsOwnServer, installOwnServerBlock, isOwnServerTarget, memo
 type Deps = NonNullable<Parameters<typeof isOwnServerTarget>[1]>;
 
 afterAll(async () => {
-    await fs.rm(root, { recursive: true, force: true });
+    await fs.rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
 });
 
 const PORTS = new Set(Array.from({ length: 10 }, (_, i) => 3220 + i));
