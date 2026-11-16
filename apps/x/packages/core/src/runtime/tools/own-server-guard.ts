@@ -12,7 +12,7 @@
 import http from "node:http";
 import https from "node:https";
 import net, { type LookupFunction } from "node:net";
-import { pipeline, Readable, Transform, type TransformCallback } from "node:stream";
+import { pipeline, Readable, type Transform } from "node:stream";
 import zlib from "node:zlib";
 import {
     defaultOwnServerDeps,
@@ -93,91 +93,133 @@ function hasHeader(headers: Record<string, string>, name: string): boolean {
     return Object.keys(headers).some((k) => k.toLowerCase() === name);
 }
 
-// "deflate" is meant to be zlib-wrapped, but servers also send raw deflate:
-// pick by the first two bytes the way browsers and undici do.
-class DeflateAuto extends Transform {
-    private inner: zlib.Inflate | zlib.InflateRaw | null = null;
-    private head = Buffer.alloc(0);
+// At most this many codings are undone; a longer chain is returned raw (no
+// decoder stages are created for it).
+export const MAX_CONTENT_CODINGS = 5;
 
-    private start(): void {
-        const zlibWrapped = this.head.length >= 2 && (this.head[0] & 0x0f) === 8 && ((this.head[0] << 8) | this.head[1]) % 31 === 0;
-        const inner = zlibWrapped ? zlib.createInflate() : zlib.createInflateRaw();
-        inner.on("data", (chunk: Buffer) => this.push(chunk));
-        inner.on("error", (error) => this.destroy(error));
-        this.inner = inner;
-        inner.write(this.head);
-    }
-
-    override _transform(chunk: Buffer, _encoding: BufferEncoding, callback: TransformCallback): void {
-        if (this.inner) {
-            this.inner.write(chunk);
-        } else {
-            this.head = Buffer.concat([this.head, chunk]);
-            if (this.head.length >= 2) this.start();
-        }
-        callback();
-    }
-
-    override _flush(callback: TransformCallback): void {
-        if (!this.inner) {
-            if (this.head.length === 0) return callback();
-            this.start();
-        }
-        this.inner!.once("end", () => callback());
-        this.inner!.end();
-    }
-
-    override _destroy(error: Error | null, callback: (error?: Error | null) => void): void {
-        this.inner?.destroy();
-        callback(error);
-    }
-}
+type Stage = "gzip" | "deflate" | "br" | "zstd";
 
 type ZstdFactory = () => Transform;
 const createZstd = (zlib as unknown as { createZstdDecompress?: ZstdFactory }).createZstdDecompress;
 
-function decoderFor(coding: string): (() => Transform) | null | undefined {
+// null: nothing to undo (identity); undefined: unknown or unsupported.
+function stageFor(coding: string): Stage | null | undefined {
     switch (coding) {
         case "identity":
-            return null; // nothing to undo
+            return null;
         case "gzip":
         case "x-gzip":
-            return () => zlib.createGunzip();
+            return "gzip";
         case "deflate":
-            return () => new DeflateAuto();
+            return "deflate";
         case "br":
-            return () => zlib.createBrotliDecompress();
+            return "br";
         case "zstd":
-            return createZstd ? () => createZstd() : undefined;
+            return createZstd ? "zstd" : undefined;
         default:
-            return undefined; // unknown
+            return undefined;
     }
 }
 
 export const ACCEPT_ENCODING = createZstd ? "gzip, deflate, br, zstd" : "gzip, deflate, br";
 
-// Undoes Content-Encoding (a comma-separated chain, applied in order, so
-// undone in reverse). An unknown coding anywhere: the raw body, header intact.
-// Destroying the returned stream (a cancelled web stream) destroys the
-// response and with it the socket (review m3).
-export function decodedBody(res: Readable & { headers?: http.IncomingHttpHeaders }): Readable {
+// "deflate" is meant to be zlib-wrapped, but servers also send raw deflate:
+// the first two bytes decide, the way browsers and undici do.
+function isZlibWrapped(head: Buffer): boolean {
+    return head.length >= 2 && (head[0] & 0x0f) === 8 && ((head[0] << 8) | head[1]) % 31 === 0;
+}
+
+// The first `n` bytes of a stream (fewer if it ends first), left in the
+// stream. A stream that already ended is replaced by one holding those bytes.
+function peekHead(stream: Readable, n: number): Promise<{ head: Buffer; stream: Readable }> {
+    return new Promise((resolve, reject) => {
+        const chunks: Buffer[] = [];
+        let length = 0;
+        const cleanup = () => {
+            stream.off("readable", onReadable);
+            stream.off("end", onEnd);
+            stream.off("error", onError);
+            stream.off("close", onClose);
+        };
+        const finish = (ended: boolean) => {
+            cleanup();
+            const head = Buffer.concat(chunks);
+            if (ended) {
+                resolve({ head, stream: Readable.from(head.length > 0 ? [head] : []) });
+                return;
+            }
+            stream.unshift(head);
+            resolve({ head, stream });
+        };
+        const onReadable = () => {
+            let chunk: Buffer | null;
+            while (length < n && (chunk = stream.read() as Buffer | null) !== null) {
+                chunks.push(chunk);
+                length += chunk.length;
+            }
+            if (length >= n) finish(false);
+        };
+        const onEnd = () => finish(true);
+        const onError = (error: Error) => {
+            cleanup();
+            reject(error);
+        };
+        const onClose = () => {
+            cleanup();
+            reject(new Error("The response closed before its body started."));
+        };
+        stream.on("readable", onReadable);
+        stream.once("end", onEnd);
+        stream.once("error", onError);
+        stream.once("close", onClose);
+    });
+}
+
+function createStage(stage: Exclude<Stage, "deflate">): Transform {
+    switch (stage) {
+        case "gzip":
+            return zlib.createGunzip();
+        case "br":
+            return zlib.createBrotliDecompress();
+        case "zstd":
+            return createZstd!();
+    }
+}
+
+// Undoes Content-Encoding: a comma-separated chain of at most
+// MAX_CONTENT_CODINGS, applied in order, so undone in reverse. An unknown
+// coding anywhere, or a longer chain: the raw body, header intact. Every
+// decoder is a stage of `pipeline` (backpressure, and an error anywhere
+// destroys all of them); destroying the returned stream (a cancelled web
+// stream, the size limit) destroys the response and with it the socket
+// (review m3). Limits apply to what the caller reads, i.e. decompressed bytes.
+export async function decodedBody(res: Readable & { headers?: http.IncomingHttpHeaders }): Promise<Readable> {
     const header = String(res.headers?.["content-encoding"] ?? "");
     const codings = header
         .split(",")
         .map((c) => c.trim().toLowerCase())
         .filter((c) => c.length > 0);
-    const factories: Array<() => Transform> = [];
-    for (const coding of codings.reverse()) {
-        const factory = decoderFor(coding);
-        if (factory === undefined) return res;
-        if (factory) factories.push(factory);
+    if (codings.length > MAX_CONTENT_CODINGS) return res;
+    const stages: Stage[] = [];
+    for (const coding of [...codings].reverse()) {
+        const stage = stageFor(coding);
+        if (stage === undefined) return res;
+        if (stage) stages.push(stage);
     }
-    if (factories.length === 0) return res;
-    const stages = factories.map((f) => f());
-    const last = stages[stages.length - 1];
-    pipeline([res, ...stages], () => undefined);
-    // pipeline destroys every stage on an error; a plain destroy() of the last
-    // stage (web stream cancel) must take the response down too.
+    if (stages.length === 0) return res;
+    let current: Readable = res;
+    for (const stage of stages) {
+        let next: Transform;
+        if (stage === "deflate") {
+            const peeked = await peekHead(current, 2);
+            current = peeked.stream;
+            next = isZlibWrapped(peeked.head) ? zlib.createInflate() : zlib.createInflateRaw();
+        } else {
+            next = createStage(stage);
+        }
+        current = pipeline(current, next, () => undefined);
+    }
+    const last = current;
     last.once("close", () => {
         if (!res.destroyed) res.destroy();
     });
@@ -263,18 +305,26 @@ export function connectGuardedFetch(deps: OwnServerDeps = defaultOwnServerDeps, 
                         if (value === undefined) continue;
                         for (const v of Array.isArray(value) ? value : [value]) responseHeaders.append(name, String(v));
                     }
-                    let body: ReadableStream<Uint8Array> | null = null;
+                    const finish = (body: ReadableStream<Uint8Array> | null) => {
+                        try {
+                            resolve(responseFor(body, status, res.statusMessage ?? "", responseHeaders));
+                        } catch (error) {
+                            res.destroy();
+                            reject(error);
+                        }
+                    };
                     if (init.method === "HEAD" || NULL_BODY_STATUS.has(status)) {
                         res.resume();
-                    } else {
-                        body = Readable.toWeb(decodedBody(res)) as unknown as ReadableStream<Uint8Array>;
+                        finish(null);
+                        return;
                     }
-                    try {
-                        resolve(responseFor(body, status, res.statusMessage ?? "", responseHeaders));
-                    } catch (error) {
-                        res.destroy();
-                        reject(error);
-                    }
+                    decodedBody(res).then(
+                        (stream) => finish(Readable.toWeb(stream) as unknown as ReadableStream<Uint8Array>),
+                        (error: unknown) => {
+                            res.destroy();
+                            reject(error);
+                        },
+                    );
                 },
             );
             req.setTimeout(IDLE_TIMEOUT_MS, () => req.destroy(new Error("fetch-url timed out.")));

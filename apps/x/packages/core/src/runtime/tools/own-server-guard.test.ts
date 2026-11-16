@@ -513,3 +513,76 @@ describe("fix round 3: fetch-url through execTool drops a Host override", () => 
         }
     });
 });
+
+// Fix round 3, coordinator correction: decoders are pipeline stages (deflate
+// auto-detect included), the size limit applies to decompressed bytes, and a
+// chain of more than 5 codings is returned raw without creating decoders.
+describe("fix round 3: decompression limits", () => {
+    it.each([
+        ["gzip", () => zlib.createGzip()],
+        ["deflate", () => zlib.createDeflate()],
+        ["deflate (raw)", () => zlib.createDeflateRaw()],
+    ] as Array<[string, () => zlib.Gzip | zlib.Deflate | zlib.DeflateRaw]>)(
+        "a small %s body that expands past the limit is cut at the limit and the socket destroyed",
+        async (label, encoder) => {
+            let compressed = 0;
+            let resolveClosed: () => void = () => undefined;
+            const closed = new Promise<void>((r) => (resolveClosed = r));
+            const server = await startServer((req, res) => {
+                req.socket.once("close", () => resolveClosed());
+                res.writeHead(200, { "content-type": "text/plain", "content-encoding": label.startsWith("deflate") ? "deflate" : "gzip" });
+                const enc = encoder();
+                enc.on("data", (c: Buffer) => (compressed += c.length));
+                enc.pipe(res);
+                enc.write(Buffer.alloc(5_000_000, "a"));
+                enc.flush();
+                // The response is never ended: only the client can close it.
+            });
+            try {
+                const result = await guardedFetch(`http://plain.test:${server.port}/x`, "GET", undefined, undefined, LOCAL);
+                expect(result).toMatchObject({ ok: true, truncated: true });
+                expect((result as { body: string }).body).toHaveLength(200_000);
+                expect(compressed).toBeLessThan(64 * 1024);
+                expect(await closedWithin(3000, closed)).toBe("closed");
+            } finally {
+                await server.close();
+            }
+        },
+        15_000,
+    );
+
+    it("a chain of 6 codings creates no decoders and returns the raw body; 5 are decoded", async () => {
+        const spy = vi.spyOn(zlib, "createGunzip");
+        try {
+            const six = "gzip, gzip, gzip, gzip, gzip, gzip";
+            let server = await startServer((_req, res) => {
+                res.writeHead(200, { "content-type": "text/plain", "content-encoding": six });
+                res.end("raw-bytes");
+            });
+            try {
+                const res = await connectGuardedFetch(LOCAL)(`http://plain.test:${server.port}/x`, { method: "GET", redirect: "manual" });
+                expect(res.headers.get("content-encoding")).toBe(six);
+                expect(await res.text()).toBe("raw-bytes");
+                expect(spy).not.toHaveBeenCalled();
+            } finally {
+                await server.close();
+            }
+
+            let body = Buffer.from("five");
+            for (let i = 0; i < 5; i++) body = zlib.gzipSync(body);
+            server = await startServer((_req, res) => {
+                res.writeHead(200, { "content-type": "text/plain", "content-encoding": "gzip,gzip,gzip,gzip,gzip" });
+                res.end(body);
+            });
+            try {
+                const result = await guardedFetch(`http://plain.test:${server.port}/x`, "GET", undefined, undefined, LOCAL);
+                expect(result).toMatchObject({ ok: true, body: "five" });
+                expect(spy).toHaveBeenCalledTimes(5);
+            } finally {
+                await server.close();
+            }
+        } finally {
+            spy.mockRestore();
+        }
+    });
+});
