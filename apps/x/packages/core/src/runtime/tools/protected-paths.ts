@@ -9,6 +9,7 @@
 // headless-sandbox.ts and channel-run-guard.ts build their own (longer)
 // lists on top of this one.
 
+import fsCallback from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { hasOutputRedirect } from "../../application/lib/command-executor.js";
@@ -82,7 +83,11 @@ async function canonicalWorkspaceRoot(): Promise<string> {
 // Windows) maps those back to the volume path. Injectable for tests, because
 // creating a real alias drive changes machine state.
 type RealpathFn = (p: string) => Promise<string>;
-const defaultNativeRealpath: RealpathFn = (p) => fs.realpath.native(p);
+// node:fs/promises has no realpath.native: the callback form of node:fs.
+const defaultNativeRealpath: RealpathFn = (p) =>
+    new Promise((resolve, reject) => {
+        fsCallback.realpath.native(p, (error, resolved) => (error ? reject(error) : resolve(resolved)));
+    });
 let nativeRealpath: RealpathFn = defaultNativeRealpath;
 
 export function setNativeRealpathForTests(fn: RealpathFn | undefined): void {
@@ -90,6 +95,11 @@ export function setNativeRealpathForTests(fn: RealpathFn | undefined): void {
 }
 
 // Native real path of the nearest existing ancestor, plus the missing rest.
+// Exported for tests only.
+export async function nativeCanonicalPath(resolvedPath: string): Promise<string> {
+    return nativeCanonical(resolvedPath);
+}
+
 async function nativeCanonical(resolvedPath: string): Promise<string> {
     const missing: string[] = [];
     let current = resolvedPath;

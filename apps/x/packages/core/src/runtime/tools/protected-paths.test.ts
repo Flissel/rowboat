@@ -14,6 +14,7 @@ const {
     commandNamesProtectedEntry,
     isProtectedRead,
     isProtectedWrite,
+    nativeCanonicalPath,
     needsHumanForProtectedPath,
     setNativeRealpathForTests,
 } = await import("./protected-paths.js");
@@ -123,6 +124,12 @@ describe("isProtectedWrite — file tools", () => {
         }
         // Without the alias, X:\ is just some other drive.
         expect(await write("X:\\config\\mcp.json")).toBe(false);
+    });
+
+    it("fix round 1 (I2): the default native realpath really resolves (a junction, plus a missing rest)", async () => {
+        expect(await nativeCanonicalPath(path.join(root, "knowledge", "link", "new", "a.json"))).toBe(
+            path.join(fsSync.realpathSync.native(path.join(root, "config")), "new", "a.json"),
+        );
     });
 
     it("leaves ordinary workspace and outside writes alone", async () => {
