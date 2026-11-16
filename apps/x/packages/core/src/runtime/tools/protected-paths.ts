@@ -131,6 +131,13 @@ export async function isProtectedPath(inputPath: string): Promise<boolean> {
     return (await protectedPathKind(inputPath)) !== null;
 }
 
+// Task 17 fix round 1 (review I-1): true only when the path IS a protected
+// entry or lies inside one — not for the workspace itself or an ancestor
+// (reading one file or listing one folder there does not read the entries).
+export async function isProtectedEntryPath(inputPath: string): Promise<boolean> {
+    return (await protectedPathKind(inputPath)) === "entry";
+}
+
 // "entry" wins over "container": the strongest answer of the three checks.
 async function protectedPathKind(inputPath: string): Promise<ProtectedKind> {
     if (hasStreamSyntax(inputPath)) return "entry";

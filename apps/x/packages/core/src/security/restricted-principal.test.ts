@@ -1,0 +1,139 @@
+// Modified for VibeMind (Flissel/rowboat vibemind): ticket #330, Task 17 fix
+// round 1 (review I-1). A restricted caller (a scoped server key, the embed
+// bridge) may neither read nor change protected workspace entries through any
+// channel that takes a path. Listing the workspace root stays allowed.
+// Temp workspace; nothing is executed.
+import fsSync from "node:fs";
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
+
+const root = fsSync.realpathSync(fsSync.mkdtempSync(path.join(os.tmpdir(), "restricted-principal-ws-")));
+process.env.ROWBOAT_WORKDIR = root;
+
+const { restrictedCallRefused, filterRestrictedReaddir, RESTRICTED_PATH_CHANNELS } = await import("./restricted-principal.js");
+
+const deps = { codeSessionCwd: async (id: string) => (id === "ws" ? root : id === "other" ? path.join(root, "knowledge") : null) };
+const refused = (channel: string, args: unknown) => restrictedCallRefused(channel, args, deps);
+
+beforeAll(async () => {
+    await fs.mkdir(path.join(root, "config"), { recursive: true });
+    await fs.mkdir(path.join(root, "knowledge"), { recursive: true });
+    await fs.writeFile(path.join(root, "server-key"), "k");
+    await fs.writeFile(path.join(root, "knowledge", "a.md"), "# a");
+});
+
+afterAll(async () => {
+    await fs.rm(root, { recursive: true, force: true });
+});
+
+describe("restricted caller: reads of protected entries", () => {
+    it.each([
+        ["workspace:readFile", { path: "server-key" }],
+        ["workspace:readFile", { path: "config/mcp.json" }],
+        ["workspace:readFile", { path: "CONFIG./security.json" }],
+        ["workspace:stat", { path: "cipher-key" }],
+        ["workspace:exists", { path: "embed.json" }],
+        ["workspace:readdir", { path: "config" }],
+        ["workspace:readdir", { path: "channels" }],
+        ["workspace:exportCopy", { path: "scoped-keys.json" }],
+        ["shell:readFileBase64", { path: "server-key" }],
+        ["shell:readFileBase64", { path: path.join(root, "server-key") }],
+        ["shell:previewFile", { path: "config/mcp.json" }],
+        ["spreadsheet:load", { path: "config/x.csv", offset: 0, limit: 1 }],
+        ["spreadsheet:find", { path: "config/x.csv", query: "a" }],
+        ["spaces:uploadBlob", { orgId: "o", spaceId: "s", filePath: path.join(root, "server-key") }],
+        ["knowledge:fileAtCommit", { path: "../server-key", oid: "x" }],
+        ["knowledge:history", { path: "../config/mcp.json" }],
+        ["live-note:get", { filePath: "../config/mcp.json" }],
+        ["google-docs:sync", { path: "config/x.docx" }],
+        ["google-docs:getLink", { path: "config/x.docx" }],
+        ["google-docs:import", { fileId: "f", targetFolder: "config" }],
+        ["codeSession:readFile", { sessionId: "ws", relPath: "server-key" }],
+        ["codeSession:readdir", { sessionId: "ws", relPath: "config" }],
+        ["codeSession:fileDiff", { sessionId: "ws", path: "config/mcp.json" }],
+    ])("%s %j is refused", async (channel, args) => {
+        expect(await refused(channel, args)).toBe(true);
+    });
+
+    it.each([
+        ["workspace:readdir", { path: "" }],
+        ["workspace:readdir", { path: "knowledge" }],
+        ["workspace:readFile", { path: "knowledge/a.md" }],
+        ["workspace:stat", { path: "knowledge" }],
+        ["shell:readFileBase64", { path: "knowledge/a.md" }],
+        ["spreadsheet:load", { path: "config/x.csv", attachment: { orgId: "o", spaceId: "s", hash: "a".repeat(64) }, offset: 0, limit: 1 }],
+        ["knowledge:fileAtCommit", { path: "a.md", oid: "x" }],
+        ["live-note:get", { filePath: "a.md" }],
+        ["google-docs:import", { fileId: "f", targetFolder: "knowledge" }],
+        ["codeSession:readdir", { sessionId: "ws", relPath: "" }],
+        ["codeSession:readFile", { sessionId: "other", relPath: "a.md" }],
+        ["sessions:list", {}],
+    ])("%s %j stays allowed", async (channel, args) => {
+        expect(await refused(channel, args)).toBe(false);
+    });
+
+    it("an unknown code session fails closed", async () => {
+        expect(await refused("codeSession:readFile", { sessionId: "nope", relPath: "a.md" })).toBe(true);
+    });
+
+    it("missing or malformed path arguments fail closed", async () => {
+        expect(await refused("workspace:readFile", {})).toBe(true);
+        expect(await refused("workspace:readFile", null)).toBe(true);
+        expect(await refused("shell:readFileBase64", { path: 42 })).toBe(true);
+    });
+});
+
+describe("restricted caller: writes of protected entries", () => {
+    it.each([
+        ["workspace:writeFile", { path: "config/mcp.json", data: "{}" }],
+        ["workspace:copy", { from: "server-key", to: "knowledge/k" }],
+        ["workspace:remove", { path: "" }],
+        ["knowledge:restore", { path: "../config/mcp.json", oid: "x" }],
+        ["live-note:set", { filePath: "../config/mcp.json", live: {} }],
+        ["google-docs:refreshSnapshot", { path: "config/x.docx" }],
+    ])("%s %j is refused", async (channel, args) => {
+        expect(await refused(channel, args)).toBe(true);
+    });
+
+    it("an unprotected write stays allowed", async () => {
+        expect(await refused("workspace:writeFile", { path: "knowledge/b.md", data: "x" })).toBe(false);
+    });
+});
+
+describe("restricted caller: recursive listing of the workspace", () => {
+    it("drops entries inside protected entries, keeps the rest", async () => {
+        const entries = [
+            { name: "config", path: "config", kind: "dir" as const },
+            { name: "mcp.json", path: "config/mcp.json", kind: "file" as const },
+            { name: "x", path: "Channels/x", kind: "file" as const },
+            { name: "a.md", path: "knowledge/a.md", kind: "file" as const },
+        ];
+        const kept = await filterRestrictedReaddir({ path: "", opts: { recursive: true } }, entries);
+        expect(kept.map((e) => e.path)).toEqual(["config", "knowledge/a.md"]);
+    });
+
+    it("a non-recursive listing is unchanged", async () => {
+        const entries = [{ name: "config", path: "config", kind: "dir" as const }];
+        expect(await filterRestrictedReaddir({ path: "" }, entries)).toEqual(entries);
+    });
+});
+
+describe("channel table", () => {
+    it("names every path-carrying channel it gates", () => {
+        expect([...RESTRICTED_PATH_CHANNELS].sort()).toEqual([
+            "codeSession:fileDiff", "codeSession:readFile", "codeSession:readdir",
+            "google-docs:getLink", "google-docs:import", "google-docs:pickViaManaged",
+            "google-docs:refreshSnapshot", "google-docs:sync",
+            "knowledge:fileAtCommit", "knowledge:history", "knowledge:restore",
+            "live-note:delete", "live-note:get", "live-note:run", "live-note:set",
+            "live-note:setActive", "live-note:stop",
+            "shell:previewFile", "shell:readFileBase64",
+            "spaces:uploadBlob", "spreadsheet:find", "spreadsheet:load",
+            "workspace:copy", "workspace:exists", "workspace:exportCopy", "workspace:mkdir",
+            "workspace:readFile", "workspace:readdir", "workspace:remove", "workspace:rename",
+            "workspace:stat", "workspace:writeFile",
+        ].sort());
+    });
+});
