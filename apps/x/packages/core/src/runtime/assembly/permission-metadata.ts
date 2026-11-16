@@ -11,7 +11,7 @@ import { ToolCallPart } from "@x/shared/dist/message.js";
 import { z } from "zod";
 import { ToolPermissionMetadata } from "@x/shared/dist/runs.js";
 import { isBlocked, extractCommandNames, hasOutputRedirect } from "../../application/lib/command-executor.js";
-import { isProtectedWrite } from "../tools/protected-paths.js";
+import { canonicalCodeAgentCwd, isProtectedWrite } from "../tools/protected-paths.js";
 import { getFileAccessAllowList, type FileAccessGrant, type FileAccessOperation } from "../../config/security.js";
 import { isPathInside, resolveFilePathForPermission } from "../../filesystem/files.js";
 
@@ -129,10 +129,12 @@ export async function getToolPermissionMetadata(
         : {};
     // VibeMind (ticket #330): the coding agent writes below its cwd itself.
     if (underlyingTool.name === 'code_agent_run') {
-        if (typeof args.cwd !== 'string' || !(await isProtectedWrite('code_agent_run', args))) {
+        // Same resolution as the tool (canonicalCodeAgentCwd): the prompt
+        // shows and checks the directory the approval is bound to.
+        const cwd = typeof args.cwd === 'string' && args.cwd ? await canonicalCodeAgentCwd(args.cwd) : null;
+        if (cwd === null || !(await isProtectedWrite('code_agent_run', args))) {
             return null;
         }
-        const cwd = (await resolveFilePathForPermission(args.cwd)).canonicalPath;
         return { kind: 'file', operation: 'write', paths: [cwd], pathPrefix: cwd, humanOnly: true };
     }
     const targets = filePermissionTargets(underlyingTool.name, args);

@@ -114,6 +114,32 @@ describe("execTool protected writes", () => {
         ).rejects.toThrow(/protected/i);
     });
 
+    it("code_agent_run: an approval binds to the directory the request named, not the one that would run", async () => {
+        const elsewhere = fsSync.realpathSync(fsSync.mkdtempSync(path.join(os.tmpdir(), "code-cwd-a-")));
+        try {
+            // The request was computed from cwd A (unprotected: no prompt at all) ...
+            const { getToolPermissionMetadata } = await import("../assembly/permission-metadata.js");
+            const call = { type: "tool-call" as const, toolCallId: "c1", toolName: "code_agent_run", arguments: { agent: "claude", cwd: elsewhere, prompt: "x" } };
+            expect(await getToolPermissionMetadata(call, builtin("code_agent_run"), new Set(), [])).toBeNull();
+            // ... but the chip / session would run it in the workspace root: refused, even marked approved.
+            await expect(
+                execTool(builtin("code_agent_run"), { agent: "claude", cwd: elsewhere, prompt: "x" }, ctx({ codeCwd: root, humanApproved: true })),
+            ).rejects.toThrow(/protected/i);
+            // Approved for config/, run in the root: refused as well.
+            await expect(
+                execTool(builtin("code_agent_run"), { agent: "claude", cwd: ws("config"), prompt: "x" }, ctx({ codeCwd: root, humanApproved: true })),
+            ).rejects.toThrow(/protected/i);
+        } finally {
+            await fs.rm(elsewhere, { recursive: true, force: true });
+        }
+    });
+
+    it("code_agent_run rejects a relative cwd argument outright", async () => {
+        await expect(
+            execTool(builtin("code_agent_run"), { agent: "claude", cwd: "knowledge", prompt: "x" }, ctx({ humanApproved: true })),
+        ).rejects.toThrow(/absolute/i);
+    });
+
     it("leaves ordinary writes alone", async () => {
         expect(await refused("file-writeText", { path: "knowledge/y.md", data: "# y\n" })).toBeUndefined();
         expect(await fs.readFile(ws("knowledge/y.md"), "utf8")).toBe("# y\n");

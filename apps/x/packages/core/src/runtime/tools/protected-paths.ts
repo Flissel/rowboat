@@ -13,7 +13,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { hasOutputRedirect, stripHarmlessRedirects } from "../../application/lib/command-executor.js";
 import { WorkDir } from "../../config/config.js";
-import { isPathInside, resolveFilePathForPermission } from "../../filesystem/files.js";
+import { expandHomePath, isPathInside, resolveFilePathForPermission } from "../../filesystem/files.js";
 import { filePermissionTargets } from "../assembly/permission-metadata.js";
 
 export const PROTECTED_WORKSPACE_ENTRIES: readonly string[] = [
@@ -141,6 +141,18 @@ export async function redirectNeedsHuman(command: string, cwd?: string): Promise
     return false;
 }
 
+// The one resolution of a code_agent_run working directory, shared by the
+// permission request (permission-metadata.ts) and the tool (domains/code.ts):
+// home expansion, an absolute path only (the tool resolves against the
+// process, the permission check against the workspace — a relative cwd is
+// therefore rejected), then the canonical (real) path. Returns null for a
+// relative path.
+export async function canonicalCodeAgentCwd(cwd: string): Promise<string | null> {
+    const expanded = expandHomePath(cwd);
+    if (!path.isAbsolute(expanded)) return null;
+    return (await resolveFilePathForPermission(path.resolve(expanded))).canonicalPath;
+}
+
 function asString(value: unknown): string | undefined {
     return typeof value === "string" && value.length > 0 ? value : undefined;
 }
@@ -161,8 +173,10 @@ export async function isProtectedWrite(toolName: string, args: Record<string, un
         // (or contains it), a protected entry or a path inside one counts.
         // The cwd the run really uses (session pin, chip, default project)
         // is checked again in code.ts.
+        // A relative cwd is rejected by the tool itself (code.ts).
         const cwd = asString(args.cwd);
-        return cwd !== undefined && (await isProtectedPath(cwd));
+        const canonical = cwd === undefined ? null : await canonicalCodeAgentCwd(cwd);
+        return canonical !== null && (await isProtectedPath(canonical));
     }
     const targets = filePermissionTargets(toolName, args);
     if (!targets || (targets.operation !== "write" && targets.operation !== "delete")) {
