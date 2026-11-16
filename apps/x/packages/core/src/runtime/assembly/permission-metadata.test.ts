@@ -98,8 +98,17 @@ describe("executeCommand fast path", () => {
         });
     });
 
-    it("a redirect with a name the shell may build (expansion, wildcard, ^, split quotes) is human-only", async () => {
+    it("every output redirect (other than the harmless ones) is human-only, whatever the target", async () => {
         for (const command of [
+            // Controller's final ruling: plain file redirects too.
+            "echo hi > notes.txt",
+            "echo hi >> notes.txt",
+            "echo hi 1>notes.txt",
+            "echo hi > knowledge/out-1.txt 2>&1",
+            "echo hi > C:\\temp\\out.txt",
+            "echo hi\necho x > a.txt",
+            "echo hi\r\necho x >> knowledge\\a.txt",
+            ". .\\x.ps1 > a.txt",
             "echo x > c%X%onfig\\security.json",
             "echo x > conf*\\mcp.json",
             "echo x > con^fig\\mcp.json",
@@ -145,19 +154,10 @@ describe("executeCommand fast path", () => {
         expect(await check("executeCommand", { command: "echo %PATH%" })).toEqual({ required: false });
     });
 
-    it("an ordinary redirect needs a normal (not human-only) request", async () => {
-        for (const command of [
-            "echo hi > notes.txt",
-            "echo hi >> notes.txt",
-            "echo hi 1>notes.txt",
-            "echo hi > knowledge/out-1.txt 2>&1",
-            "echo hi > knowledge\\a.b",
-            "echo hi > C:\\temp\\out.txt",
-        ]) {
-            const result = await check("executeCommand", { command });
-            expect(result, command).toMatchObject({ required: true, request: { kind: "command" } });
-            expect((result as { request: object }).request, command).not.toHaveProperty("humanOnly");
-        }
+    it("a command that is not allow-listed and has no redirect stays an ordinary request", async () => {
+        const result = await check("executeCommand", { command: "rm notes.txt" });
+        expect(result).toMatchObject({ required: true, request: { kind: "command", commandNames: ["rm"] } });
+        expect((result as { request: object }).request).not.toHaveProperty("humanOnly");
     });
 
     it("null-device redirects and 2>&1 stay on the fast path", async () => {
@@ -166,7 +166,9 @@ describe("executeCommand fast path", () => {
             "type x 2>nul",
             "echo hi >nul",
             "echo hi >NUL",
+            "echo hi 1>nul",
             "echo hi >/dev/null",
+            "echo hi 1>/dev/null",
             "cat x 2>/dev/null",
             "echo hi",
         ]) {

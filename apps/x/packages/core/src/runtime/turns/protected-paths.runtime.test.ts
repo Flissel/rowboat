@@ -204,7 +204,7 @@ describe("protected paths in the turn loop", () => {
     it("DA: the classifier never sees a human-only request; it reaches the human", async () => {
         const classifier = new SpyClassifier(() => "defer");
         const { runtime, repo } = makeRuntime(
-            new ScriptedModels([respondCalls(writeConfig("A"), shell("B", "echo hi > notes.txt"))]),
+            new ScriptedModels([respondCalls(writeConfig("A"), shell("B", "rm notes.txt"), shell("C", "echo hi > notes.txt"))]),
             classifier,
         );
         const turnId = await startTurn(runtime, DA);
@@ -212,10 +212,12 @@ describe("protected paths in the turn loop", () => {
         expect(classifier.batches.map((b) => b.map((r) => r.toolCallId))).toEqual([["B"]]);
         expect(outcome).toMatchObject({ status: "suspended" });
         const pending = (outcome as Extract<TurnOutcome, { status: "suspended" }>).pendingPermissions.map((p) => p.toolCallId);
-        expect(pending).toEqual(expect.arrayContaining(["A", "B"]));
+        expect(pending).toEqual(expect.arrayContaining(["A", "B", "C"]));
         const log = await repo.read(turnId);
         expect(required(log, "A")?.request).toMatchObject({ humanOnly: true });
-        // An ordinary redirect is a normal request (classifier may decide).
+        // Any file redirect is human-only (controller's final ruling).
+        expect(required(log, "C")?.request).toMatchObject({ kind: "command", humanOnly: true });
+        // A command that is merely not allow-listed is a normal request (classifier may decide).
         expect(required(log, "B")?.request).toMatchObject({ kind: "command" });
         expect(required(log, "B")?.request).not.toHaveProperty("humanOnly");
         await unchangedConfig();

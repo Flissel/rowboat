@@ -19,10 +19,11 @@ function sanitizeToken(token: string): string {
 
 // Modified for VibeMind (Flissel/rowboat vibemind): output redirects (ticket
 // #330). Redirects that write nothing anywhere: stderr into stdout (2>&1) and
-// output into the null device (>nul, 2>nul, >/dev/null, 2>/dev/null), each a
+// output into the null device (>nul, 1>nul, 2>nul, >/dev/null, 1>/dev/null,
+// 2>/dev/null, any case), each a
 // whole token. Removed before the command is analysed, so the "&" of 2>&1 no
 // longer reads as a command separator ("1" as a command name).
-const HARMLESS_REDIRECT_REGEX = /(?<![^\s;&|()])(?:2>&1|2?>\s*(?:nul|\/dev\/null))(?=$|[\s;&|()])/gi;
+const HARMLESS_REDIRECT_REGEX = /(?<![^\s;&|()])(?:2>&1|[12]?>\s*(?:nul|\/dev\/null))(?=$|[\s;&|()])/gi;
 
 export function stripHarmlessRedirects(command: string): string {
   return command.replace(HARMLESS_REDIRECT_REGEX, ' ');

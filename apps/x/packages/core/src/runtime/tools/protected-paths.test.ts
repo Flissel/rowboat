@@ -137,22 +137,21 @@ describe("isProtectedWrite — executeCommand", () => {
         }
     });
 
-    it("flags a redirect whose target the shell may build (fail closed, second layer)", async () => {
+    it("flags every output redirect other than the harmless ones (controller's final ruling)", async () => {
         for (const command of [
             "echo x > c%X%onfig\\security.json",
             "echo x > conf*\\mcp.json",
-            "echo x > con^fig\\mcp.json",
             "echo x > \"con\"fig\\mcp.json",
-            "echo x > $HOME/.rowboat/c$Xonfig/mcp.json",
             "echo x > (\"con\"+\"fig\\mcp.json\")",
-            "echo hi > \"notes.txt\"",
+            "echo hi > notes.txt",
+            "echo hi >> notes.txt",
             "echo hi >",
+            "echo x > mcp.json",
+            "echo hi\necho x > a.txt",
         ]) {
             expect(await isProtectedWrite("executeCommand", { command }), command).toBe(true);
         }
-        // A literal redirect target resolves against the command's cwd.
-        expect(await isProtectedWrite("executeCommand", { command: "echo x > ..\\config\\mcp.json", cwd: "knowledge" })).toBe(true);
-        expect(await isProtectedWrite("executeCommand", { command: "echo x > mcp.json", cwd: "knowledge" })).toBe(false);
+        expect(await isProtectedWrite("executeCommand", { command: "echo x > mcp.json", cwd: "knowledge" })).toBe(true);
         // Without a redirect, expansion alone does not count.
         expect(await isProtectedWrite("executeCommand", { command: "echo %PATH%" })).toBe(false);
         // "~" anywhere (8.3 short names such as CONFIG~1) counts as naming a protected entry.
@@ -165,7 +164,7 @@ describe("isProtectedWrite — executeCommand", () => {
     });
 
     it("leaves other commands alone", async () => {
-        for (const command of ["dir 2>&1", "type x 2>nul", "echo hi > notes.txt", "ls knowledge", "cat configuration.md"]) {
+        for (const command of ["dir 2>&1", "type x 2>nul", "echo hi 1>nul", "ls knowledge", "cat configuration.md"]) {
             expect(await isProtectedWrite("executeCommand", { command }), command).toBe(false);
         }
     });

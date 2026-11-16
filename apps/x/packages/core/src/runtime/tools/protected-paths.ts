@@ -11,7 +11,7 @@
 
 import fs from "node:fs/promises";
 import path from "node:path";
-import { hasOutputRedirect, stripHarmlessRedirects } from "../../application/lib/command-executor.js";
+import { hasOutputRedirect } from "../../application/lib/command-executor.js";
 import { WorkDir } from "../../config/config.js";
 import { expandHomePath, isPathInside, resolveFilePathForPermission } from "../../filesystem/files.js";
 import { filePermissionTargets } from "../assembly/permission-metadata.js";
@@ -92,55 +92,6 @@ export function commandNamesProtectedEntry(command: string): boolean {
     );
 }
 
-// The only shape of a command with an output redirect that stays an
-// ordinary request (controller's final ruling for #330): letters, digits,
-// "._/\-", whitespace and ">" — no quotes, variables, wildcards, carets,
-// backticks, separators (& ; | ,), parentheses, "~" or ":". A drive letter
-// at the start of a token ("C:\...") is the one ":" allowed.
-const PLAIN_REDIRECT_COMMAND = /^[A-Za-z0-9._/\\\s>-]+$/;
-const DRIVE_LETTER_AT_TOKEN_START = /(?<=^|[\s>])[A-Za-z]:(?=[\\/])/g;
-const LITERAL_REDIRECT_TARGET = /^(?:[A-Za-z]:)?[A-Za-z0-9._/\\-]+$/;
-const REDIRECT_OPERATOR = />>?/g;
-
-// Commands that change directory, start another shell / program, or create
-// links: relative redirect targets or the written path cannot be trusted.
-const UNTRUSTED_COMMAND_WORDS = new Set([
-    "cd", "chdir", "pushd", "popd", "set-location", "push-location", "sl",
-    "start", "cmd", "powershell", "pwsh", "sh", "bash", "env", "mklink", "ln", "new-item",
-]);
-
-function isUntrustedCommandWord(token: string): boolean {
-    // "cd..", "cd\", "cd/d", "cmd.exe" count as the word they start with.
-    const word = token.toLowerCase().split(/[./\\]/)[0] ?? "";
-    return UNTRUSTED_COMMAND_WORDS.has(word);
-}
-
-// Fail closed (controller's final ruling for #330). A command with an output
-// redirect is an ordinary request only when, after the harmless redirects
-// (2>&1, nul, /dev/null) are removed,
-//   - the whole text has the plain shape above,
-//   - no token is a directory-change / shell / link command, and
-//   - every redirect target is a literal path outside the protected entries
-//     (relative targets resolve against the command's cwd; a missing target
-//     or one starting with "-" is not literal).
-// Everything else with a redirect is human-only. This text check is a second
-// layer only; the consumers of config/ are hardened separately (Task 17).
-export async function redirectNeedsHuman(command: string, cwd?: string): Promise<boolean> {
-    if (!hasOutputRedirect(command)) return false;
-    const rest = stripHarmlessRedirects(command);
-    if (!PLAIN_REDIRECT_COMMAND.test(rest.replace(DRIVE_LETTER_AT_TOKEN_START, ""))) return true;
-    if (rest.split(/[\s>]+/).some(isUntrustedCommandWord)) return true;
-    for (const match of rest.matchAll(REDIRECT_OPERATOR)) {
-        const after = rest.slice((match.index ?? 0) + match[0].length);
-        if (after.startsWith(">")) continue; // first half of ">>"
-        const target = after.trimStart().split(/\s/)[0] ?? "";
-        if (!LITERAL_REDIRECT_TARGET.test(target) || target.startsWith("-")) return true;
-        const resolved = path.isAbsolute(target) || !cwd ? target : path.join(cwd, target);
-        if (await isProtectedPath(resolved)) return true;
-    }
-    return false;
-}
-
 // The one resolution of a code_agent_run working directory, shared by the
 // permission request (permission-metadata.ts) and the tool (domains/code.ts):
 // home expansion, an absolute path only (the tool resolves against the
@@ -159,14 +110,18 @@ function asString(value: unknown): string | undefined {
 
 // True when the tool call writes, moves, copies onto or removes a protected
 // path, or (executeCommand) names a protected entry, runs inside one, or
-// redirects output to anything but a literal, unprotected path.
+// redirects output into a file at all.
 export async function isProtectedWrite(toolName: string, args: Record<string, unknown>): Promise<boolean> {
     if (toolName === "executeCommand") {
         const command = typeof args.command === "string" ? args.command : String(args.command ?? "");
         if (commandNamesProtectedEntry(command)) return true;
         const cwd = asString(args.cwd);
         if (cwd !== undefined && (await isProtectedPath(cwd))) return true;
-        return redirectNeedsHuman(command, cwd);
+        // Controller's final ruling (#330): ANY output redirect other than
+        // the harmless ones (2>&1, nul, /dev/null) is for a human, whatever
+        // its target — no attempt to parse what the shell will write where.
+        // Agents write files with file-writeText.
+        return hasOutputRedirect(command);
     }
     if (toolName === "code_agent_run") {
         // The coding agent writes files itself: a cwd that is the workspace

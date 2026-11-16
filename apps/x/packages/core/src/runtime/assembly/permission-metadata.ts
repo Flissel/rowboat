@@ -10,7 +10,7 @@ import { ToolAttachment } from "@x/shared/dist/agent.js";
 import { ToolCallPart } from "@x/shared/dist/message.js";
 import { z } from "zod";
 import { ToolPermissionMetadata } from "@x/shared/dist/runs.js";
-import { isBlocked, extractCommandNames, hasOutputRedirect } from "../../application/lib/command-executor.js";
+import { isBlocked, extractCommandNames } from "../../application/lib/command-executor.js";
 import { canonicalCodeAgentCwd, isProtectedWrite } from "../tools/protected-paths.js";
 import { getFileAccessAllowList, type FileAccessGrant, type FileAccessOperation } from "../../config/security.js";
 import { isPathInside, resolveFilePathForPermission } from "../../filesystem/files.js";
@@ -110,11 +110,11 @@ export async function getToolPermissionMetadata(
             return null;
         }
         const command = String((args as { command: unknown }).command);
-        // VibeMind (ticket #330): a command that writes to a file or names a
-        // protected workspace entry is never on the allow-list fast path; one
-        // that names a protected entry is for a human to decide.
+        // VibeMind (ticket #330): a command that redirects output into a file,
+        // names a protected workspace entry or runs inside one is never on the
+        // allow-list fast path; it is for a human to decide.
         const humanOnly = await isProtectedWrite('executeCommand', args as Record<string, unknown>);
-        if (!humanOnly && !hasOutputRedirect(command) && !isBlocked(command, sessionAllowedCommands)) {
+        if (!humanOnly && !isBlocked(command, sessionAllowedCommands)) {
             return null;
         }
         return {
