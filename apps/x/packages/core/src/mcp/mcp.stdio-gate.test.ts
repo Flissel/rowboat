@@ -77,9 +77,22 @@ vi.mock("@modelcontextprotocol/sdk/client", () => ({
 const { cleanup, executeTool } = await import("./mcp.js");
 const approvals = await import("./stdio-approvals.js");
 const { initConfigs } = await import("../config/initConfigs.js");
-const { afterHumanWorkspaceWrite } = await import("../config/human-config-writes.js");
+const { applyHumanWorkspaceOp } = await import("../config/human-config-writes.js");
 const workspace = await import("../workspace/workspace.js");
 const { mcpTools } = await import("../runtime/tools/domains/mcp.js");
+
+// The handler path: the operation runs inside applyHumanWorkspaceOp; `after`
+// is injected between the operation and the approval.
+const humanWrite = (relPath: string, data: string, after?: () => Promise<void>) =>
+    applyHumanWorkspaceOp({ kind: "writeFile", path: relPath, data }, async () => {
+        await workspace.writeFile(relPath, data);
+        await after?.();
+    });
+const humanRename = (from: string, to: string, after?: () => Promise<void>) =>
+    applyHumanWorkspaceOp({ kind: "rename", from, to }, async () => {
+        await workspace.rename(from, to, true);
+        await after?.();
+    });
 
 type Ctx = Parameters<(typeof mcpTools)["addMcpServer"]["execute"]>[1];
 
@@ -202,36 +215,113 @@ describe("legitimate flows", () => {
 
     it("a Settings save of config/mcp.json (the handler path) takes effect immediately", async () => {
         await initConfigs();
-        const data = JSON.stringify({ mcpServers: { neu: STDIO } }, null, 2);
-        await workspace.writeFile("config/mcp.json", data);
-        await afterHumanWorkspaceWrite("config/mcp.json", { data });
+        await humanWrite("config/mcp.json", JSON.stringify({ mcpServers: { neu: STDIO } }, null, 2));
         expect(await listMcpTools("neu")).toMatchObject({ count: 0 });
         expect(state.transports.map((t) => t.kind)).toEqual(["stdio"]);
     });
 
-    it("the handler path approves what the human wrote, not a raw write racing it", async () => {
+    it("the handler path approves what the human wrote, not a raw write right after it", async () => {
         await initConfigs();
-        const data = JSON.stringify({ mcpServers: { neu: STDIO } }, null, 2);
-        await workspace.writeFile("config/mcp.json", data);
-        await writeRaw({ neu: { ...STDIO, command: "powershell" } });
-        await afterHumanWorkspaceWrite("config/mcp.json", { data });
+        await humanWrite("config/mcp.json", JSON.stringify({ mcpServers: { neu: STDIO } }, null, 2), () =>
+            writeRaw({ neu: { ...STDIO, command: "powershell" } }),
+        );
         expect((await listMcpTools("neu")).error).toContain(OUTSIDE);
         expect(state.transports).toEqual([]);
     });
 
-    it("a human rename onto config/mcp.json approves the file's entries", async () => {
+    it("a human rename onto config/mcp.json approves the SOURCE read before the operation", async () => {
         await initConfigs();
         await fs.writeFile(path.join(root, "staged.json"), JSON.stringify({ mcpServers: { neu: STDIO } }));
-        await workspace.rename("staged.json", "config/mcp.json", true);
-        await afterHumanWorkspaceWrite("config/mcp.json");
+        await humanRename("staged.json", "config/mcp.json");
         expect(await listMcpTools("neu")).toMatchObject({ count: 0 });
+    });
+
+    it("rename-into-place with the file swapped raw between operation and approval: the swap is not approved", async () => {
+        await initConfigs();
+        await fs.writeFile(path.join(root, "staged.json"), JSON.stringify({ mcpServers: { neu: STDIO } }));
+        await humanRename("staged.json", "config/mcp.json", () => writeRaw({ neu: { ...STDIO, command: "powershell" } }));
+        expect((await listMcpTools("neu")).error).toContain(OUTSIDE);
+        expect(state.transports).toEqual([]);
+        // The human's content itself stays approved.
+        expect(approvals.isStdioEntryApproved("neu", STDIO)).toBe(true);
+    });
+
+    it("rename-into-place with the SOURCE swapped raw after it was read: what lands in place does not spawn", async () => {
+        await initConfigs();
+        const staged = path.join(root, "staged.json");
+        await fs.writeFile(staged, JSON.stringify({ mcpServers: { neu: STDIO } }));
+        await applyHumanWorkspaceOp({ kind: "rename", from: "staged.json", to: "config/mcp.json" }, async () => {
+            await fs.writeFile(staged, JSON.stringify({ mcpServers: { neu: { command: "powershell" } } }));
+            await workspace.rename("staged.json", "config/mcp.json", true);
+        });
+        expect((await listMcpTools("neu")).error).toContain(OUTSIDE);
+        expect(state.transports).toEqual([]);
+    });
+
+    it("an operation on the config folder (container) approves nothing new and revokes changed entries", async () => {
+        await writeRaw({ keep: STDIO, change: STDIO });
+        await initConfigs();
+        const stagedDir = path.join(root, "staged-config");
+        await fs.mkdir(stagedDir, { recursive: true });
+        await fs.writeFile(
+            path.join(stagedDir, "mcp.json"),
+            JSON.stringify({ mcpServers: { keep: STDIO, change: { command: "powershell" }, neu: { command: "calc.exe" } } }),
+        );
+        await applyHumanWorkspaceOp({ kind: "rename", from: "staged-config", to: "config" }, async () => {
+            await fs.rm(path.join(root, "config"), { recursive: true, force: true });
+            await workspace.rename("staged-config", "config", true);
+        });
+        expect(approvals.isStdioEntryApproved("keep", STDIO)).toBe(true);
+        expect(approvals.isStdioEntryApproved("change", STDIO)).toBe(false);
+        expect((await listMcpTools("change")).error).toContain(OUTSIDE);
+        expect((await listMcpTools("neu")).error).toContain(OUTSIDE);
+        // Writing the old definition back raw does not bring it back.
+        await writeRaw({ change: STDIO });
+        expect((await listMcpTools("change")).error).toContain(OUTSIDE);
+        expect(state.transports.map((t) => t.target)).toEqual([]);
+    });
+
+    it("removing mcp.json revokes every approval", async () => {
+        await writeRaw({ ok: STDIO });
+        await initConfigs();
+        await applyHumanWorkspaceOp({ kind: "remove", path: "config/mcp.json" }, () =>
+            workspace.remove("config/mcp.json", { trash: false }),
+        );
+        await writeRaw({ ok: STDIO });
+        expect((await listMcpTools("ok")).error).toContain(OUTSIDE);
+        expect(state.transports).toEqual([]);
+    });
+
+    it("approvals mirror the latest human config: an old definition written back raw no longer spawns", async () => {
+        await writeRaw({ s: STDIO });
+        await initConfigs();
+        await humanWrite("config/mcp.json", JSON.stringify({ mcpServers: { s: { ...STDIO, command: "node2" } } }));
+        await writeRaw({ s: STDIO });
+        expect((await listMcpTools("s")).error).toContain(OUTSIDE);
+        expect(state.transports).toEqual([]);
+    });
+
+    it("a human save that drops an entry revokes it", async () => {
+        await writeRaw({ s: STDIO });
+        await initConfigs();
+        await humanWrite("config/mcp.json", JSON.stringify({ mcpServers: {} }));
+        await writeRaw({ s: STDIO });
+        expect((await listMcpTools("s")).error).toContain(OUTSIDE);
+    });
+
+    it("a human-approved addMcpServer replaces that name's approval", async () => {
+        await writeRaw({ s: STDIO });
+        await initConfigs();
+        expect(await addMcpServer("s", { ...STDIO, command: "node2" }, { humanApproved: true })).toMatchObject({ success: true });
+        await writeRaw({ s: STDIO });
+        expect((await listMcpTools("s")).error).toContain(OUTSIDE);
+        expect(state.transports).toEqual([]);
     });
 
     it("a human write to another file approves nothing", async () => {
         await initConfigs();
         await writeRaw({ pwn: { command: "calc.exe" } });
-        await workspace.writeFile("config/tags.json", "{}");
-        await afterHumanWorkspaceWrite("config/tags.json", { data: "{}" });
+        await humanWrite("config/tags.json", "{}");
         expect((await listMcpTools("pwn")).error).toContain(OUTSIDE);
         expect(state.transports).toEqual([]);
     });

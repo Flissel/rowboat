@@ -277,6 +277,23 @@ export function reloadSecurityConfig(content?: string): void {
     state = content === undefined ? readSecurityConfig() : parseSecurityContent(content);
 }
 
+/**
+ * Revocation only (the human removed or moved security.json, or changed a
+ * folder that holds it): no new content is applied. The live commands shrink
+ * to those that are both live now and in the default list, and every file
+ * grant is dropped. That is never wider than the current state nor than what
+ * a restart would load (the re-created default file), so it fails closed in
+ * both directions: `*` and grants the human removed with the file are gone,
+ * and a default command the human had taken out does not come back.
+ */
+export function revokeSecurityConfigToDefaults(): void {
+    const live = loadedState();
+    state = {
+        allowedCommands: live.allowedCommands.filter((cmd) => DEFAULT_ALLOW_LIST.includes(cmd)),
+        allowedFileAccess: [],
+    };
+}
+
 /** Drops the live state; the next use loads the file again (tests). */
 export function resetSecurityAllowListCache() {
     state = null;

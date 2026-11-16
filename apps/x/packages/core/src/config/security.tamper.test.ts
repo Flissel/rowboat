@@ -19,7 +19,7 @@ vi.mock("../knowledge/version_history.js", () => ({
 
 const security = await import("./security.js");
 const { isBlocked } = await import("../application/lib/command-executor.js");
-const { afterHumanWorkspaceWrite } = await import("./human-config-writes.js");
+const { applyHumanWorkspaceOp, workspaceOpTouchesProtected } = await import("./human-config-writes.js");
 const workspace = await import("../workspace/workspace.js");
 
 const file = path.join(root, "config", "security.json");
@@ -107,28 +107,94 @@ describe("security.json legitimate flows", () => {
         expect(saved.allowedFileAccess).toEqual([{ operation: "read", pathPrefix: path.resolve(outside) }]);
     });
 
+    const humanWrite = (relPath: string, data: string, after?: () => Promise<void>) =>
+        applyHumanWorkspaceOp({ kind: "writeFile", path: relPath, data }, async () => {
+            await workspace.writeFile(relPath, data);
+            await after?.();
+        });
+
     it("a Settings save of config/security.json (the handler path) takes effect immediately", async () => {
         security.reloadSecurityConfig();
-        const data = JSON.stringify({ allowedCommands: ["*"], allowedFileAccess: [] });
-        await workspace.writeFile("config/security.json", data);
-        await afterHumanWorkspaceWrite("config/security.json", { data });
+        await humanWrite("config/security.json", JSON.stringify({ allowedCommands: ["*"], allowedFileAccess: [] }));
         expect(isBlocked("powershell -c x")).toBe(false);
     });
 
-    it("the handler path applies what the human wrote, not a later raw write", async () => {
+    it("the handler path applies what the human wrote, not a raw write right after it", async () => {
         security.reloadSecurityConfig();
-        const data = JSON.stringify({ allowedCommands: ["ls", "git"], allowedFileAccess: [] });
-        await workspace.writeFile("config/security.json", data);
-        await writeRaw(["*"]);
-        await afterHumanWorkspaceWrite("config/security.json", { data });
+        await humanWrite("config/security.json", JSON.stringify({ allowedCommands: ["ls", "git"], allowedFileAccess: [] }), () =>
+            writeRaw(["*"]),
+        );
         expect(security.getSecurityAllowList().sort()).toEqual(["git", "ls"]);
     });
 
     it("a human write to another config file does not reload security.json", async () => {
         security.reloadSecurityConfig();
         await writeRaw(["*"]);
-        await workspace.writeFile("config/tags.json", "{}");
-        await afterHumanWorkspaceWrite("config/tags.json", { data: "{}" });
+        await humanWrite("config/tags.json", "{}");
         expect(isBlocked("powershell -c x")).toBe(true);
+    });
+
+    it("a human rename onto security.json applies the source read before the operation, not a swap after it", async () => {
+        security.reloadSecurityConfig();
+        await fs.writeFile(path.join(root, "staged.json"), JSON.stringify(["ls", "git"]));
+        await applyHumanWorkspaceOp({ kind: "rename", from: "staged.json", to: "config/security.json" }, async () => {
+            await workspace.rename("staged.json", "config/security.json", true);
+            await writeRaw(["*"]); // injected: raw swap between operation and approval
+        });
+        expect(security.getSecurityAllowList().sort()).toEqual(["git", "ls"]);
+    });
+
+    it("removing security.json only revokes: live ∩ defaults, grants dropped, nothing from the file", async () => {
+        await writeRaw({ allowedCommands: ["*", "ls", "cat", "git"], allowedFileAccess: [{ operation: "read", pathPrefix: outside }] });
+        security.reloadSecurityConfig();
+        await applyHumanWorkspaceOp({ kind: "remove", path: "config/security.json" }, async () => {
+            await workspace.remove("config/security.json", { trash: false });
+        });
+        expect(security.getSecurityAllowList().sort()).toEqual(["cat", "ls"]);
+        expect(security.getFileAccessAllowList()).toEqual([]);
+    });
+
+    it("an operation on the config folder (container) only revokes, never applies the new file", async () => {
+        security.reloadSecurityConfig();
+        const staged = path.join(root, "staged-config");
+        await fs.mkdir(staged, { recursive: true });
+        await fs.writeFile(path.join(staged, "security.json"), JSON.stringify(["*"]));
+        await applyHumanWorkspaceOp({ kind: "rename", from: "staged-config", to: "config" }, async () => {
+            await fs.rm(path.join(root, "config"), { recursive: true, force: true });
+            await workspace.rename("staged-config", "config", true);
+        });
+        expect(security.getSecurityAllowList()).toEqual(["ls"]);
+        expect(isBlocked("powershell -c x")).toBe(true);
+    });
+
+    it("workspaceOpTouchesProtected: config/, keys, the workspace root, both ends of a rename/copy", async () => {
+        const yes = [
+            { kind: "writeFile", path: "config/mcp.json", data: "{}" },
+            { kind: "writeFile", path: "server-key", data: "x" },
+            { kind: "writeFile", path: "CONFIG./mcp.json", data: "{}" },
+            { kind: "mkdir", path: "extensions/x" },
+            { kind: "remove", path: "config" },
+            { kind: "remove", path: "" },
+            { kind: "rename", from: "notes.md", to: "config/security.json" },
+            { kind: "rename", from: "config", to: "old-config" },
+            { kind: "copy", from: "server-key", to: "knowledge/k.txt" },
+        ] as const;
+        for (const op of yes) expect(await workspaceOpTouchesProtected(op), JSON.stringify(op)).toBe(true);
+        const no = [
+            { kind: "writeFile", path: "knowledge/x.md", data: "x" },
+            { kind: "rename", from: "knowledge/a.md", to: "knowledge/b.md" },
+            { kind: "remove", path: "knowledge/x.md" },
+        ] as const;
+        for (const op of no) expect(await workspaceOpTouchesProtected(op), JSON.stringify(op)).toBe(false);
+    });
+
+    it("a failed operation changes nothing", async () => {
+        security.reloadSecurityConfig();
+        await expect(
+            applyHumanWorkspaceOp({ kind: "writeFile", path: "config/security.json", data: "[\"*\"]" }, async () => {
+                throw new Error("disk full");
+            }),
+        ).rejects.toThrow("disk full");
+        expect(security.getSecurityAllowList()).toEqual(["ls"]);
     });
 });
