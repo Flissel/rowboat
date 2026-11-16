@@ -1,4 +1,5 @@
 "use client";
+// Modified for VibeMind (Flissel/rowboat vibemind): human-only requests show no session/always scope (#330).
 
 import { Button } from "@/components/ui/button";
 import {
@@ -88,7 +89,12 @@ export const PermissionRequest = ({
   // Scope actions ("Allow for Session"/"Always Allow") render only when the
   // caller wires them: the legacy code-mode path persists grants, but the
   // turns path has no grant persistence yet and must not show dead buttons.
+  // VibeMind (#330, review M4): a human-only request (protected workspace
+  // path) is answered for this one call only — no session or "always" grant.
+  const humanOnly =
+    (permission?.kind === "file" || permission?.kind === "command") && permission.humanOnly === true;
   const hasScopeActions =
+    !humanOnly &&
     Boolean(onApproveSession || onApproveAlways) &&
     Boolean(command || filePermission);
 
@@ -223,6 +229,11 @@ export const PermissionRequest = ({
           </Button>
         </div>
       </div>
+      {humanOnly && (
+        <p className="mt-1.5 text-xs text-muted-foreground">
+          Protected path: only you can approve this, and only for this one call.
+        </p>
+      )}
       {expanded && <div className="mt-2 border-t pt-2">{details}</div>}
     </div>
   );
