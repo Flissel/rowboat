@@ -65,7 +65,8 @@ const NULL_BODY_STATUS = new Set([101, 204, 205, 304]);
 // from the URL only (undici ignored a Host override, so this restores the old
 // behaviour; a Host override addressed other local virtual hosts such as
 // <slug>.apps.localhost:3210). Hop-by-hop headers and framing are the
-// transport's own.
+// transport's own. Behaviour change (review m-N4): undici sent an
+// agent-supplied Origin; fetch-url no longer sends one at all.
 const DROPPED_REQUEST_HEADERS = new Set([
     "host",
     "origin",
@@ -175,12 +176,20 @@ function peekHead(stream: Readable, n: number): Promise<{ head: Buffer; stream: 
     });
 }
 
+// Sync flush, as undici decodes (Task 17 step 0, review m-N1): an empty or
+// trailer-truncated body yields what was decoded instead of Z_BUF_ERROR.
+const ZLIB_SYNC = { flush: zlib.constants.Z_SYNC_FLUSH, finishFlush: zlib.constants.Z_SYNC_FLUSH };
+const BROTLI_SYNC = {
+    flush: zlib.constants.BROTLI_OPERATION_FLUSH,
+    finishFlush: zlib.constants.BROTLI_OPERATION_FLUSH,
+};
+
 function createStage(stage: Exclude<Stage, "deflate">): Transform {
     switch (stage) {
         case "gzip":
-            return zlib.createGunzip();
+            return zlib.createGunzip(ZLIB_SYNC);
         case "br":
-            return zlib.createBrotliDecompress();
+            return zlib.createBrotliDecompress(BROTLI_SYNC);
         case "zstd":
             return createZstd!();
     }
@@ -213,7 +222,7 @@ export async function decodedBody(res: Readable & { headers?: http.IncomingHttpH
         if (stage === "deflate") {
             const peeked = await peekHead(current, 2);
             current = peeked.stream;
-            next = isZlibWrapped(peeked.head) ? zlib.createInflate() : zlib.createInflateRaw();
+            next = isZlibWrapped(peeked.head) ? zlib.createInflate(ZLIB_SYNC) : zlib.createInflateRaw(ZLIB_SYNC);
         } else {
             next = createStage(stage);
         }

@@ -233,6 +233,12 @@ export async function isOwnServerAddress(ip: string, port: number, deps: OwnServ
 // authenticates against the own server — the server key (anywhere in the
 // string) or a scoped key (any token whose sha256 is in scoped-keys.json).
 // Missing or unreadable key files count as no keys.
+// Defence in depth only, NOT the barrier (review m-N3): the match is literal
+// and is bypassed by percent-encoding one character, putting the key in the
+// body, base64, or splitting it across headers. The barrier is the target
+// check (no own-machine or private address, before the request and at
+// connect); this only matters where the own server is reachable under another
+// address (remote mode, a forwarder such as tailscale funnel or socat).
 export async function carriesOwnServerCredential(values: string[], workDir: string = WorkDir): Promise<boolean> {
     let serverKey = "";
     try {

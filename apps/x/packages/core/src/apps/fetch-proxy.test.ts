@@ -5,6 +5,7 @@
 import crypto from "node:crypto";
 import fsSync from "node:fs";
 import fs from "node:fs/promises";
+import http from "node:http";
 import type { AddressInfo } from "node:net";
 import os from "node:os";
 import path from "node:path";
@@ -98,19 +99,37 @@ describe("apps fetch proxy (fix round 3, review I-A)", () => {
         expect(calls).toEqual([]);
     });
 
-    it("checks the address it connects to (a name that turns into 100.x after the check)", async () => {
-        let n = 0;
-        const deps: Deps = {
-            lookup: async (host) => {
-                if (host !== "rebind.test") throw new Error(`ENOTFOUND ${host}`);
-                return n++ === 0 ? ["93.184.216.34"] : ["100.101.102.103"];
-            },
-            interfaces: () => OWN_INTERFACES,
-        };
-        const { status, json } = await proxy({ url: "http://rebind.test:3220/rpc/workspace:writeFile", method: "POST", body: "{}" }, deps);
-        expect(status).toBe(403);
-        expect((json.error as { code: string }).code).toBe("address_forbidden");
-        expect(n).toBeGreaterThanOrEqual(2);
+    // Task 17 step 0 (review m-N2): a non-own port, so the pre-check does one
+    // lookup (ssrfCheck's) and the flip lands on the transport's lookup. The
+    // flipped address is a loopback test server: without the transport's own
+    // check the request would reach it (hits > 0, status 200) — no outside
+    // network either way.
+    it("checks the address it connects to (a name that turns into loopback after the check)", async () => {
+        let hits = 0;
+        const target = http.createServer((_req, res) => {
+            hits++;
+            res.end("reached");
+        });
+        await new Promise<void>((resolve) => target.listen(0, "127.0.0.1", () => resolve()));
+        const port = (target.address() as AddressInfo).port;
+        try {
+            let n = 0;
+            const deps: Deps = {
+                lookup: async (host) => {
+                    if (host !== "rebind.test") throw new Error(`ENOTFOUND ${host}`);
+                    return n++ === 0 ? ["93.184.216.34"] : ["127.0.0.1"];
+                },
+                interfaces: () => OWN_INTERFACES,
+            };
+            const { status, json } = await proxy({ url: `http://rebind.test:${port}/x`, method: "GET" }, deps);
+            expect(hits).toBe(0);
+            expect(status).toBe(403);
+            expect((json.error as { code: string; message: string }).code).toBe("address_forbidden");
+            expect((json.error as { code: string; message: string }).message).toContain("connects to forbidden address");
+            expect(n).toBe(2);
+        } finally {
+            await new Promise<void>((resolve) => target.close(() => resolve()));
+        }
     });
 
     it("does not pass a key that authenticates against the own server", async () => {

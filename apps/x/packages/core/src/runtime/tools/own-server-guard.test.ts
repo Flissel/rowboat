@@ -446,6 +446,47 @@ describe("fix round 3: fetch-url transport", () => {
         }
     });
 
+    // Task 17 step 0 (review m-N1): an empty or truncated coded body gives the
+    // status with what was decoded, as undici did (sync flush), not an error.
+    it.each([
+        ["gzip", 200],
+        ["gzip", 201],
+        ["deflate", 200],
+        ["deflate", 201],
+        ["br", 200],
+        ["br", 201],
+    ] as Array<[string, number]>)("an empty body labelled %s (status %i) returns the status and an empty body", async (coding, status) => {
+        const server = await startServer((_req, res) => {
+            res.writeHead(status, { "content-type": "text/plain", "content-encoding": coding });
+            res.end();
+        });
+        try {
+            const result = await guardedFetch(`http://plain.test:${server.port}/x`, "GET", undefined, undefined, LOCAL);
+            expect(result).toMatchObject({ ok: true, status, body: "" });
+        } finally {
+            await server.close();
+        }
+    });
+
+    it.each([
+        ["gzip", (b: Buffer) => zlib.gzipSync(b)],
+        ["deflate", (b: Buffer) => zlib.deflateSync(b)],
+        ["br", (b: Buffer) => zlib.brotliCompressSync(b)],
+    ] as Array<[string, (b: Buffer) => Buffer]>)("a %s body with a truncated trailer returns the decoded part", async (coding, encode) => {
+        const full = encode(Buffer.from("hello world"));
+        const server = await startServer((_req, res) => {
+            res.writeHead(200, { "content-type": "text/plain", "content-encoding": coding });
+            res.end(full.subarray(0, full.length - 4));
+        });
+        try {
+            const result = await guardedFetch(`http://plain.test:${server.port}/x`, "GET", undefined, undefined, LOCAL);
+            expect(result).toMatchObject({ ok: true, status: 200 });
+            expect("hello world".startsWith((result as { body: string }).body)).toBe(true);
+        } finally {
+            await server.close();
+        }
+    });
+
     it("returns the raw body with the header intact for an unknown coding", async () => {
         for (const header of ["x-custom", "gzip, x-custom"]) {
             const server = await startServer((_req, res) => {

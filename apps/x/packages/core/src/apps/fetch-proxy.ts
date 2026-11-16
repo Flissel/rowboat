@@ -6,8 +6,12 @@
 // - every hop is refused for loopback/private/link-local/ULA/CGNAT/multicast
 //   addresses and for every address of this machine, by name and by literal,
 // - the transport checks the address it really connects to (same predicate),
-// - a header or URL that carries a key of the own server is refused,
+// - a header or URL that carries a key of the own server is refused (defence
+//   in depth only, see carriesOwnServerCredential),
 // - Host, Origin, Cookie and hop-by-hop headers are never forwarded.
+// Behaviour change (review m-N4): 100.64/10 (Tailscale peers) and the
+// machine's own public/LAN addresses are refused too, so an app that used the
+// proxy for a Tailscale peer now gets 403 address_forbidden.
 
 import net from "node:net";
 import type express from "express";
