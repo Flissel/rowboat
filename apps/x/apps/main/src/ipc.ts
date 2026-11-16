@@ -13,7 +13,11 @@ import { watcher as watcherCore, workspace } from '@x/core';
 import { WorkDir } from '@x/core/dist/config/config.js';
 import { workspace as workspaceShared } from '@x/shared';
 import * as mcpCore from '@x/core/dist/mcp/mcp.js';
-import { afterHumanWorkspaceWrite } from '@x/core/dist/config/human-config-writes.js';
+import {
+  applyHumanWorkspaceOp,
+  workspaceOpTouchesProtected,
+  type HumanWorkspaceOp,
+} from '@x/core/dist/config/human-config-writes.js';
 import * as runsCore from '@x/core/dist/runtime/legacy/runs.js';
 import { bus } from '@x/core/dist/runtime/legacy/bus.js';
 import { serviceBus } from '@x/core/dist/services/service_bus.js';
@@ -402,16 +406,47 @@ export function listInvokeChannels(): InvokeChannels[] {
   return [...invokeTable.keys()];
 }
 
+// VibeMind (ticket #330, Task 17): the workspace:* write channels as an
+// operation on paths, for the embed-bridge check below.
+function workspaceOpOf(channel: string, args: unknown): HumanWorkspaceOp | null {
+  const a = (args ?? {}) as Record<string, unknown>;
+  const s = (v: unknown) => (typeof v === 'string' ? v : '');
+  switch (channel) {
+    case 'workspace:writeFile':
+      return { kind: 'writeFile', path: s(a.path), data: s(a.data) };
+    case 'workspace:mkdir':
+      return { kind: 'mkdir', path: s(a.path) };
+    case 'workspace:rename':
+      return { kind: 'rename', from: s(a.from), to: s(a.to) };
+    case 'workspace:copy':
+      return { kind: 'copy', from: s(a.from), to: s(a.to) };
+    case 'workspace:remove':
+      return { kind: 'remove', path: s(a.path) };
+    default:
+      return null;
+  }
+}
+
 export async function invokeIpcChannel(
   channel: string,
   event: Electron.IpcMainInvokeEvent,
   rawArgs: unknown,
+  // 'embed': the VibeMind embed bridge (embed-host.ts). Its token sits in
+  // embed.json and is also used by other local programs (the rowboat-ui
+  // access for agents), so it is not a human write path.
+  origin: 'renderer' | 'embed' = 'renderer',
 ): Promise<unknown> {
   const handler = invokeTable.get(channel as InvokeChannels);
   if (!handler) throw new Error(`No handler registered for '${channel}'`);
   const typed = channel as InvokeChannels;
   // Validate request payload
   const args = ipc.validateRequest(typed, rawArgs);
+  if (origin === 'embed') {
+    const op = workspaceOpOf(typed, args);
+    if (op && (await workspaceOpTouchesProtected(op))) {
+      throw new Error('The embed access may not change protected workspace entries (config/, keys, channels/, app data).');
+    }
+  }
   // Strangler-fig: channels migrated to rowboat-server cross localhost HTTP
   // instead of calling their in-process handler (which stays in the map as
   // the ROWBOAT_FORWARD_MIGRATED=0 kill switch).
@@ -1204,32 +1239,29 @@ export function setupIpcHandlers() {
       return workspace.readFile(args.path, args.encoding);
     },
     // VibeMind (ticket #330, Task 17): these are human write paths (Settings
-    // and the file UI). A successful write to config/mcp.json or
-    // config/security.json takes effect now (stdio entries approved, the
-    // allow-lists replaced); a change made any other way only after a restart.
+    // and the file UI of the app's own renderer; the embed bridge is refused
+    // for protected entries in invokeIpcChannel). Normally these channels are
+    // forwarded to rowboat-server with the owner key (core-deps.ts does the
+    // same there); these in-process handlers are the kill-switch path.
     'workspace:writeFile': async (_event, args) => {
-      const result = await workspace.writeFile(args.path, args.data, args.opts);
-      await afterHumanWorkspaceWrite(args.path, { data: args.data, encoding: args.opts?.encoding });
-      return result;
+      return applyHumanWorkspaceOp(
+        { kind: 'writeFile', path: args.path, data: args.data, encoding: args.opts?.encoding },
+        () => workspace.writeFile(args.path, args.data, args.opts),
+      );
     },
     'workspace:mkdir': async (_event, args) => {
-      return workspace.mkdir(args.path, args.recursive);
+      return applyHumanWorkspaceOp({ kind: 'mkdir', path: args.path }, () => workspace.mkdir(args.path, args.recursive));
     },
     'workspace:rename': async (_event, args) => {
-      const result = await workspace.rename(args.from, args.to, args.overwrite);
-      await afterHumanWorkspaceWrite(args.from);
-      await afterHumanWorkspaceWrite(args.to);
-      return result;
+      return applyHumanWorkspaceOp({ kind: 'rename', from: args.from, to: args.to }, () =>
+        workspace.rename(args.from, args.to, args.overwrite));
     },
     'workspace:copy': async (_event, args) => {
-      const result = await workspace.copy(args.from, args.to, args.overwrite);
-      await afterHumanWorkspaceWrite(args.to);
-      return result;
+      return applyHumanWorkspaceOp({ kind: 'copy', from: args.from, to: args.to }, () =>
+        workspace.copy(args.from, args.to, args.overwrite));
     },
     'workspace:remove': async (_event, args) => {
-      const result = await workspace.remove(args.path, args.opts);
-      await afterHumanWorkspaceWrite(args.path);
-      return result;
+      return applyHumanWorkspaceOp({ kind: 'remove', path: args.path }, () => workspace.remove(args.path, args.opts));
     },
     'workspace:pickImage': async (event) => {
       const win = senderWindow(event.sender);

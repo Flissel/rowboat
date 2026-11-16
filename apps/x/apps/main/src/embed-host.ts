@@ -32,7 +32,8 @@ export async function startEmbedHost(options: {
   const live = await startEmbedBridge({
     token,
     invoke: (channel, sender, args) =>
-      invokeIpcChannel(channel, { sender } as unknown as IpcMainInvokeEvent, args),
+      // VibeMind (#330, Task 17): 'embed' — no human write path for protected entries.
+      invokeIpcChannel(channel, { sender } as unknown as IpcMainInvokeEvent, args, 'embed'),
     invokeChannels: listInvokeChannels,
     isUnsupported: isEmbedUnsupportedInvoke,
     serveApp: options.serveApp,
