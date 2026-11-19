@@ -19,6 +19,10 @@ import {
   RESTRICTED_REFUSAL,
   restrictedCallRefused,
   restrictedResult,
+  originIsRestricted,
+  answeredByForOrigin,
+  forwardHeadersForOrigin,
+  type CallerOrigin,
 } from '@x/core/dist/security/restricted-principal.js';
 // VibeMind (#330, Task 17 fix round 2): one resolution for the shell:*
 // channels and the restricted-caller gate.
@@ -402,17 +406,20 @@ export function listInvokeChannels(): InvokeChannels[] {
 // VibeMind (ticket #330, Task 17 fix round 1): who called the handler running
 // now. 'embed' = the embed bridge (embed-host.ts): its token sits in
 // embed.json and is also used by other local programs (the rowboat-ui access
-// for agents), so it is not the human. Handlers read it with currentIpcOrigin().
+// for agents). Handlers read it with currentIpcOrigin().
 // Fix round 2 (review m-5): every handler runs inside invokeIpcChannel, which
-// always sets the origin; a handler reached any other way counts as the
-// embed (fails closed).
+// always sets the origin.
+// Fix round 3 (operator decision 19.11.2026): whether the embed is restricted
+// is core's EMBED_IS_TRUSTED (security/restricted-principal.ts, true for now:
+// the embed is treated as the renderer). A handler reached outside
+// invokeIpcChannel has no recorded origin ('unknown') and stays restricted.
 type IpcOrigin = 'renderer' | 'embed';
 const ipcOrigin = new AsyncLocalStorage<IpcOrigin>();
-function currentIpcOrigin(): IpcOrigin {
-  return ipcOrigin.getStore() ?? 'embed';
+function currentIpcOrigin(): CallerOrigin {
+  return ipcOrigin.getStore() ?? 'unknown';
 }
-function answeredByForOrigin(): 'human' | 'delegated' {
-  return currentIpcOrigin() === 'embed' ? 'delegated' : 'human';
+function answeredByForCaller(): 'human' | 'delegated' {
+  return answeredByForOrigin(currentIpcOrigin());
 }
 
 export async function invokeIpcChannel(
@@ -426,8 +433,10 @@ export async function invokeIpcChannel(
   const typed = channel as InvokeChannels;
   // Validate request payload
   const args = ipc.validateRequest(typed, rawArgs);
-  const restricted = origin === 'embed';
-  // Review I-1 / F-2: the embed bridge may neither read nor change protected
+  // Fix round 3: restricted only while the embed is not trusted
+  // (EMBED_IS_TRUSTED, core); the renderer never is.
+  const restricted = originIsRestricted(origin);
+  // Review I-1 / F-2: a restricted embed may neither read nor change protected
   // workspace entries through any path-taking channel, nor change config or
   // authority (the core sets also cover the main-only channels: shell:*,
   // spreadsheet:*, exportCopy, server:*, app:set*, phone:push:register).
@@ -436,10 +445,11 @@ export async function invokeIpcChannel(
   }
   // Strangler-fig: channels migrated to rowboat-server cross localhost HTTP
   // instead of calling their in-process handler (which stays in the map as
-  // the ROWBOAT_FORWARD_MIGRATED=0 kill switch). A forwarded embed call is
-  // marked restricted, so the server applies the same rules.
+  // the ROWBOAT_FORWARD_MIGRATED=0 kill switch). A forwarded call of a
+  // restricted origin carries the restricted header, so the server applies
+  // the same rules; a trusted embed's call carries none.
   let result = shouldForwardChannel(typed)
-    ? await forwardRpc(typed, args, { restricted })
+    ? await forwardRpc(typed, args, { headers: forwardHeadersForOrigin(origin) })
     : await ipcOrigin.run(origin, () => handler(event, args));
   // Listings filtered, credentials blanked (bot token, voice keys, Rowboat
   // access token, pairing token, WhatsApp pairing QR) — for forwarded and
@@ -1455,15 +1465,17 @@ export function setupIpcHandlers() {
       return { messageId: await runsCore.createMessage(args.runId, args.message, args.voiceInput, args.voiceOutput, args.searchEnabled, args.middlePaneContext, args.codeMode, args.codeCwd, args.codePolicy) };
     },
     'runs:authorizePermission': async (_event, args) => {
-      // VibeMind #330 (Task 17 fix round 1): an embed answer is delegated.
-      await runsCore.authorizePermission(args.runId, args.authorization, answeredByForOrigin());
+      // VibeMind #330 (Task 17 fix round 1): a restricted caller's answer is
+      // delegated (fix round 3: the embed only while EMBED_IS_TRUSTED is false).
+      await runsCore.authorizePermission(args.runId, args.authorization, answeredByForCaller());
       return { success: true };
     },
     'codeRun:resolvePermission': async (_event, args) => {
-      // VibeMind #330 (Task 17 fix round 2, review F-1): an embed answer is
-      // delegated — once or reject only.
+      // VibeMind #330 (Task 17 fix round 2, review F-1): a restricted caller's
+      // answer is delegated — once or reject only (fix round 3: the embed only
+      // while EMBED_IS_TRUSTED is false).
       const registry = container.resolve<CodePermissionRegistry>('codePermissionRegistry');
-      registry.resolve(args.requestId, args.decision, answeredByForOrigin());
+      registry.resolve(args.requestId, args.decision, answeredByForCaller());
       return { success: true };
     },
     'runs:provideHumanInput': async (_event, args) => {
@@ -1553,8 +1565,9 @@ export function setupIpcHandlers() {
       return { removed: removed ?? null };
     },
     'sessions:respondToPermission': async (_event, args) => {
-      // VibeMind #330 (Task 17 fix round 1): an embed answer is delegated.
-      await container.resolve<ISessions>('sessions').respondToPermission(args.turnId, args.toolCallId, args.decision, args.metadata, answeredByForOrigin());
+      // VibeMind #330 (Task 17 fix round 1): a restricted caller's answer is
+      // delegated (fix round 3: the embed only while EMBED_IS_TRUSTED is false).
+      await container.resolve<ISessions>('sessions').respondToPermission(args.turnId, args.toolCallId, args.decision, args.metadata, answeredByForCaller());
       return { success: true };
     },
     'sessions:respondToAskHuman': async (_event, args) => {
@@ -3321,8 +3334,9 @@ export function setupIpcHandlers() {
     // hosts the transport.
     'server:getPairingInfo': async () => {
       // VibeMind #330 (Task 17): the token IS the owner key (server-key
-      // content); invokeIpcChannel blanks it for the embed bridge
-      // (restrictedResult, core security/restricted-principal.ts).
+      // content); invokeIpcChannel blanks it for a restricted caller
+      // (restrictedResult, core security/restricted-principal.ts). Fix round 3:
+      // the trusted embed gets it, as the renderer does.
       return getPairingInfo();
     },
     'server:setLanEnabled': async (_event, args) => {
