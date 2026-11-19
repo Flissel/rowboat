@@ -83,7 +83,7 @@ describe("code-run permission answers from a restricted caller", () => {
         const registry = new CodePermissionRegistry();
         const { broker, ids } = wired(registry);
         const answer = broker.resolve(request(NO_ONCE));
-        registry.resolve(await nextId(ids), "allow_once");
+        registry.resolve(await nextId(ids), "allow_once", "human");
         expect(await answer).toEqual({ outcome: { outcome: "selected", optionId: "aa" } });
     });
 

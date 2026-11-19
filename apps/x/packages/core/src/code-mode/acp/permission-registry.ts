@@ -34,8 +34,9 @@ export class CodePermissionRegistry {
     // Called from the IPC handler when the user answers a card. A delegated
     // allow_always throws and leaves the ask pending; a delegated allow_once
     // resolves as "allow_once_only" (the broker never maps it onto the
-    // agent's own allow_always option).
-    resolve(requestId: string, decision: PermissionDecision, answeredBy: 'human' | 'delegated' = 'human'): void {
+    // agent's own allow_always option). `answeredBy` has no default: every
+    // caller states who answered (both IPC hosts pass the caller's kind).
+    resolve(requestId: string, decision: PermissionDecision, answeredBy: 'human' | 'delegated'): void {
         const entry = this.pending.get(requestId);
         if (!entry) return;
         if (answeredBy === 'delegated' && decision === 'allow_always') {
