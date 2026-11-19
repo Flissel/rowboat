@@ -370,10 +370,21 @@ describe('restricted callers (scoped key, embed via the restricted header)', () 
         ['codeSession:update', { sessionId: 's', patch: { policy: 'yolo' } }],
         ['codeSession:create', { projectId: 'p', agent: 'claude', isolation: 'in-repo', policy: 'yolo' }],
         ['runs:createMessage', { runId: 'r', message: 'hi', codePolicy: 'yolo' }],
+        // Fix round 3 (review I-1, I-4).
+        ['spaces:decideApproval', { orgId: 'o', spaceId: 's', approvalId: 'a', decision: 'allow_always' }],
+        ['spaces:decideApproval', { orgId: 'o', spaceId: 's', approvalId: 'a', decision: 'allow_once' }],
+        ['apps:update', { folder: 'f', confirmNewCapabilities: true }],
       ] as const;
       for (const [channel, args] of policy) {
-        await expect(runWithAuth('scoped', () => handlers[channel]!(args)), channel).rejects.toThrow(restricted.RESTRICTED_REFUSAL);
+        const handler = handlers[channel];
+        if (!handler) {
+          expect(isRpcChannel(channel), channel).toBe(false);
+          continue;
+        }
+        await expect(runWithAuth('scoped', () => handler(args)), channel).rejects.toThrow(restricted.RESTRICTED_REFUSAL);
       }
+      // Fix round 3 (review I-4): prompt-free tool execution is among the served denials.
+      expect(served).toEqual(expect.arrayContaining(['mcp:executeTool', 'composio:execute-tool', 'spaces:createInvite', 'apps:install', 'todo:setPlanner']));
     });
 
     it('scoped key and embed header: channels:setConfig is refused and channels.json is unchanged; the owner key writes it', async () => {
@@ -456,6 +467,74 @@ describe('restricted callers (scoped key, embed via the restricted header)', () 
       const r = await call('codeSession:update', { sessionId: 'nope', patch: { policy: 'yolo' } }, scoped);
       expect(r.status).not.toBe(200);
       expect(r.json.error?.message).toMatch(/protected workspace entries|may not/);
+    });
+  });
+
+  // Fix round 3 (operator decision 19.11.2026): main forwards an embed call
+  // with forwardHeadersForOrigin('embed') and the owner key. Both values of
+  // the switch: trusted = exactly the app's own renderer, untrusted = the
+  // refusals of fix rounds 1 and 2. A scoped key and a call with no recorded
+  // origin stay restricted either way.
+  describe.each([true, false])('embed forwarded by main, EMBED_IS_TRUSTED=%s', (trusted) => {
+    const embed = () => restricted.forwardHeadersForOrigin('embed', trusted);
+    const channelsFile = path.join(workDir, 'config', 'channels.json');
+    const CHANNELS = { whatsapp: { enabled: false, allowFrom: [] }, telegram: { enabled: false, botToken: '123:EMBED-SECRET', allowFrom: [] } };
+
+    it('reads a protected entry only when trusted', async () => {
+      const r = await call('workspace:readFile', { path: 'cipher-key' }, server.key, embed());
+      expect(r.status === 200).toBe(trusted);
+      expect(r.text.includes(KEY_MARKER)).toBe(trusted);
+    });
+
+    it('a write of config/mcp.json is a human write path (entry approved) only when trusted', async () => {
+      const data = JSON.stringify({ mcpServers: { s: STDIO } });
+      const r = await call('workspace:writeFile', { path: 'config/mcp.json', data }, server.key, embed());
+      expect(r.status === 200).toBe(trusted);
+      expect(await fs.readFile(path.join(workDir, 'config', 'mcp.json'), 'utf8')).toBe(trusted ? data : EMPTY);
+      expect(approvals.isStdioEntryApproved('s', STDIO)).toBe(trusted);
+    });
+
+    it('channels:setConfig and the bot token: as the renderer only when trusted', async () => {
+      await fs.writeFile(channelsFile, JSON.stringify(CHANNELS));
+      const get = await call('channels:getConfig', null, server.key, embed());
+      expect(get.text.includes('EMBED-SECRET')).toBe(trusted);
+      const widened = { ...CHANNELS, telegram: { ...CHANNELS.telegram, allowFrom: ['666'] } };
+      expect((await call('channels:setConfig', widened, server.key, embed())).status === 200).toBe(trusted);
+      expect(JSON.parse(await fs.readFile(channelsFile, 'utf8')).telegram.allowFrom).toEqual(trusted ? ['666'] : []);
+    });
+
+    it('a coding agent allow_always is the human answer only when trusted', async () => {
+      const registry = container.resolve<CodePermissionRegistry>('codePermissionRegistry');
+      let id = '';
+      const decision = registry.request('run-f3', (requestId) => { id = requestId; });
+      const r = await call('codeRun:resolvePermission', { requestId: id, decision: 'allow_always' }, server.key, embed());
+      expect(r.status === 200).toBe(trusted);
+      if (!trusted) registry.resolve(id, 'reject', 'human');
+      expect(await decision).toBe(trusted ? 'allow_always' : 'reject');
+    });
+
+    it('allowing a human-only turn request is recorded as human only when trusted', async () => {
+      script.push(respondCalls({ id: 'E', name: 'addMcpServer', args: { serverName: 'emb', config: STDIO } }), respondText('done'));
+      const sessionId = await sessions.createSession();
+      const { turnId } = await sessions.sendMessage(sessionId, { role: 'user', content: 'go' }, { agent: { agentId: 'copilot' } });
+      await waitForPermission(turnId, 'E');
+      const r = await call('sessions:respondToPermission', { turnId, toolCallId: 'E', decision: 'allow' }, server.key, embed());
+      expect(r.status === 200).toBe(trusted);
+      expect(approvals.isStdioEntryApproved('emb', STDIO)).toBe(trusted);
+      if (trusted) {
+        const { events } = await sessions.getTurn(turnId);
+        expect((events as TEvent[]).find((e) => e.type === 'tool_permission_resolved')).toMatchObject({ source: 'human' });
+      }
+    });
+
+    it('a scoped key and a call with no recorded origin stay restricted', async () => {
+      await fs.writeFile(channelsFile, JSON.stringify(CHANNELS));
+      const widened = { ...CHANNELS, telegram: { ...CHANNELS.telegram, allowFrom: ['666'] } };
+      expect((await call('channels:setConfig', widened, scoped)).status).not.toBe(200);
+      const unknown = restricted.forwardHeadersForOrigin('unknown', trusted);
+      expect((await call('channels:setConfig', widened, server.key, unknown)).status).not.toBe(200);
+      expect((await call('workspace:readFile', { path: 'cipher-key' }, server.key, unknown)).text).not.toContain(KEY_MARKER);
+      expect(JSON.parse(await fs.readFile(channelsFile, 'utf8'))).toEqual(CHANNELS);
     });
   });
 });
