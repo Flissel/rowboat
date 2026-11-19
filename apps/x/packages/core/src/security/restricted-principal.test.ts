@@ -21,6 +21,11 @@ const {
     RESTRICTED_CONDITIONAL_CHANNELS,
     RESTRICTED_MASKED_CHANNELS,
     RESTRICTED_GUARDED_CHANNELS,
+    EMBED_IS_TRUSTED,
+    originIsRestricted,
+    answeredByForOrigin,
+    forwardHeadersForOrigin,
+    embedMayServe,
 } = await import("./restricted-principal.js");
 const { ipcSchemas } = await import("@x/shared/dist/ipc.js");
 
@@ -246,6 +251,84 @@ describe("restricted caller: getters that return credentials (review F-2)", () =
     it("other results pass through unchanged", async () => {
         const result = { a: 1 };
         expect(await restrictedResult("sessions:list", null, result)).toBe(result);
+    });
+});
+
+// Task 17 fix round 3 (operator decision 19.11.2026): the embedded view is a
+// trusted caller for now. Every origin helper takes the switch as a parameter,
+// so both values are tested; the default is EMBED_IS_TRUSTED.
+describe("embed trust switch", () => {
+    it("is on for now (operator decision 19.11.2026)", () => {
+        expect(EMBED_IS_TRUSTED).toBe(true);
+        expect(originIsRestricted("embed")).toBe(!EMBED_IS_TRUSTED);
+    });
+
+    it.each([true, false])("trusted=%s: the renderer is never restricted, a call with no recorded origin always is", (trusted) => {
+        expect(originIsRestricted("renderer", trusted)).toBe(false);
+        expect(originIsRestricted("unknown", trusted)).toBe(true);
+        expect(originIsRestricted("embed", trusted)).toBe(!trusted);
+    });
+
+    it.each([true, false])("trusted=%s: who answered a permission request", (trusted) => {
+        expect(answeredByForOrigin("renderer", trusted)).toBe("human");
+        expect(answeredByForOrigin("unknown", trusted)).toBe("delegated");
+        expect(answeredByForOrigin("embed", trusted)).toBe(trusted ? "human" : "delegated");
+    });
+
+    it.each([true, false])("trusted=%s: the principal header on calls forwarded to the server", (trusted) => {
+        const restrictedHeader = { "x-rowboat-principal": "restricted" };
+        expect(forwardHeadersForOrigin("renderer", trusted)).toEqual({});
+        expect(forwardHeadersForOrigin("unknown", trusted)).toEqual(restrictedHeader);
+        expect(forwardHeadersForOrigin("embed", trusted)).toEqual(trusted ? {} : restrictedHeader);
+    });
+
+    it.each([true, false])("trusted=%s: app://workspace serves protected entries to the embed only when trusted", async (trusted) => {
+        expect(await embedMayServe("app://workspace/server-key", trusted)).toBe(trusted);
+        expect(await embedMayServe("app://workspace/config/mcp.json", trusted)).toBe(trusted);
+        expect(await embedMayServe("not a url", trusted)).toBe(trusted);
+        expect(await embedMayServe("app://workspace/knowledge/a.md", trusted)).toBe(true);
+        expect(await embedMayServe("app://renderer/index.html", trusted)).toBe(true);
+    });
+});
+
+// Task 17 fix round 3 (review I-1, I-2, I-4, m-2): channels a scoped server
+// key may not use (and the embed, when the switch is off).
+describe("restricted caller: Spaces authority, tool execution, app consent (fix round 3)", () => {
+    it("denies the channels the ruling names", () => {
+        for (const channel of [
+            "spaces:addAgent", "spaces:createInvite",
+            "spaces:setMemberRole", "spaces:removeOrgMember", "spaces:setInvitePolicy", "spaces:addMembers",
+            "spaces:setDefaultSpace", "spaces:setSpaceVisibility", "spaces:setAgentOptionDefaults", "spaces:acceptInvite",
+            "mcp:executeTool", "composio:execute-tool",
+            "apps:install", "apps:installFromUrl", "apps:publish", "apps:publishUpdate", "apps:registerExisting",
+            "integrations:add", "integrations:abmelden", "integrations:entfernen", "integrations:neuVerbinden",
+            "bg-task:create", "bg-task:patch", "todo:setPlanner",
+            "oauth:deliverLoopbackCallback", "referral:claim",
+        ]) {
+            expect(RESTRICTED_DENIED_CHANNELS.has(channel), channel).toBe(true);
+        }
+    });
+
+    it("leaves the todo channels the Freigabe and Werkbank bots use open", async () => {
+        for (const channel of ["todo:get", "todo:plannerSignals", "todo:addSuggestions", "todo:withdrawSuggestion", "todo:setChecked"]) {
+            expect(RESTRICTED_GUARDED_CHANNELS.has(channel), channel).toBe(false);
+            expect(await refused(channel, null), channel).toBe(false);
+        }
+    });
+
+    it.each(["allow_once", "allow_session", "allow_always"])("spaces:decideApproval %s is refused", async (decision) => {
+        expect(await refused("spaces:decideApproval", { orgId: "o", spaceId: "s", approvalId: "a", decision })).toBe(true);
+    });
+
+    it("spaces:decideApproval deny stays allowed; a missing decision fails closed", async () => {
+        expect(await refused("spaces:decideApproval", { orgId: "o", spaceId: "s", approvalId: "a", decision: "deny", note: "no" })).toBe(false);
+        expect(await refused("spaces:decideApproval", { orgId: "o", spaceId: "s", approvalId: "a" })).toBe(true);
+    });
+
+    it("apps:update is refused only when it confirms new capabilities itself", async () => {
+        expect(await refused("apps:update", { folder: "f", confirmNewCapabilities: true })).toBe(true);
+        expect(await refused("apps:update", { folder: "f", confirmNewCapabilities: false })).toBe(true);
+        expect(await refused("apps:update", { folder: "f" })).toBe(false);
     });
 });
 

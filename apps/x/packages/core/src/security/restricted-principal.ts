@@ -1,7 +1,8 @@
 // Modified for VibeMind (Flissel/rowboat vibemind): new module (ticket #330,
 // Task 17 fix round 1, review I-1; fix round 2, review F-2). A restricted
 // caller is a scoped server key (apps/server, auth kind "scoped" or no auth
-// context) or the embed bridge (apps/main, origin "embed"). It may neither read
+// context) or, while EMBED_IS_TRUSTED is false, the embed bridge (apps/main,
+// origin "embed"; fix round 3, operator decision 19.11.2026). It may neither read
 // nor change a protected workspace entry (Task 16 list: config/, keys,
 // channels/, app data), may not change configuration or authority, and gets no
 // credentials back. The owner key and the app's own renderer are not
@@ -42,6 +43,10 @@
 // 4. Permission answers are not refused here: the consumers record who
 //    answered (turn runtime, legacy runs, CodePermissionRegistry) and refuse
 //    what a restricted caller may not answer.
+// 5. Who is restricted (fix round 3): a scoped server key always; the embed
+//    bridge only while EMBED_IS_TRUSTED is false; a call with no recorded
+//    origin always (fails closed). originIsRestricted() and the helpers below
+//    are what main uses for the embed bridge.
 
 import path from "node:path";
 import container from "../di/container.js";
@@ -52,6 +57,68 @@ import { isPlainHomePrefix, resolveShellPath } from "../workspace/shell-path.js"
 
 export const RESTRICTED_REFUSAL =
     "This caller may not read or change protected workspace entries (config/, keys, channels/, app data).";
+
+/**
+ * Operator decision 19.11.2026 (Task 17 fix round 3), to be revisited: the
+ * embedded view (embed bridge, origin "embed" in apps/main) is a trusted
+ * caller, treated exactly like the app's own renderer. That means protected
+ * reads and writes are allowed, and writes of config/mcp.json and
+ * config/security.json are human write paths. None of the deny, conditional
+ * or mask sets apply, and permission answers count as the human's, including
+ * always/session and the coding agent's allow_always. Embed calls forwarded
+ * to the server carry no restricted header.
+ *
+ * Setting this to false restores the restricted embed (fix rounds 1 and 2).
+ * A scoped server key stays restricted either way, and so does a call with
+ * no recorded origin.
+ */
+export const EMBED_IS_TRUSTED = true;
+
+// Who made an IPC call in apps/main: the app's own renderer, the embed bridge,
+// or nobody recorded ("unknown": a handler reached outside invokeIpcChannel).
+export type CallerOrigin = "renderer" | "embed" | "unknown";
+
+export function originIsRestricted(origin: CallerOrigin, embedTrusted: boolean = EMBED_IS_TRUSTED): boolean {
+    if (origin === "renderer") return false;
+    if (origin === "embed") return !embedTrusted;
+    return true;
+}
+
+export function answeredByForOrigin(origin: CallerOrigin, embedTrusted: boolean = EMBED_IS_TRUSTED): "human" | "delegated" {
+    return originIsRestricted(origin, embedTrusted) ? "delegated" : "human";
+}
+
+// The owner key may lower itself to a restricted caller with this header
+// (apps/server server.ts); main sends it on calls it forwards for a
+// restricted origin.
+export const RESTRICTED_PRINCIPAL_HEADER = "x-rowboat-principal";
+
+export function forwardHeadersForOrigin(origin: CallerOrigin, embedTrusted: boolean = EMBED_IS_TRUSTED): Record<string, string> {
+    return originIsRestricted(origin, embedTrusted) ? { [RESTRICTED_PRINCIPAL_HEADER]: "restricted" } : {};
+}
+
+/**
+ * Whether the embed bridge's app:// handler serves this URL. When the embed
+ * is restricted, app://workspace/<rel> is refused if <rel> is a protected
+ * entry or lies inside one (fails closed on a path that cannot be decoded or
+ * checked). When it is trusted, everything is served, as for the renderer.
+ */
+export async function embedMayServe(url: string, embedTrusted: boolean = EMBED_IS_TRUSTED): Promise<boolean> {
+    if (embedTrusted) return true;
+    let parsed: URL;
+    try {
+        parsed = new URL(url);
+    } catch {
+        return false;
+    }
+    if (parsed.host !== "workspace") return true;
+    try {
+        const relPath = decodeURIComponent(parsed.pathname).replace(/^\/+/, "");
+        return !(await isProtectedEntryPath(relPath || "."));
+    } catch {
+        return false;
+    }
+}
 
 type Check = { kind: "entry" | "any"; path: string };
 type Plan = { op: HumanWorkspaceOp } | { checks: Check[] } | "malformed";
@@ -244,11 +311,43 @@ export const RESTRICTED_DENIED_CHANNELS: ReadonlyMap<string, string> = new Map([
     ["turnLimits:setSettings", "config/turn_limits.json"],
     ["typesafe:setApiKey", "config/typesafe.json (API key)"],
     ["typesafe:clearApiKey", "config/typesafe.json"],
+    // Fix round 3 (review I-2): Spaces org authority and admission. addAgent
+    // returns the new agent's key secret, createInvite an admission link.
+    ["spaces:addAgent", "a new agent member of the org; returns its key secret"],
+    ["spaces:createInvite", "an invite link that admits its holder to the org"],
+    ["spaces:acceptInvite", "org membership of the user"],
+    ["spaces:addMembers", "who is a member of a space"],
+    ["spaces:removeOrgMember", "who is a member of the org"],
+    ["spaces:setMemberRole", "who is an org admin"],
+    ["spaces:setInvitePolicy", "who may invite to the org"],
+    ["spaces:setDefaultSpace", "the org's default space"],
+    ["spaces:setSpaceVisibility", "who can see a space"],
+    ["spaces:setAgentOptionDefaults", "the defaults of agent invocations in the org"],
+    // Fix round 3 (review I-4): tool execution with no prompt and no
+    // transcript, and the human's capability consent for apps.
+    ["mcp:executeTool", "runs any tool of a configured MCP server with no prompt and no transcript"],
+    ["composio:execute-tool", "runs any action of a connected Composio account with no prompt and no transcript"],
+    ["apps:install", "installs an app; confirmed:true is the human's capability consent (composio, llm, voice, copilot)"],
+    ["apps:installFromUrl", "installs an app from a URL; confirmed:true is the human's capability consent"],
+    ["apps:publish", "publishes an app to GitHub with the stored GitHub token"],
+    ["apps:publishUpdate", "publishes an app release with the stored GitHub token"],
+    ["apps:registerExisting", "opens a catalog pull request with the stored GitHub token"],
+    // Fix round 3 (review m-2): the remaining account, schedule and sign-in writes.
+    ["integrations:add", "an OpenFang connected account"],
+    ["integrations:abmelden", "an OpenFang connected account (sign-out)"],
+    ["integrations:entfernen", "an OpenFang connected account (removal)"],
+    ["integrations:neuVerbinden", "an OpenFang connected account (reconnect)"],
+    ["bg-task:create", "a scheduled headless agent run (instructions, triggers, project)"],
+    ["bg-task:patch", "a scheduled headless agent run (instructions, triggers, project)"],
+    ["todo:setPlanner", "the todo planner's scheduled headless agent"],
+    ["oauth:deliverLoopbackCallback", "completes an in-flight OAuth sign-in with a callback URL of the caller's choosing"],
+    ["referral:claim", "redeems a referral code on the user's Rowboat account"],
 ]);
 
-// Refused only when they set an approval policy: the policy of a code session
-// (code-mode/sessions-meta/<id>.json) or of one message's coding run. Any
-// policy field counts, "ask" included (the human sets policies).
+// Refused only for some arguments. The first three set an approval policy: the
+// policy of a code session (code-mode/sessions-meta/<id>.json) or of one
+// message's coding run. Any policy field counts, "ask" included (the human
+// sets policies).
 const CONDITIONAL: Record<string, (a: Record<string, unknown>) => boolean> = {
     "codeSession:update": (a) => {
         if (a.patch === null || typeof a.patch !== "object") return true;
@@ -257,6 +356,14 @@ const CONDITIONAL: Record<string, (a: Record<string, unknown>) => boolean> = {
     },
     "codeSession:create": (a) => a.policy !== undefined,
     "runs:createMessage": (a) => a.codePolicy !== undefined,
+    // Fix round 3 (review I-1): a Spaces approval card is decided as the user.
+    // Only "deny" is accepted: always/session leave a standing approval, and a
+    // one-time allow cannot be limited to ordinary requests because a Spaces
+    // approval carries no human-only marker (harbor protocol approval.ts).
+    "spaces:decideApproval": (a) => a.decision !== "deny",
+    // Fix round 3 (review I-4): confirmNewCapabilities is the human's consent
+    // to the new capabilities of an app update (any value counts).
+    "apps:update": (a) => a.confirmNewCapabilities !== undefined,
 };
 export const RESTRICTED_CONDITIONAL_CHANNELS: ReadonlySet<string> = new Set(Object.keys(CONDITIONAL));
 
