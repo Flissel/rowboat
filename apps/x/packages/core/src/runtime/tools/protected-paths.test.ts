@@ -37,7 +37,7 @@ afterAll(async () => {
 });
 
 describe("protected workspace entries", () => {
-    it("lists the six entries of the ticket plus the three of fix round 1", () => {
+    it("lists the six entries of the ticket, the three of fix round 1 and the two of Task 17 fix round 3", () => {
         expect([...PROTECTED_WORKSPACE_ENTRIES]).toEqual([
             "config",
             "server-key",
@@ -50,6 +50,9 @@ describe("protected workspace entries", () => {
             "code-mode",
             // Unpacked Chrome extensions, loaded into the browser session at start.
             "extensions",
+            // Task 17 fix round 3 (review I-5): code the app starts.
+            "engines",
+            "mcp-servers",
         ]);
     });
 });
@@ -72,6 +75,9 @@ describe("isProtectedWrite — file tools", () => {
             "code-mode",
             "extensions/x/index.js",
             "extensions/x/manifest.json",
+            "engines/claude/0.3.287/cli.js",
+            "Engines/x",
+            "mcp-servers/srv/index.js",
         ]) {
             expect(await write(p), p).toBe(true);
         }

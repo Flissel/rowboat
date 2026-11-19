@@ -35,6 +35,15 @@ export const PROTECTED_WORKSPACE_ENTRIES: readonly string[] = [
     // every extensions/<name>/manifest.json into the browser session at start,
     // with no install step (their scripts then run in every browser page).
     "extensions",
+    // Task 17 fix round 3 (review I-5): code the app starts. engines/ holds
+    // the coding-agent executable (code-mode/acp/engine-provisioner.ts,
+    // ENGINES_ROOT = ~/.rowboat/engines), spawned by the next code run without
+    // an integrity check; mcp-servers/ holds MCP server code that approved
+    // stdio entries of config/mcp.json start (the approval is keyed on the
+    // command, not on the file content). The provisioner writes engines/ with
+    // fs directly, not through execTool, so provisioning is unaffected.
+    "engines",
+    "mcp-servers",
 ];
 
 // Windows ignores trailing dots and spaces in a name ("config." is

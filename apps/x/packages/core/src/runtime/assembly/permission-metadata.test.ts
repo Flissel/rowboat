@@ -67,6 +67,19 @@ describe("file tools on protected paths", () => {
         }
     });
 
+    // Task 17 fix round 3 (review I-5): engines/ holds the coding-agent
+    // executable the next code run spawns; mcp-servers/ holds MCP server code
+    // that approved stdio entries start (the approval is keyed on the command).
+    it.each(["engines/x", "engines/claude/0.3.287/cli.js", "mcp-servers/x", "mcp-servers/srv/index.js"])(
+        "fix round 3: file-writeText %s is human-only",
+        async (p) => {
+            expect(await check("file-writeText", { path: p, data: "x" })).toMatchObject({
+                required: true,
+                request: { kind: "file", operation: "write", humanOnly: true },
+            });
+        },
+    );
+
     it("fix round 1 (C1): reading a protected entry is a human-only read request", async () => {
         expect(await check("file-readText", { path: "server-key" })).toMatchObject({
             required: true,
