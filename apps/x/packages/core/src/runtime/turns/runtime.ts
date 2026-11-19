@@ -673,8 +673,9 @@ class TurnAdvance {
                     );
                 }
                 // VibeMind #330 (Task 17 fix round 1, review I-2): a restricted
-                // caller's answer is never the human's approval.
-                const delegated = input.answeredBy === "delegated";
+                // caller's answer is never the human's approval. Fix round 3
+                // (review m-1): only an explicit "human" is the human (fails closed).
+                const delegated = input.answeredBy !== "human";
                 if (delegated) {
                     if (input.decision === "allow" && isHumanOnlyRequest(tc.permission.required.request)) {
                         throw new TurnInputError(

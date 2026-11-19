@@ -70,11 +70,12 @@ export async function createMessage(runId: string, message: UserMessageContentTy
 export async function authorizePermission(
     runId: string,
     ev: z.infer<typeof ToolPermissionAuthorizePayload>,
-    answeredBy: "human" | "delegated" = "human",
+    answeredBy: "human" | "delegated",
 ): Promise<void> {
     const { scope, ...rest } = ev;
 
-    if (answeredBy === "delegated") {
+    // Fix round 3 (review m-1): no default; only an explicit "human" is the human.
+    if (answeredBy !== "human") {
         if (scope === "always" || scope === "session") {
             throw new Error(`this caller may not answer with scope "${scope}"; only a one-time answer is accepted`);
         }

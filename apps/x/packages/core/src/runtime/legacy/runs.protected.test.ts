@@ -59,7 +59,7 @@ afterAll(async () => {
 });
 
 const approveAlways = (toolCallId: string) =>
-    authorizePermission("r1", { toolCallId, response: "approve", scope: "always", subflow: [] });
+    authorizePermission("r1", { toolCallId, response: "approve", scope: "always", subflow: [] }, "human");
 
 describe("legacy authorizePermission and human-only requests", () => {
     it("persists nothing for an \"always\" answer to a human-only file request", async () => {
@@ -130,6 +130,17 @@ describe("legacy authorizePermission from a restricted caller", () => {
             { toolCallId: "B", response: "deny" },
         ]);
         expect(await fs.readFile(securityPath, "utf8")).toBe(SECURITY);
+    });
+
+    // Task 17 fix round 3 (review m-1): answeredBy has no default.
+    it("an answer that does not say who answered is treated as delegated", async () => {
+        state.log = ordinary();
+        const unnamed = undefined as unknown as "human";
+        await expect(
+            authorizePermission("r1", { toolCallId: "C", response: "approve", scope: "always", subflow: [] }, unnamed),
+        ).rejects.toThrow(/scope/);
+        expect(await fs.readFile(securityPath, "utf8")).toBe(SECURITY);
+        expect(state.appended).toEqual([]);
     });
 
     it("a request missing from the run log fails closed for an approve", async () => {

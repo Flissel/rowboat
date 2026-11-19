@@ -293,7 +293,7 @@ describe("protected paths in the turn loop", () => {
         const turnId = await startTurn(runtime, DM);
         expect((await settle(runtime.advanceTurn(turnId))).status).toBe("suspended");
         const outcome = await settle(
-            runtime.advanceTurn(turnId, { type: "permission_decision", toolCallId: "A", decision: "allow" }),
+            runtime.advanceTurn(turnId, { type: "permission_decision", toolCallId: "A", decision: "allow", answeredBy: "human" }),
         );
         expect(outcome.status).toBe("completed");
         expect(result(await repo.read(turnId), "A")?.result).toMatchObject({ isError: false });
@@ -317,6 +317,7 @@ describe("protected paths in the turn loop", () => {
                 toolCallId: "A",
                 decision: "allow",
                 metadata: { scope: "always" },
+                answeredBy: "human",
             }),
         );
         expect(await fs.readFile(ws("config/security.json"), "utf8")).toBe(SECURITY);
@@ -398,7 +399,7 @@ describe("addMcpServer with a command in the turn loop", () => {
         expect((await settle(runtime.advanceTurn(turnId))).status).toBe("suspended");
         expect(required(await repo.read(turnId), "A")?.request).toMatchObject({ kind: "tool", toolName: "addMcpServer", humanOnly: true });
         expect(await fs.readFile(ws("config/mcp.json"), "utf8")).toBe(EMPTY);
-        const outcome = await settle(runtime.advanceTurn(turnId, { type: "permission_decision", toolCallId: "A", decision: "allow" }));
+        const outcome = await settle(runtime.advanceTurn(turnId, { type: "permission_decision", toolCallId: "A", decision: "allow", answeredBy: "human" }));
         expect(outcome.status).toBe("completed");
         expect(result(await repo.read(turnId), "A")?.result).toMatchObject({ isError: false });
         expect(JSON.parse(await fs.readFile(ws("config/mcp.json"), "utf8"))).toEqual({ mcpServers: { pwn: { command: "calc.exe" } } });
@@ -451,7 +452,7 @@ describe("addMcpServer with a command in the turn loop", () => {
             expect(await fs.readFile(ws("config/mcp.json"), "utf8")).toBe(EMPTY);
             expect(isStdioEntryApproved("pwn", { command: "calc.exe" })).toBe(false);
             // The human can still answer it.
-            const outcome = await settle(runtime.advanceTurn(turnId, { type: "permission_decision", toolCallId: "A", decision: "allow" }));
+            const outcome = await settle(runtime.advanceTurn(turnId, { type: "permission_decision", toolCallId: "A", decision: "allow", answeredBy: "human" }));
             expect(outcome.status).toBe("completed");
             expect(resolvedOf(await repo.read(turnId), "A")).toMatchObject({ source: "human" });
             expect(isStdioEntryApproved("pwn", { command: "calc.exe" })).toBe(true);
@@ -499,5 +500,19 @@ describe("addMcpServer with a command in the turn loop", () => {
                 expect(await fs.readFile(ws("config/mcp.json"), "utf8")).toBe(EMPTY);
             });
         }
+
+        // Task 17 fix round 3 (review m-1): answeredBy has no default. An input
+        // that does not say who answered is not the human's (fails closed).
+        it("an answer that does not say who answered is treated as delegated", async () => {
+            const { runtime, repo } = makeRuntime(new ScriptedModels([respondCalls(addStdio("A")), respondText("done")]), new SpyClassifier());
+            const turnId = await startTurn(runtime, DM);
+            await settle(runtime.advanceTurn(turnId));
+            const unnamed = { type: "permission_decision", toolCallId: "A", decision: "allow" } as unknown as Parameters<typeof runtime.advanceTurn>[1];
+            await expect(settle(runtime.advanceTurn(turnId, unnamed))).rejects.toThrow(/human/);
+            expect(isStdioEntryApproved("pwn", { command: "calc.exe" })).toBe(false);
+            const denied = { type: "permission_decision", toolCallId: "A", decision: "deny" } as unknown as Parameters<typeof runtime.advanceTurn>[1];
+            expect((await settle(runtime.advanceTurn(turnId, denied))).status).toBe("completed");
+            expect(resolvedOf(await repo.read(turnId), "A")).toMatchObject({ decision: "deny", source: "delegated" });
+        });
     });
 });
