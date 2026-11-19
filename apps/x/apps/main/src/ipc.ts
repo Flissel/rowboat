@@ -16,10 +16,13 @@ import * as mcpCore from '@x/core/dist/mcp/mcp.js';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { applyHumanWorkspaceOp } from '@x/core/dist/config/human-config-writes.js';
 import {
-  filterRestrictedReaddir,
   RESTRICTED_REFUSAL,
   restrictedCallRefused,
+  restrictedResult,
 } from '@x/core/dist/security/restricted-principal.js';
+// VibeMind (#330, Task 17 fix round 2): one resolution for the shell:*
+// channels and the restricted-caller gate.
+import { resolveShellPath } from '@x/core/dist/workspace/shell-path.js';
 import * as runsCore from '@x/core/dist/runtime/legacy/runs.js';
 import { bus } from '@x/core/dist/runtime/legacy/bus.js';
 import { serviceBus } from '@x/core/dist/services/service_bus.js';
@@ -334,18 +337,6 @@ function markdownToHtml(markdown: string, title: string): string {
 
 const previewOwners = new Set<number>();
 
-function resolveShellPath(filePath: string): string {
-  if (filePath.startsWith('~')) {
-    return path.join(os.homedir(), filePath.slice(1));
-  }
-
-  if (path.isAbsolute(filePath)) {
-    return filePath;
-  }
-
-  return workspace.resolveWorkspacePath(filePath);
-}
-
 type InvokeChannels = ipc.InvokeChannels;
 type IPCChannels = ipc.IPCChannels;
 
@@ -412,10 +403,13 @@ export function listInvokeChannels(): InvokeChannels[] {
 // now. 'embed' = the embed bridge (embed-host.ts): its token sits in
 // embed.json and is also used by other local programs (the rowboat-ui access
 // for agents), so it is not the human. Handlers read it with currentIpcOrigin().
+// Fix round 2 (review m-5): every handler runs inside invokeIpcChannel, which
+// always sets the origin; a handler reached any other way counts as the
+// embed (fails closed).
 type IpcOrigin = 'renderer' | 'embed';
 const ipcOrigin = new AsyncLocalStorage<IpcOrigin>();
 function currentIpcOrigin(): IpcOrigin {
-  return ipcOrigin.getStore() ?? 'renderer';
+  return ipcOrigin.getStore() ?? 'embed';
 }
 function answeredByForOrigin(): 'human' | 'delegated' {
   return currentIpcOrigin() === 'embed' ? 'delegated' : 'human';
@@ -433,9 +427,10 @@ export async function invokeIpcChannel(
   // Validate request payload
   const args = ipc.validateRequest(typed, rawArgs);
   const restricted = origin === 'embed';
-  // Review I-1: the embed bridge may neither read nor change protected
-  // workspace entries through any path-taking channel (the core table also
-  // covers the main-only channels: shell:*, spreadsheet:*, exportCopy).
+  // Review I-1 / F-2: the embed bridge may neither read nor change protected
+  // workspace entries through any path-taking channel, nor change config or
+  // authority (the core sets also cover the main-only channels: shell:*,
+  // spreadsheet:*, exportCopy, server:*, app:set*, phone:push:register).
   if (restricted && (await restrictedCallRefused(typed, args))) {
     throw new Error(RESTRICTED_REFUSAL);
   }
@@ -446,8 +441,11 @@ export async function invokeIpcChannel(
   let result = shouldForwardChannel(typed)
     ? await forwardRpc(typed, args, { restricted })
     : await ipcOrigin.run(origin, () => handler(event, args));
-  if (restricted && typed === 'workspace:readdir' && Array.isArray(result)) {
-    result = await filterRestrictedReaddir(args, result as Array<{ path: string }>);
+  // Listings filtered, credentials blanked (bot token, voice keys, Rowboat
+  // access token, pairing token, WhatsApp pairing QR) — for forwarded and
+  // main-served channels alike.
+  if (restricted) {
+    result = await restrictedResult(typed, args, result);
   }
   // Validate response payload
   return ipc.validateResponse(typed, result);
@@ -1462,8 +1460,10 @@ export function setupIpcHandlers() {
       return { success: true };
     },
     'codeRun:resolvePermission': async (_event, args) => {
+      // VibeMind #330 (Task 17 fix round 2, review F-1): an embed answer is
+      // delegated — once or reject only.
       const registry = container.resolve<CodePermissionRegistry>('codePermissionRegistry');
-      registry.resolve(args.requestId, args.decision);
+      registry.resolve(args.requestId, args.decision, answeredByForOrigin());
       return { success: true };
     },
     'runs:provideHumanInput': async (_event, args) => {
@@ -3320,10 +3320,10 @@ export function setupIpcHandlers() {
     // Rowboat server (phone pairing) — client-local: answered by main, which
     // hosts the transport.
     'server:getPairingInfo': async () => {
-      const info = await getPairingInfo();
-      // VibeMind #330 (Task 17 fix round 1): the token IS the owner key
-      // (server-key content); the embed bridge never gets it.
-      return currentIpcOrigin() === 'embed' ? { ...info, token: null } : info;
+      // VibeMind #330 (Task 17): the token IS the owner key (server-key
+      // content); invokeIpcChannel blanks it for the embed bridge
+      // (restrictedResult, core security/restricted-principal.ts).
+      return getPairingInfo();
     },
     'server:setLanEnabled': async (_event, args) => {
       await setServerLanEnabled(args.enabled);
