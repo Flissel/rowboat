@@ -23,10 +23,10 @@ import {
 } from '@x/core/dist/config/human-config-writes.js';
 import { currentAuthKind } from './auth-context.js';
 import {
-  filterRestrictedReaddir,
-  RESTRICTED_PATH_CHANNELS,
+  RESTRICTED_GUARDED_CHANNELS,
   RESTRICTED_REFUSAL,
   restrictedCallRefused,
+  restrictedResult,
 } from '@x/core/dist/security/restricted-principal.js';
 import * as runsCore from '@x/core/dist/runtime/legacy/runs.js';
 import { getModelCatalog } from '@x/core/dist/models/catalog.js';
@@ -1474,7 +1474,9 @@ export function createCoreRpcHandlers(opts?: { sessionsIndexReady?: Promise<void
     // ── Phase 5: code-mode & terminal (verbatim lifts) ──
     'codeRun:resolvePermission': async (args) => {
       const registry = container.resolve<CodePermissionRegistry>('codePermissionRegistry');
-      registry.resolve(args.requestId, args.decision);
+      // VibeMind (#330, Task 17 fix round 2, review F-1): a non-owner answer
+      // is delegated — once or reject only.
+      registry.resolve(args.requestId, args.decision, answeredBy());
       return { success: true };
     },
     'codeMode:getConfig': async () => {
@@ -1644,28 +1646,31 @@ export function createCoreRpcHandlers(opts?: { sessionsIndexReady?: Promise<void
   return guardRestrictedCallers(handlers);
 }
 
-// VibeMind (ticket #330, Task 17 fix round 1, review I-1): a caller that is not
-// the owner (a scoped key, the owner key lowered by x-rowboat-principal for the
-// embed bridge, or no request context) may neither read nor change protected
-// workspace entries through any channel that takes a path
-// (@x/core security/restricted-principal.ts names them). A recursive listing
-// of the workspace drops what lies inside protected entries.
-function guardRestrictedCallers(handlers: RpcHandlers): RpcHandlers {
+// VibeMind (ticket #330, Task 17 fix round 1, review I-1; fix round 2, review
+// F-2): a caller that is not the owner (a scoped key, the owner key lowered by
+// x-rowboat-principal for the embed bridge, or no request context) may neither
+// read nor change protected workspace entries through any channel that takes
+// a path, may not change config or authority (the deny set and the
+// policy-setting calls), and gets credentials blanked and listings filtered
+// (@x/core security/restricted-principal.ts names every channel in
+// RESTRICTED_GUARDED_CHANNELS). Each wrapped handler carries
+// RESTRICTED_GUARD_MARK, so a test can find any guarded channel left unwrapped.
+export const RESTRICTED_GUARD_MARK: unique symbol = Symbol('restricted-guard');
+
+export function guardRestrictedCallers(handlers: RpcHandlers): RpcHandlers {
   const guarded: Record<string, (args: unknown) => unknown> = {};
   for (const [channel, handler] of Object.entries(handlers) as Array<[string, (args: unknown) => unknown]>) {
-    if (!RESTRICTED_PATH_CHANNELS.has(channel)) {
+    if (!RESTRICTED_GUARDED_CHANNELS.has(channel)) {
       guarded[channel] = handler;
       continue;
     }
-    guarded[channel] = async (args: unknown) => {
+    const wrapped = async (args: unknown) => {
       if (currentAuthKind() === 'owner') return handler(args);
       if (await restrictedCallRefused(channel, args)) throw new Error(RESTRICTED_REFUSAL);
-      const result = await handler(args);
-      if (channel === 'workspace:readdir' && Array.isArray(result)) {
-        return filterRestrictedReaddir(args, result as Array<{ path: string }>);
-      }
-      return result;
+      return restrictedResult(channel, args, await handler(args));
     };
+    Object.defineProperty(wrapped, RESTRICTED_GUARD_MARK, { value: true });
+    guarded[channel] = wrapped;
   }
   return guarded as RpcHandlers;
 }

@@ -32,6 +32,11 @@ type LlmStreamEvent = import('@x/core/dist/runtime/turns/model-registry.js').Llm
 type TEvent = z.infer<typeof TurnEvent>;
 type Call = { id: string; name: string; args: JsonValue };
 
+const restricted = await import('@x/core/dist/security/restricted-principal.js');
+type CodePermissionRegistry = import('@x/core/dist/code-mode/acp/permission-registry.js').CodePermissionRegistry;
+const { runWithAuth } = await import('./auth-context.js');
+const { isRpcChannel } = await import('./channels.js');
+
 const STDIO = { command: 'calc.exe' };
 const EMPTY = JSON.stringify({ mcpServers: {} });
 const KEY_MARKER = 'server-key-content-marker';
@@ -141,6 +146,7 @@ describe('restricted callers (scoped key, embed via the restricted header)', () 
     scoped = await addScopedKey(workDir, 'bot', [
       'workspace:readFile', 'workspace:readdir', 'workspace:stat', 'workspace:exists', 'workspace:writeFile',
       'sessions:respondToPermission', 'runs:authorizePermission',
+      'codeRun:resolvePermission', 'channels:getConfig', 'channels:setConfig', 'codeSession:update',
     ]);
     server = await createRowboatServer({
       workDir,
@@ -303,6 +309,153 @@ describe('restricted callers (scoped key, embed via the restricted header)', () 
       expect((await authorize('once', scoped)).status).toBe(200);
       expect(legacy.appended).toMatchObject([{ toolCallId: 'C', response: 'approve' }]);
       expect(security.getSecurityAllowList()).toEqual(['ls']);
+    });
+  });
+
+  // Fix round 2 (review F-1): the coding agent's mid-run asks.
+  describe('F-1: code-run permission answers', () => {
+    const registry = () => container.resolve<CodePermissionRegistry>('codePermissionRegistry');
+    function pendingAsk(): { id: string; decision: Promise<string> } {
+      let id = '';
+      const decision = registry().request('run-f1', (requestId) => { id = requestId; });
+      return { id, decision };
+    }
+
+    it('scoped key and embed header: allow_always is refused and the ask stays pending; allow_once is accepted as once-only', async () => {
+      const ask = pendingAsk();
+      const always = await call('codeRun:resolvePermission', { requestId: ask.id, decision: 'allow_always' }, scoped);
+      expect(always.status).not.toBe(200);
+      expect(always.json.error?.message).toMatch(/human's own answer/);
+      const embed = await call('codeRun:resolvePermission', { requestId: ask.id, decision: 'allow_always' }, server.key, RESTRICTED);
+      expect(embed.status).not.toBe(200);
+      const once = await call('codeRun:resolvePermission', { requestId: ask.id, decision: 'allow_once' }, scoped);
+      expect(once.status).toBe(200);
+      expect(await ask.decision).toBe('allow_once_only');
+    });
+
+    it('owner key: allow_always works', async () => {
+      const ask = pendingAsk();
+      const owner = await call('codeRun:resolvePermission', { requestId: ask.id, decision: 'allow_always' }, server.key);
+      expect(owner.status).toBe(200);
+      expect(await ask.decision).toBe('allow_always');
+    });
+  });
+
+  // Fix round 2 (review F-2): config and authority channels, credentials.
+  describe('F-2: config channels and credentials', () => {
+    const channelsFile = path.join(workDir, 'config', 'channels.json');
+    const CHANNELS = {
+      whatsapp: { enabled: false, allowFrom: [] },
+      telegram: { enabled: false, botToken: '123:TELEGRAM-SECRET', allowFrom: ['1'] },
+      readOnlyMcpTools: ['wissen:wissen_suchen'],
+    };
+
+    it('every denied and conditional channel served by the server is refused by the real handler table for a scoped caller; the rest are main-only', async () => {
+      const { createCoreRpcHandlers } = await import('./core-deps.js');
+      const handlers = createCoreRpcHandlers() as unknown as Record<string, (args: unknown) => Promise<unknown>>;
+      const served: string[] = [];
+      for (const channel of restricted.RESTRICTED_DENIED_CHANNELS.keys()) {
+        const handler = handlers[channel];
+        if (!handler) {
+          // Not a server channel: only main's IPC dispatch can serve it, and
+          // it checks the same set for the embed bridge.
+          expect(isRpcChannel(channel), channel).toBe(false);
+          continue;
+        }
+        served.push(channel);
+        await expect(runWithAuth('scoped', () => handler({})), channel).rejects.toThrow(restricted.RESTRICTED_REFUSAL);
+      }
+      expect(served.length).toBeGreaterThan(30);
+      const policy = [
+        ['codeSession:update', { sessionId: 's', patch: { policy: 'yolo' } }],
+        ['codeSession:create', { projectId: 'p', agent: 'claude', isolation: 'in-repo', policy: 'yolo' }],
+        ['runs:createMessage', { runId: 'r', message: 'hi', codePolicy: 'yolo' }],
+      ] as const;
+      for (const [channel, args] of policy) {
+        await expect(runWithAuth('scoped', () => handlers[channel]!(args)), channel).rejects.toThrow(restricted.RESTRICTED_REFUSAL);
+      }
+    });
+
+    it('scoped key and embed header: channels:setConfig is refused and channels.json is unchanged; the owner key writes it', async () => {
+      await fs.writeFile(channelsFile, JSON.stringify(CHANNELS));
+      const widened = { ...CHANNELS, telegram: { ...CHANNELS.telegram, allowFrom: ['1', '666'] }, readOnlyMcpTools: ['files:write'] };
+      expect((await call('channels:setConfig', widened, scoped)).status).not.toBe(200);
+      expect((await call('channels:setConfig', widened, server.key, RESTRICTED)).status).not.toBe(200);
+      expect(JSON.parse(await fs.readFile(channelsFile, 'utf8'))).toEqual(CHANNELS);
+      expect((await call('channels:setConfig', widened, server.key)).status).toBe(200);
+      expect(JSON.parse(await fs.readFile(channelsFile, 'utf8')).telegram.allowFrom).toEqual(['1', '666']);
+    });
+
+    it('scoped key and embed header: channels:getConfig has no bot token; the owner key sees it', async () => {
+      await fs.writeFile(channelsFile, JSON.stringify(CHANNELS));
+      for (const [token, headers] of [[scoped, {}], [server.key, RESTRICTED]] as const) {
+        const r = await call('channels:getConfig', null, token, headers);
+        expect(r.status).toBe(200);
+        expect(r.text).not.toContain('TELEGRAM-SECRET');
+        expect((r.json as unknown as typeof CHANNELS).telegram).toEqual({ ...CHANNELS.telegram, botToken: '' });
+      }
+      const owner = await call('channels:getConfig', null, server.key);
+      expect((owner.json as unknown as typeof CHANNELS).telegram.botToken).toBe('123:TELEGRAM-SECRET');
+    });
+
+    it('every guarded channel the real server handler map serves is wrapped by the guard', async () => {
+      const { createCoreRpcHandlers, RESTRICTED_GUARD_MARK } = await import('./core-deps.js');
+      const handlers = createCoreRpcHandlers() as unknown as Record<string, unknown>;
+      const unguarded: string[] = [];
+      let served = 0;
+      for (const channel of restricted.RESTRICTED_GUARDED_CHANNELS) {
+        const handler = handlers[channel] as Record<symbol, unknown> | undefined;
+        if (!handler) {
+          expect(isRpcChannel(channel), channel).toBe(false);
+          continue;
+        }
+        served++;
+        if (handler[RESTRICTED_GUARD_MARK] !== true) unguarded.push(channel);
+      }
+      expect(unguarded).toEqual([]);
+      expect(served).toBeGreaterThan(60);
+    });
+
+    it('the guard blanks the secret of every masked channel for a scoped caller, not for the owner', async () => {
+      const { guardRestrictedCallers } = await import('./core-deps.js');
+      const secrets: Record<string, unknown> = {
+        'channels:getConfig': { whatsapp: { enabled: false, allowFrom: [] }, telegram: { enabled: true, botToken: 'S-1', allowFrom: [] } },
+        'channels:getStatus': { whatsapp: { state: 'qr', qrDataUrl: 'S-2' }, telegram: { state: 'disabled' } },
+        'voice:getConfig': { deepgram: { apiKey: 'S-3' }, elevenlabs: { apiKey: 'S-4' } },
+        'account:getRowboat': { signedIn: true, accessToken: 'S-5' },
+        'server:getPairingInfo': { url: 'http://x', token: 'S-6' },
+      };
+      expect(Object.keys(secrets).sort()).toEqual([...restricted.RESTRICTED_MASKED_CHANNELS].sort());
+      const fake = Object.fromEntries(Object.entries(secrets).map(([k, v]) => [k, async () => structuredClone(v)]));
+      const guarded = guardRestrictedCallers(fake as never) as unknown as Record<string, (a: unknown) => Promise<unknown>>;
+      for (const channel of Object.keys(secrets)) {
+        const scopedResult = JSON.stringify(await runWithAuth('scoped', () => guarded[channel]!(null)));
+        expect(scopedResult, channel).not.toMatch(/S-\d/);
+        const ownerResult = JSON.stringify(await runWithAuth('owner', () => guarded[channel]!(null)));
+        expect(ownerResult, channel).toMatch(/S-\d/);
+      }
+    });
+
+    it('scoped key and embed header: voice:getConfig through the real handler returns no Deepgram key', async () => {
+      const file = path.join(workDir, 'config', 'deepgram.json');
+      await fs.writeFile(file, JSON.stringify({ apiKey: 'DEEPGRAM-SECRET' }));
+      try {
+        const { createCoreRpcHandlers } = await import('./core-deps.js');
+        const handlers = createCoreRpcHandlers() as unknown as Record<string, (a: unknown) => Promise<unknown>>;
+        const scopedResult = await runWithAuth('scoped', () => handlers['voice:getConfig']!(null));
+        expect(JSON.stringify(scopedResult)).not.toContain('DEEPGRAM-SECRET');
+        expect(scopedResult).toMatchObject({ deepgram: null });
+        const owner = await runWithAuth('owner', () => handlers['voice:getConfig']!(null));
+        expect(owner).toMatchObject({ deepgram: { apiKey: 'DEEPGRAM-SECRET' } });
+      } finally {
+        await fs.rm(file, { force: true });
+      }
+    });
+
+    it('scoped key: codeSession:update that sets a policy is refused before the session is looked up', async () => {
+      const r = await call('codeSession:update', { sessionId: 'nope', patch: { policy: 'yolo' } }, scoped);
+      expect(r.status).not.toBe(200);
+      expect(r.json.error?.message).toMatch(/protected workspace entries|may not/);
     });
   });
 });
