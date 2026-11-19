@@ -12,7 +12,17 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 const root = fsSync.realpathSync(fsSync.mkdtempSync(path.join(os.tmpdir(), "restricted-principal-ws-")));
 process.env.ROWBOAT_WORKDIR = root;
 
-const { restrictedCallRefused, filterRestrictedReaddir, RESTRICTED_PATH_CHANNELS } = await import("./restricted-principal.js");
+const {
+    restrictedCallRefused,
+    filterRestrictedReaddir,
+    restrictedResult,
+    RESTRICTED_PATH_CHANNELS,
+    RESTRICTED_DENIED_CHANNELS,
+    RESTRICTED_CONDITIONAL_CHANNELS,
+    RESTRICTED_MASKED_CHANNELS,
+    RESTRICTED_GUARDED_CHANNELS,
+} = await import("./restricted-principal.js");
+const { ipcSchemas } = await import("@x/shared/dist/ipc.js");
 
 const deps = { codeSessionCwd: async (id: string) => (id === "ws" ? root : id === "other" ? path.join(root, "knowledge") : null) };
 const refused = (channel: string, args: unknown) => restrictedCallRefused(channel, args, deps);
@@ -117,6 +127,125 @@ describe("restricted caller: recursive listing of the workspace", () => {
     it("a non-recursive listing is unchanged", async () => {
         const entries = [{ name: "config", path: "config", kind: "dir" as const }];
         expect(await filterRestrictedReaddir({ path: "" }, entries)).toEqual(entries);
+    });
+
+    // Fix round 2 (automated review): each entry is checked by its resolved
+    // path, not by its first lexical segment.
+    it("checks each entry by its resolved path: a listing requested as knowledge/.. or with backslashes", async () => {
+        const entries = [
+            { name: "config", path: "knowledge/../config", kind: "dir" as const },
+            { name: "mcp.json", path: "knowledge/../config/mcp.json", kind: "file" as const },
+            { name: "server-key", path: "knowledge/../server-key", kind: "file" as const },
+            { name: "mcp.json", path: "knowledge\\..\\config\\mcp.json", kind: "file" as const },
+            { name: "a.md", path: "knowledge/../knowledge/a.md", kind: "file" as const },
+        ];
+        const forward = await filterRestrictedReaddir({ path: "knowledge/..", opts: { recursive: true } }, entries);
+        expect(forward.map((e) => e.path)).toEqual(["knowledge/../config", "knowledge/../server-key", "knowledge/../knowledge/a.md"]);
+        const back = await filterRestrictedReaddir({ path: "knowledge\\..", opts: { recursive: true } }, entries);
+        expect(back.map((e) => e.path)).toEqual(forward.map((e) => e.path));
+    });
+});
+
+describe("restricted caller: shell path channels resolve the path as the consumer does", () => {
+    it.each([
+        ["shell:readFileBase64", { path: "~.rowboat/server-key" }],
+        ["shell:readFileBase64", { path: "~server-key" }],
+        ["shell:previewFile", { path: "~x" }],
+        ["shell:readFileBase64", { path: "knowledge/../server-key" }],
+        ["shell:readFileBase64", { path: "config\\mcp.json" }],
+    ])("%s %j is refused", async (channel, args) => {
+        expect(await refused(channel, args)).toBe(true);
+    });
+
+    it("~, ~/ and ~\\ resolve to the home folder as in main", async () => {
+        expect(await refused("shell:readFileBase64", { path: "~/x.txt" })).toBe(false);
+        expect(await refused("shell:readFileBase64", { path: "~\\x.txt" })).toBe(false);
+    });
+});
+
+describe("restricted caller: config and authority channels (review F-2)", () => {
+    it("every denied channel is refused whatever its arguments", async () => {
+        for (const channel of RESTRICTED_DENIED_CHANNELS.keys()) {
+            expect(await refused(channel, {}), channel).toBe(true);
+            expect(await refused(channel, null), channel).toBe(true);
+        }
+    });
+
+    it("names real channels only, each with what it writes", () => {
+        const known = new Set(Object.keys(ipcSchemas));
+        for (const channel of [...RESTRICTED_DENIED_CHANNELS.keys(), ...RESTRICTED_CONDITIONAL_CHANNELS, ...RESTRICTED_MASKED_CHANNELS]) {
+            expect(known.has(channel), channel).toBe(true);
+        }
+        for (const [channel, writes] of RESTRICTED_DENIED_CHANNELS) {
+            expect(writes.length, channel).toBeGreaterThan(0);
+        }
+        for (const channel of [...RESTRICTED_DENIED_CHANNELS.keys(), ...RESTRICTED_CONDITIONAL_CHANNELS, ...RESTRICTED_MASKED_CHANNELS, ...RESTRICTED_PATH_CHANNELS]) {
+            expect(RESTRICTED_GUARDED_CHANNELS.has(channel), channel).toBe(true);
+        }
+    });
+
+    it("covers the channels the ruling names", () => {
+        for (const channel of [
+            "channels:setConfig", "codeMode:setConfig", "agent-schedule:updateAgent",
+            "server:connectRemote", "server:rotateKey", "server:setLanEnabled",
+            "models:setProvider", "models:updateConfig", "slack:setConfig", "granola:setConfig",
+            "notifications:setSettings", "turnLimits:setSettings", "retention:setSettings", "knowledgeSources:upsert",
+        ]) {
+            expect(RESTRICTED_DENIED_CHANNELS.has(channel), channel).toBe(true);
+        }
+    });
+
+    it.each([
+        ["codeSession:update", { sessionId: "s", patch: { policy: "yolo" } }],
+        ["codeSession:update", { sessionId: "s", patch: { policy: "ask" } }],
+        ["codeSession:update", { sessionId: "s", patch: { clearPolicy: true } }],
+        ["codeSession:update", { sessionId: "s" }],
+        ["codeSession:create", { projectId: "p", agent: "claude", isolation: "in-repo", policy: "yolo" }],
+        ["runs:createMessage", { runId: "r", message: "hi", codePolicy: "yolo" }],
+    ])("%s %j is refused", async (channel, args) => {
+        expect(await refused(channel, args)).toBe(true);
+    });
+
+    it.each([
+        ["codeSession:update", { sessionId: "s", patch: { title: "t", agentModel: "opus" } }],
+        ["codeSession:create", { projectId: "p", agent: "claude", isolation: "in-repo" }],
+        ["runs:createMessage", { runId: "r", message: "hi" }],
+        ["sessions:sendMessage", { sessionId: "s", input: { role: "user", content: "hi" } }],
+    ])("%s %j stays allowed", async (channel, args) => {
+        expect(await refused(channel, args)).toBe(false);
+    });
+});
+
+describe("restricted caller: getters that return credentials (review F-2)", () => {
+    it("channels:getConfig drops the Telegram bot token, keeps the rest", async () => {
+        const config = {
+            whatsapp: { enabled: true, allowFrom: ["49"] },
+            telegram: { enabled: true, botToken: "123:SECRET", allowFrom: ["7"] },
+            readOnlyMcpTools: ["a:b"],
+        };
+        const masked = await restrictedResult("channels:getConfig", null, config);
+        expect(masked).toEqual({ ...config, telegram: { ...config.telegram, botToken: "" } });
+        expect(JSON.stringify(masked)).not.toContain("SECRET");
+        expect(config.telegram.botToken).toBe("123:SECRET");
+    });
+
+    it("channels:getStatus drops the WhatsApp pairing QR", async () => {
+        const status = { whatsapp: { state: "qr", qrDataUrl: "data:image/png;base64,QR" }, telegram: { state: "polling", botUsername: "b" } };
+        expect(await restrictedResult("channels:getStatus", null, status)).toEqual({ whatsapp: { state: "qr" }, telegram: status.telegram });
+    });
+
+    it("voice:getConfig, account:getRowboat and server:getPairingInfo return no key or token", async () => {
+        expect(await restrictedResult("voice:getConfig", null, { deepgram: { apiKey: "dg" }, elevenlabs: { apiKey: "el", voiceId: "v" } }))
+            .toEqual({ deepgram: null, elevenlabs: null });
+        expect(await restrictedResult("account:getRowboat", null, { signedIn: true, accessToken: "tok", config: { a: 1 } }))
+            .toEqual({ signedIn: true, accessToken: null, config: { a: 1 } });
+        expect(await restrictedResult("server:getPairingInfo", null, { url: "http://x", token: "owner" }))
+            .toEqual({ url: "http://x", token: null });
+    });
+
+    it("other results pass through unchanged", async () => {
+        const result = { a: 1 };
+        expect(await restrictedResult("sessions:list", null, result)).toBe(result);
     });
 });
 
