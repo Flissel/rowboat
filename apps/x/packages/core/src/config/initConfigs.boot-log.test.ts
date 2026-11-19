@@ -58,6 +58,39 @@ describe("trust on boot log", () => {
         }
     });
 
+    // Fix round 2 (review m-2): a command that carries its arguments logs
+    // only the basename of its first token.
+    it("logs only the basename of the first token of a command with embedded arguments", async () => {
+        await fs.writeFile(securityFile, JSON.stringify({ allowedCommands: [], allowedFileAccess: [] }));
+        const lines: string[] = [];
+        await trustConfigsOnBoot(
+            repoWith({
+                mcpServers: {
+                    a: { command: "@scope/srv --token=X" },
+                    b: { command: "npx -y @scope/srv --token=Y" },
+                    c: { command: "  C:\\bin\\tool.exe --key=Z" },
+                },
+            }),
+            (line) => lines.push(line),
+        );
+        expect(lines.slice(0, 3)).toEqual([
+            "[config] trust on boot: stdio MCP server \"a\" approved (command srv)",
+            "[config] trust on boot: stdio MCP server \"b\" approved (command npx)",
+            "[config] trust on boot: stdio MCP server \"c\" approved (command tool.exe)",
+        ]);
+        expect(lines.join("\n")).not.toMatch(/token|--key|scope/);
+    });
+
+    it("an unreadable mcp.json is logged without the error text (it can quote the file)", async () => {
+        await fs.writeFile(securityFile, JSON.stringify({ allowedCommands: [], allowedFileAccess: [] }));
+        const lines: string[] = [];
+        const warnings: string[] = [];
+        const broken = { getConfig: async () => { throw new SyntaxError('Unexpected token in JSON at "sk-FILE-CONTENT"'); } } as unknown as Parameters<typeof trustConfigsOnBoot>[0];
+        await trustConfigsOnBoot(broken, (line) => lines.push(line), (line) => warnings.push(line));
+        expect(warnings).toEqual(["[config] trust on boot: config/mcp.json is not valid JSON; no stdio MCP server is approved"]);
+        expect([...lines, ...warnings].join("\n")).not.toContain("sk-FILE-CONTENT");
+    });
+
     it("says when \"*\" is allow-listed", async () => {
         await fs.writeFile(securityFile, JSON.stringify(["*", "ls"]));
         const lines: string[] = [];

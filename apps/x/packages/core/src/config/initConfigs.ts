@@ -38,24 +38,33 @@ export async function initConfigs(): Promise<void> {
 // Fix round 1 (review m-5): logs what it approved — one line per stdio entry
 // (server name and command basename only: args and env values can hold
 // secrets) and one line with the number of allow-listed commands and whether
-// "*" is among them. `log` is injectable for tests.
+// "*" is among them. `log` and `warn` are injectable for tests.
+// Fix round 2 (review m-2): only the basename of the first whitespace-
+// separated token of `command` is logged (a command can carry its args, e.g.
+// "@scope/srv --token=X"), and a read or parse failure is logged without its
+// error text (a JSON parse error can quote the file).
 export async function trustConfigsOnBoot(
     mcpConfigRepo: IMcpConfigRepo,
     log: (line: string) => void = (line) => console.log(line),
+    warn: (line: string) => void = (line) => console.warn(line),
 ): Promise<void> {
     try {
         const config = await mcpConfigRepo.getConfig();
         approveAllFromConfig(config);
         for (const [name, entry] of Object.entries(config.mcpServers)) {
             if (!("command" in entry)) continue;
-            const basename = entry.command.split(/[\\/]/).pop() || entry.command;
-            log(`[config] trust on boot: stdio MCP server ${JSON.stringify(name)} approved (command ${basename})`);
+            log(`[config] trust on boot: stdio MCP server ${JSON.stringify(name)} approved (command ${commandBasename(entry.command)})`);
         }
-    } catch (error) {
-        console.warn(`[config] mcp.json could not be read at startup; no stdio MCP server is approved: ${error instanceof Error ? error.message : String(error)}`);
+    } catch {
+        warn("[config] trust on boot: config/mcp.json is not valid JSON; no stdio MCP server is approved");
     }
     reloadSecurityConfig();
     const commands = getSecurityAllowList();
     const star = commands.includes("*") ? "\"*\" present (unrestricted shell)" : "\"*\" not present";
     log(`[config] trust on boot: ${commands.length} allow-listed commands, ${star}`);
+}
+
+function commandBasename(command: string): string {
+    const first = command.trim().split(/\s+/)[0] ?? "";
+    return first.split(/[\\/]/).pop() || "(empty)";
 }
